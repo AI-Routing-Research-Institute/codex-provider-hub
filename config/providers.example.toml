@@ -1,0 +1,103 @@
+[service]
+database_path = "/var/lib/codex-provider-probe/private/status.sqlite3"
+public_database_path = "/var/lib/codex-provider-probe/public/status.sqlite3"
+temp_root = "/var/lib/codex-provider-probe/private/tmp"
+codex_bin = "/opt/codex-provider-probe/runtime/node_modules/.bin/codex"
+
+[[providers]]
+id = "provider-primary"
+name = "Provider Primary"
+base_url = "https://primary.example.com/v1"
+credential_name = "provider_primary_api_key"
+probe_mode = "automatic"
+models = ["gpt-5.6-sol", "gpt-5.5"]
+display_models = ["gpt-5.6-sol", "gpt-5.5"]
+healthy_interval_seconds = 600
+healthy_interval_max_seconds = 1200
+unhealthy_interval_seconds = 120
+unhealthy_interval_max_seconds = 300
+timeout_seconds = 90
+
+[[providers]]
+id = "provider-alpha"
+name = "Provider Alpha"
+base_url = "https://alpha.example.com/v1"
+credential_name = "provider_alpha_api_key"
+probe_mode = "automatic"
+models = ["gpt-5.6-sol", "gpt-5.5"]
+display_models = ["gpt-5.6-sol", "gpt-5.5"]
+healthy_interval_seconds = 600
+healthy_interval_max_seconds = 1200
+unhealthy_interval_seconds = 120
+unhealthy_interval_max_seconds = 300
+timeout_seconds = 90
+
+[[providers]]
+id = "provider-beta"
+name = "Provider Beta"
+base_url = "https://beta.example.com/v1"
+credential_name = "provider_beta_api_key"
+probe_mode = "automatic"
+models = ["gpt-5.6-sol"]
+display_models = ["gpt-5.6-sol", "gpt-5.5"]
+healthy_interval_seconds = 600
+healthy_interval_max_seconds = 1200
+unhealthy_interval_seconds = 120
+unhealthy_interval_max_seconds = 300
+timeout_seconds = 90
+
+[[providers]]
+id = "provider-gamma"
+name = "Provider Gamma"
+base_url = "https://gamma.example.com/v1"
+credential_name = "provider_gamma_api_key"
+probe_mode = "automatic"
+models = ["gpt-5.6-sol", "gpt-5.5"]
+display_models = ["gpt-5.6-sol", "gpt-5.5"]
+healthy_interval_seconds = 600
+healthy_interval_max_seconds = 1200
+unhealthy_interval_seconds = 120
+unhealthy_interval_max_seconds = 300
+timeout_seconds = 90
+
+[[providers]]
+id = "provider-delta"
+name = "Provider Delta"
+base_url = "https://delta.example.com/v1"
+credential_name = "provider_delta_api_key"
+probe_mode = "automatic"
+models = ["gpt-5.6-sol"]
+display_models = ["gpt-5.6-sol", "gpt-5.5"]
+healthy_interval_seconds = 600
+healthy_interval_max_seconds = 1200
+unhealthy_interval_seconds = 120
+unhealthy_interval_max_seconds = 300
+timeout_seconds = 90
+
+[[providers]]
+id = "provider-epsilon"
+name = "Provider Epsilon"
+base_url = "https://epsilon.example.com/v1"
+credential_name = "provider_epsilon_api_key"
+probe_mode = "automatic"
+models = ["gpt-5.6-sol"]
+display_models = ["gpt-5.6-sol", "gpt-5.5"]
+healthy_interval_seconds = 600
+healthy_interval_max_seconds = 1200
+unhealthy_interval_seconds = 120
+unhealthy_interval_max_seconds = 300
+timeout_seconds = 90
+
+[[providers]]
+id = "provider-zeta"
+name = "Provider Zeta"
+base_url = "https://zeta.example.com/v1"
+credential_name = "provider_zeta_api_key"
+probe_mode = "automatic"
+models = ["gpt-5.6-sol"]
+display_models = ["gpt-5.6-sol", "gpt-5.5"]
+healthy_interval_seconds = 600
+healthy_interval_max_seconds = 1200
+unhealthy_interval_seconds = 120
+unhealthy_interval_max_seconds = 300
+timeout_seconds = 90

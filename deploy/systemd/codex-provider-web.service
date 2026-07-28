@@ -1,0 +1,44 @@
+[Unit]
+Description=Codex provider public status page
+After=network.target codex-provider-worker.service
+ConditionPathExists=/etc/codex-provider-probe/providers.toml
+
+[Service]
+Type=simple
+User=codex-provider-web
+Group=codex-provider-web
+SupplementaryGroups=codex-provider-control
+WorkingDirectory=/opt/codex-provider-probe/app
+ExecStart=/opt/codex-provider-probe/venv/bin/python -m provider_status.web --database /var/lib/codex-provider-probe/public/status.sqlite3 --control-database /var/lib/codex-provider-probe/control/manual-probes.sqlite3 --host 127.0.0.1 --port __WEB_PORT__
+Environment=PYTHONUNBUFFERED=1
+UMask=0007
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/var/lib/codex-provider-probe/public
+ReadWritePaths=/var/lib/codex-provider-probe/control
+InaccessiblePaths=/var/lib/codex-provider-probe/private
+TasksMax=64
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

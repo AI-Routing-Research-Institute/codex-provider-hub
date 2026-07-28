@@ -1,0 +1,56 @@
+[Unit]
+Description=Codex provider adaptive probe worker
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/codex-provider-probe/providers.toml
+ConditionPathExists=/etc/codex-provider-probe/secrets/provider_primary_api_key
+ConditionPathExists=/etc/codex-provider-probe/secrets/provider_alpha_api_key
+ConditionPathExists=/etc/codex-provider-probe/secrets/provider_gamma_api_key
+ConditionPathExists=/etc/codex-provider-probe/secrets/provider_beta_api_key
+ConditionPathExists=/etc/codex-provider-probe/secrets/provider_delta_api_key
+ConditionPathExists=/etc/codex-provider-probe/secrets/provider_epsilon_api_key
+ConditionPathExists=/etc/codex-provider-probe/secrets/provider_zeta_api_key
+
+[Service]
+Type=simple
+User=codex-provider
+Group=codex-provider
+SupplementaryGroups=codex-provider-control
+WorkingDirectory=/opt/codex-provider-probe/app
+ExecStart=/opt/codex-provider-probe/venv/bin/python -m provider_status.worker --config /etc/codex-provider-probe/providers.toml --control-database /var/lib/codex-provider-probe/control/manual-probes.sqlite3
+LoadCredential=provider_primary_api_key:/etc/codex-provider-probe/secrets/provider_primary_api_key
+LoadCredential=provider_alpha_api_key:/etc/codex-provider-probe/secrets/provider_alpha_api_key
+LoadCredential=provider_gamma_api_key:/etc/codex-provider-probe/secrets/provider_gamma_api_key
+LoadCredential=provider_beta_api_key:/etc/codex-provider-probe/secrets/provider_beta_api_key
+LoadCredential=provider_delta_api_key:/etc/codex-provider-probe/secrets/provider_delta_api_key
+LoadCredential=provider_epsilon_api_key:/etc/codex-provider-probe/secrets/provider_epsilon_api_key
+LoadCredential=provider_zeta_api_key:/etc/codex-provider-probe/secrets/provider_zeta_api_key
+Environment=PYTHONUNBUFFERED=1
+UMask=0007
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=110s
+KillMode=control-group
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/codex-provider-probe/private /var/lib/codex-provider-probe/public /var/lib/codex-provider-probe/control
+TasksMax=128
+MemoryMax=1536M
+
+[Install]
+WantedBy=multi-user.target

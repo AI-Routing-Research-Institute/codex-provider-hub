@@ -1,0 +1,36 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.worktrees/
+
+# Local private configuration and credentials
+config/providers.toml
+config/*.private.toml
+.env
+.env.*
+!.env.example
+secrets/
+private/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Probe reports and one-off diagnostics
+reports/
+probe-result*.json
+probe-debug*.json
+direct-current-response.txt
+*.log
+*.tmp
+
+# Local proxy/control databases created during desktop runs
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*

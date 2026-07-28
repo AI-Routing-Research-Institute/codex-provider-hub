@@ -1,0 +1,1245 @@
+import json
+import sqlite3
+import socket
+import tempfile
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import httpx
+
+from codex_local_proxy import (
+    LocalProxyServer,
+    ProviderRouter,
+    ProxyProvider,
+    RetryPolicy,
+    RetryPolicyStore,
+    TokenUsage,
+    UsageCapture,
+    UsageStore,
+    create_proxy_app,
+    filter_self_referencing_providers,
+    load_proxy_providers,
+    order_proxy_providers,
+)
+
+
+def provider(
+    provider_id: str,
+    *,
+    current: bool = False,
+    api_key: str | None = "test-upstream-credential",
+) -> ProxyProvider:
+    return ProxyProvider(
+        provider_id=provider_id,
+        name=provider_id.title(),
+        base_url=f"https://{provider_id}.example.test/v1",
+        is_cc_switch_current=current,
+        api_key=api_key,
+    )
+
+
+class ProviderRouterTests(unittest.TestCase):
+    def test_switch_affects_new_requests_without_moving_active_request(self) -> None:
+        router = ProviderRouter((provider("first", current=True), provider("second")))
+
+        first_request = router.begin_request()
+        router.select("second")
+        second_request = router.begin_request()
+
+        self.assertEqual(first_request.provider.provider_id, "first")
+        self.assertEqual(second_request.provider.provider_id, "second")
+        self.assertEqual(router.status().active_by_provider, {"first": 1, "second": 1})
+        router.finish_request(first_request, status_code=200)
+        self.assertEqual(router.status().active_by_provider, {"second": 1})
+
+    def test_retry_can_move_active_request_to_current_provider(self) -> None:
+        router = ProviderRouter((provider("first", current=True), provider("second")))
+        request = router.begin_request()
+        router.record_retry(
+            request,
+            attempt=2,
+            max_attempts=-1,
+            delay_seconds=2,
+            kind="http_503",
+        )
+
+        router.select("second")
+        rerouted, changed = router.route_retry_to_current(request)
+
+        self.assertTrue(changed)
+        self.assertEqual(rerouted.request_id, request.request_id)
+        self.assertEqual(rerouted.provider.provider_id, "second")
+        status = router.status()
+        self.assertEqual(status.active_by_provider, {"second": 1})
+        self.assertEqual(
+            status.retrying_by_request[request.request_id].provider_id,
+            "second",
+        )
+        router.record_retry(
+            rerouted,
+            attempt=3,
+            max_attempts=-1,
+            delay_seconds=0,
+            kind="http_503",
+            error_provider_id="first",
+        )
+        self.assertEqual(router.status().recent_retry_errors[0].provider_id, "first")
+        router.finish_request(rerouted, status_code=200)
+        self.assertEqual(router.status().active_by_provider, {})
+
+    def test_refresh_preserves_selection_and_falls_back_safely(self) -> None:
+        router = ProviderRouter((provider("first"), provider("second", current=True)))
+        router.select("first")
+
+        router.replace_providers((provider("first"), provider("third")))
+        self.assertEqual(router.current_provider().provider_id, "first")
+
+        router.replace_providers((provider("third", current=True),))
+        self.assertEqual(router.current_provider().provider_id, "third")
+
+    def test_provider_repr_never_contains_upstream_credential(self) -> None:
+        upstream = provider("private", api_key="credential-that-must-not-appear")
+
+        self.assertNotIn("credential-that-must-not-appear", repr(upstream))
+
+    def test_concurrent_retries_are_tracked_per_request(self) -> None:
+        router = ProviderRouter((provider("same", current=True),))
+        first = router.begin_request()
+        second = router.begin_request()
+
+        router.record_retry(first, attempt=2, max_attempts=-1, delay_seconds=1, kind="connection")
+        router.record_retry(second, attempt=4, max_attempts=-1, delay_seconds=4, kind="http_503")
+
+        status = router.status()
+        self.assertEqual(len(status.retrying_by_request), 2)
+        self.assertEqual({item.attempt for item in status.retrying_by_request.values()}, {2, 4})
+        self.assertEqual(len(status.recent_retry_errors), 2)
+        self.assertEqual(status.recent_retry_errors[0].attempt, 3)
+        router.finish_request(first, status_code=200)
+        self.assertEqual(len(router.status().retrying_by_request), 1)
+        router.finish_request(second, status_code=200)
+
+    def test_retry_history_redacts_sensitive_error_details(self) -> None:
+        router = ProviderRouter((provider("selected", current=True),))
+        request = router.begin_request()
+
+        router.record_retry(
+            request,
+            attempt=2,
+            max_attempts=4,
+            delay_seconds=1,
+            kind="http_503",
+            error_summary='"Authorization": "Bearer fixture-private-token"',
+        )
+
+        status = router.status()
+        self.assertEqual(len(status.recent_retry_errors), 1)
+        self.assertIn("[已隐藏]", status.recent_retry_errors[0].summary)
+        self.assertNotIn("fixture-private-token", status.recent_retry_errors[0].summary)
+
+        for attempt in range(3, 9):
+            router.record_retry(
+                request,
+                attempt=attempt,
+                max_attempts=-1,
+                delay_seconds=1,
+                kind="connection",
+            )
+        self.assertEqual(len(router.status().recent_retry_errors), 5)
+
+    def test_local_order_is_stable_and_self_provider_is_removed(self) -> None:
+        first = provider("first")
+        second = provider("second")
+        loop = ProxyProvider(
+            provider_id="local-loop",
+            name="Codex 本地中转",
+            base_url="http://localhost:17890/v1",
+            is_cc_switch_current=False,
+            api_key="placeholder",
+        )
+
+        filtered = filter_self_referencing_providers((first, loop, second), 17890)
+        ordered = order_proxy_providers(filtered, ("second", "stale"))
+
+        self.assertEqual([item.provider_id for item in ordered], ["second", "first"])
+
+
+class UsageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_context.cleanup)
+        self.store = UsageStore(Path(self.temp_context.name) / "usage.sqlite3")
+
+    def test_upstream_usage_wins_over_local_estimate(self) -> None:
+        capture = UsageCapture(
+            b'{"model":"gpt-5","input":"this would be estimated"}',
+            "responses",
+        )
+        capture.feed(
+            b'data: {"type":"response.completed","response":{"usage":'
+            b'{"input_tokens":101,"output_tokens":23,"total_tokens":124,'
+            b'"input_tokens_details":{"cached_tokens":40},'
+            b'"output_tokens_details":{"reasoning_tokens":7}}}}\n\n'
+        )
+
+        usage = capture.finalize(200)
+
+        self.assertEqual(
+            usage,
+            TokenUsage(101, 23, 124, 40, 7, source="upstream"),
+        )
+
+    def test_missing_usage_estimates_input_and_streamed_output(self) -> None:
+        capture = UsageCapture(
+            b'{"model":"gpt-5","instructions":"be concise",'
+            b'"input":[{"type":"message","content":'
+            b'[{"type":"input_text","text":"hello world"}]}]}',
+            "responses",
+        )
+        capture.feed(
+            b'data: {"type":"response.output_text.delta","delta":"hello back"}\n\n'
+        )
+
+        usage = capture.finalize(200)
+
+        self.assertIsNotNone(usage)
+        self.assertEqual(usage.source, "estimated")
+        self.assertGreater(usage.input_tokens, 0)
+        self.assertGreater(usage.output_tokens, 0)
+        self.assertEqual(usage.total_tokens, usage.input_tokens + usage.output_tokens)
+
+    def test_sqlite_summary_uses_exact_168_hour_window(self) -> None:
+        now = 2_000_000.0
+        self.store.record(
+            provider_id="inside",
+            model="gpt-5",
+            usage=TokenUsage(10, 5, 15, source="upstream"),
+            status_code=200,
+            recorded_at=now - 7 * 24 * 3600 + 1,
+        )
+        self.store.record(
+            provider_id="outside",
+            model="gpt-5",
+            usage=TokenUsage(100, 50, 150, source="estimated"),
+            status_code=200,
+            recorded_at=now - 7 * 24 * 3600 - 1,
+        )
+
+        summary = self.store.summary("7d", now=now)
+
+        self.assertEqual(summary["total"]["total_tokens"], 15)
+        self.assertEqual(summary["total"]["request_count"], 1)
+        self.assertEqual(set(summary["by_provider"]), {"inside"})
+
+    def test_usage_database_never_stores_request_or_response_content(self) -> None:
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5",
+            usage=TokenUsage(1, 2, 3),
+            status_code=200,
+        )
+        connection = sqlite3.connect(self.store.path)
+        try:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(request_usage)")
+            }
+        finally:
+            connection.close()
+
+        self.assertNotIn("request_body", columns)
+        self.assertNotIn("response_body", columns)
+        self.assertNotIn("api_key", columns)
+
+
+class CCSourceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_context.cleanup)
+        self.database = Path(self.temp_context.name) / "cc-switch.db"
+        connection = sqlite3.connect(self.database)
+        connection.executescript(
+            """
+            CREATE TABLE providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                is_current INTEGER NOT NULL,
+                settings_config TEXT NOT NULL,
+                meta TEXT,
+                app_type TEXT NOT NULL,
+                sort_index INTEGER,
+                created_at TEXT
+            );
+            CREATE TABLE provider_endpoints (
+                provider_id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                url TEXT
+            );
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+            """
+        )
+        payload = {
+            "config": """
+model_provider = "custom"
+[model_providers.custom]
+base_url = "https://upstream.example.test/v1/"
+env_key = "UPSTREAM_KEY"
+wire_api = "responses"
+[model_providers.custom.http_headers]
+X-Client = "codex-local-proxy"
+[model_providers.custom.env_http_headers]
+X-Extra-Auth = "EXTRA_AUTH"
+[model_providers.custom.query_params]
+api-version = "2026-07-01"
+""",
+            "auth": {
+                "UPSTREAM_KEY": "fixture-primary-credential",
+                "EXTRA_AUTH": "fixture-extra-credential",
+            },
+        }
+        connection.execute(
+            """INSERT INTO providers
+               (id, name, is_current, settings_config, meta, app_type, sort_index, created_at)
+               VALUES (?, ?, 1, ?, '{}', 'codex', 1, '2026-07-27')""",
+            ("fixture", "Fixture", json.dumps(payload)),
+        )
+        connection.execute(
+            "INSERT INTO provider_endpoints VALUES (?, 'codex', ?)",
+            ("fixture", "https://fallback.example.test/v1"),
+        )
+        connection.execute(
+            "INSERT INTO settings VALUES ('common_config_codex', '')"
+        )
+        connection.commit()
+        connection.close()
+
+    def test_loads_effective_provider_from_read_only_database(self) -> None:
+        providers = load_proxy_providers(self.database)
+
+        self.assertEqual(len(providers), 1)
+        loaded = providers[0]
+        self.assertEqual(loaded.name, "Fixture")
+        self.assertEqual(loaded.base_url, "https://upstream.example.test/v1")
+        self.assertTrue(loaded.has_credentials)
+        self.assertEqual(loaded.configured_headers["X-Client"], "codex-local-proxy")
+        self.assertIn("X-Extra-Auth", loaded.configured_headers)
+        self.assertEqual(loaded.default_query, {"api-version": "2026-07-01"})
+
+
+class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_usage_is_persisted_for_final_provider(self) -> None:
+        class UsageStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+                yield (
+                    b'data: {"type":"response.completed","response":{"usage":'
+                    b'{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}\n\n'
+                )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=UsageStream(),
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            usage_store = UsageStore(Path(temp_dir) / "usage.sqlite3")
+            upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = create_proxy_app(
+                ProviderRouter((provider("selected", current=True),)),
+                client=upstream_client,
+                usage_store=usage_store,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            )
+            try:
+                response = await client.post(
+                    "/v1/responses",
+                    json={"model": "gpt-5", "input": "hello"},
+                )
+                status = (
+                    await client.get("/control/api/status?usage_window=all")
+                ).json()
+            finally:
+                await client.aclose()
+                await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(status["usage"]["total"]["total_tokens"], 15)
+        self.assertEqual(status["usage"]["total"]["estimated_requests"], 0)
+        self.assertEqual(
+            status["usage"]["by_provider"]["selected"]["input_tokens"], 12
+        )
+
+    async def test_provider_visibility_and_order_control_api(self) -> None:
+        hidden_changes: list[tuple[str, ...]] = []
+        order_changes: list[tuple[str, ...]] = []
+        router = ProviderRouter((provider("first", current=True), provider("second")))
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            on_hidden_provider_ids_changed=hidden_changes.append,
+            on_provider_order_changed=order_changes.append,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+        headers = {"X-Local-Proxy-Control": "1"}
+
+        current_hidden = await client.post(
+            "/control/api/providers/first/visibility",
+            headers=headers,
+            json={"hidden": True},
+        )
+        hidden = await client.post(
+            "/control/api/providers/second/visibility",
+            headers=headers,
+            json={"hidden": True},
+        )
+        reordered = await client.post(
+            "/control/api/providers/order",
+            headers=headers,
+            json={"provider_ids": ["second", "first"]},
+        )
+
+        self.assertEqual(current_hidden.status_code, 409)
+        self.assertTrue(hidden.json()["providers"][1]["hidden"])
+        self.assertEqual(
+            [item["provider_id"] for item in reordered.json()["providers"]],
+            ["second", "first"],
+        )
+        self.assertEqual(hidden_changes, [("second",)])
+        self.assertEqual(order_changes, [("second", "first")])
+
+    async def test_infinite_retry_mode_recovers_without_fixed_attempt_limit(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 6:
+                return httpx.Response(503, content=b"temporary")
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 7)
+
+    async def test_failed_retry_is_transparently_taken_over_by_new_provider(self) -> None:
+        observed: list[dict[str, object]] = []
+        first = ProxyProvider(
+            provider_id="first",
+            name="First",
+            base_url="https://first.example.test/v1",
+            is_cc_switch_current=True,
+            api_key="first-upstream-key",
+            configured_headers={"X-Provider-Route": "first"},
+            default_query={"provider": "first"},
+        )
+        second = ProxyProvider(
+            provider_id="second",
+            name="Second",
+            base_url="https://second.example.test/v1",
+            is_cc_switch_current=False,
+            api_key="second-upstream-key",
+            configured_headers={"X-Provider-Route": "second"},
+            default_query={"provider": "second"},
+        )
+        router = ProviderRouter((first, second))
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            observed.append(
+                {
+                    "url": str(request.url),
+                    "authorization": request.headers.get("authorization"),
+                    "route": request.headers.get("x-provider-route"),
+                    "body": await request.aread(),
+                }
+            )
+            if request.url.host == "first.example.test":
+                router.select("second")
+                return httpx.Response(
+                    503,
+                    json={"error": {"message": "no available channel"}},
+                )
+            return httpx.Response(200, content=b"recovered by second")
+
+        sleeps: list[float] = []
+
+        async def no_wait(delay: float) -> None:
+            sleeps.append(delay)
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1, delay_seconds=2, strategy="fixed"),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses?client=value",
+            headers={"Authorization": "Bearer local-placeholder"},
+            content=b'{"model":"test"}',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered by second")
+        self.assertEqual(sleeps, [0.0])
+        self.assertEqual(
+            [item["url"] for item in observed],
+            [
+                "https://first.example.test/v1/responses?client=value&provider=first",
+                "https://second.example.test/v1/responses?client=value&provider=second",
+            ],
+        )
+        self.assertEqual(
+            [item["authorization"] for item in observed],
+            ["Bearer first-upstream-key", "Bearer second-upstream-key"],
+        )
+        self.assertEqual([item["route"] for item in observed], ["first", "second"])
+        self.assertEqual(
+            [item["body"] for item in observed],
+            [b'{"model":"test"}', b'{"model":"test"}'],
+        )
+        status = router.status()
+        self.assertEqual(status.active_by_provider, {})
+        self.assertEqual(status.recent_retry_errors[0].provider_id, "first")
+
+    async def test_disabled_retry_passes_upstream_error_through(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(503, content=b"upstream unavailable")
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_policy=RetryPolicy(enabled=False),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.content, b"upstream unavailable")
+        self.assertEqual(attempts, 1)
+
+    async def test_retry_policy_control_api_validates_updates_and_hides_secrets(self) -> None:
+        changed: list[RetryPolicy] = []
+        store = RetryPolicyStore()
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True, api_key="fixture-secret"),)),
+            client=upstream_client,
+            retry_policy_store=store,
+            on_retry_policy_changed=changed.append,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+        payload = {
+            "enabled": True,
+            "max_attempts": -1,
+            "delay_seconds": 2,
+            "strategy": "fixed",
+            "max_delay_seconds": 30,
+            "circuit_failure_threshold": 5,
+            "circuit_cooldown_seconds": 60,
+        }
+
+        forbidden = await client.post("/control/api/retry-policy", json=payload)
+        invalid = await client.post(
+            "/control/api/retry-policy",
+            headers={"X-Local-Proxy-Control": "1"},
+            json={**payload, "max_attempts": 0},
+        )
+        updated = await client.post(
+            "/control/api/retry-policy",
+            headers={"X-Local-Proxy-Control": "1"},
+            json=payload,
+        )
+
+        self.assertEqual(forbidden.status_code, 403)
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["retry"]["max_attempts"], -1)
+        self.assertEqual(store.get().strategy, "fixed")
+        self.assertEqual(changed, [store.get()])
+        self.assertNotIn("fixture-secret", updated.text)
+    async def test_retries_retryable_status_before_returning_response(self) -> None:
+        attempts = 0
+        sleeps: list[float] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                return httpx.Response(
+                    503,
+                    json={"error": {"message": "temporary upstream overload"}},
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(delay: float) -> None:
+            sleeps.append(delay)
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client, retry_sleep=no_wait)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+        status = (await client.get("/control/api/status")).json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 3)
+        self.assertEqual(sleeps, [1.0, 2.0])
+        self.assertEqual(status["retry"]["total_retries"], 2)
+        self.assertEqual(status["retry"]["active"], [])
+        self.assertEqual(
+            [item["attempt"] for item in status["retry"]["recent_errors"]],
+            [2, 1],
+        )
+        self.assertIn(
+            "HTTP 503：temporary upstream overload",
+            status["retry"]["recent_errors"][0]["summary"],
+        )
+
+    async def test_retry_status_redacts_sensitive_upstream_message(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    503,
+                    json={"error": {"message": "api_key=fixture-private-value"}},
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+        status = await client.get("/control/api/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("[已隐藏]", status.text)
+        self.assertNotIn("fixture-private-value", status.text)
+
+    async def test_retries_connection_error_before_first_response(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError("fixture connection failure", request=request)
+            return httpx.Response(200, content=b"ok")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+
+    async def test_retries_rate_limit_without_retry_after(self) -> None:
+        attempts = 0
+        sleeps: list[float] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, json={"error": {"message": "quota"}})
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(delay: float) -> None:
+            sleeps.append(delay)
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(sleeps, [1.0])
+
+    async def test_caps_rate_limit_retry_after_to_local_delay_budget(self) -> None:
+        attempts = 0
+        sleeps: list[float] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "120"},
+                    json={"error": {"message": "try much later"}},
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(delay: float) -> None:
+            sleeps.append(delay)
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_delay_seconds=5),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(sleeps, [5])
+
+    async def test_embedded_rate_limit_before_output_retries_on_current_provider(self) -> None:
+        attempts: list[str] = []
+        sleeps: list[float] = []
+        first = provider("first", current=True)
+        second = provider("second")
+        router = ProviderRouter((first, second))
+
+        class RateLimitedStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
+                yield b'data: {"type":"response.failed","response":{"status":"failed","error":'
+                yield b'{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}}\n\n'
+
+        class RecoveredStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n'
+                yield b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.host)
+            if request.url.host == "first.example.test":
+                router.select("second")
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=RateLimitedStream(),
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=RecoveredStream(),
+            )
+
+        async def no_wait(delay: float) -> None:
+            sleeps.append(delay)
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"recovered", response.content)
+        self.assertNotIn(b"exceeded retry limit", response.content)
+        self.assertEqual(attempts, ["first.example.test", "second.example.test"])
+        self.assertEqual(sleeps, [0.0])
+        status = router.status()
+        self.assertEqual(status.total_retries, 1)
+        self.assertEqual(status.last_retry_kind, "rate_limited")
+        self.assertIn("HTTP 429", status.recent_retry_errors[0].summary)
+
+    async def test_embedded_rate_limit_after_output_is_not_replayed(self) -> None:
+        attempts = 0
+
+        class OutputThenRateLimit(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                yield (
+                    b'data: {"type":"response.failed","response":{"status":"failed",'
+                    b'"error":{"message":"last status: 429 Too Many Requests"}}}\n\n'
+                )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=OutputThenRateLimit(),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(attempts, 1)
+        self.assertIn(b"partial", response.content)
+        self.assertIn(b"429 Too Many Requests", response.content)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_retries_stream_failure_before_first_chunk(self) -> None:
+        attempts = 0
+
+        class BrokenBeforeOutput(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                raise httpx.ReadError("fixture early disconnect")
+                yield b"unreachable"
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(200, stream=BrokenBeforeOutput())
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+
+    async def test_does_not_replay_stream_after_first_chunk(self) -> None:
+        attempts = 0
+
+        class BrokenAfterOutput(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"data: started\n\n"
+                raise httpx.ReadError("fixture late disconnect")
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(200, stream=BrokenAfterOutput())
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client)
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [],
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1),
+            "root_path": "",
+        }
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        response = await route.endpoint("responses", Request(scope, receive))
+        iterator = response.body_iterator
+
+        self.assertEqual(await anext(iterator), b"data: started\n\n")
+        with self.assertRaises(httpx.ReadError):
+            await anext(iterator)
+        self.assertEqual(attempts, 1)
+        await upstream_client.aclose()
+
+    async def test_forwards_request_stream_headers_query_and_response(self) -> None:
+        observed: dict[str, object] = {}
+
+        class EventStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"data: ok\n\n"
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            observed["url"] = str(request.url)
+            observed["authorization"] = request.headers.get("authorization")
+            observed["local_header"] = request.headers.get("x-local-header")
+            observed["body"] = await request.aread()
+            return httpx.Response(
+                201,
+                headers={
+                    "content-type": "text/event-stream",
+                    "connection": "keep-alive",
+                    "x-upstream": "yes",
+                },
+                stream=EventStream(),
+            )
+
+        selected = ProxyProvider(
+            provider_id="selected",
+            name="Selected",
+            base_url="https://selected.example.test/v1",
+            is_cc_switch_current=True,
+            api_key="fixture-upstream-key",
+            configured_headers={"X-Local-Header": "configured"},
+            default_query={"api-version": "1", "existing": "ignored"},
+        )
+        router = ProviderRouter((selected,))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client)
+        proxy_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:17890",
+        )
+        self.addAsyncCleanup(proxy_client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await proxy_client.post(
+            "/v1/responses?existing=request",
+            headers={
+                "Authorization": "Bearer local-placeholder",
+                "Connection": "close",
+            },
+            content=b'{"model":"gpt-test"}',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.content, b"data: ok\n\n")
+        self.assertEqual(response.headers["x-upstream"], "yes")
+        self.assertNotIn("connection", response.headers)
+        self.assertEqual(
+            observed["url"],
+            "https://selected.example.test/v1/responses?existing=request&api-version=1",
+        )
+        self.assertEqual(observed["authorization"], "Bearer fixture-upstream-key")
+        self.assertEqual(observed["local_header"], "configured")
+        self.assertEqual(observed["body"], b'{"model":"gpt-test"}')
+        self.assertEqual(router.status().active_by_provider, {})
+
+    async def test_missing_credentials_returns_sanitized_error(self) -> None:
+        router = ProviderRouter((provider("empty", current=True, api_key=None),))
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:17890",
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("credential", response.text.casefold())
+
+    async def test_rejects_route_back_to_same_proxy_address(self) -> None:
+        selected = ProxyProvider(
+            provider_id="loop",
+            name="Loop",
+            base_url="http://localhost:17890/v1",
+            is_cc_switch_current=True,
+            api_key="fixture-key",
+        )
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(ProviderRouter((selected,)), client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:17890",
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 508)
+        self.assertNotIn("fixture-key", response.text)
+
+    def test_server_rejects_non_loopback_binding(self) -> None:
+        router = ProviderRouter((provider("selected"),))
+
+        with self.assertRaisesRegex(ValueError, "回环地址"):
+            LocalProxyServer(router, host="0.0.0.0")
+
+    async def test_control_api_switches_without_exposing_credentials(self) -> None:
+        first = provider("first", current=True, api_key="first-private-value")
+        second = provider("second", api_key="second-private-value")
+        selected: list[str] = []
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            ProviderRouter((first, second)),
+            client=upstream_client,
+            on_provider_selected=selected.append,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        status = await client.get("/control/api/status")
+        forbidden = await client.post("/control/api/providers/second/select")
+        switched = await client.post(
+            "/control/api/providers/second/select",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
+
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(forbidden.status_code, 403)
+        self.assertEqual(switched.status_code, 200)
+        self.assertEqual(switched.json()["current_provider_id"], "second")
+        self.assertEqual(selected, ["second"])
+        serialized = status.text + switched.text
+        self.assertNotIn("first-private-value", serialized)
+        self.assertNotIn("second-private-value", serialized)
+        self.assertNotIn("api_key", serialized.casefold())
+
+    async def test_control_page_refresh_config_and_shutdown(self) -> None:
+        router = ProviderRouter((provider("first", current=True),))
+        stopped: list[bool] = []
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            reload_providers=lambda: (provider("refreshed", current=True),),
+            config_fragment=lambda: 'base_url = "http://127.0.0.1:17890/v1"\n',
+            on_shutdown_requested=lambda: stopped.append(True),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        page = await client.get("/control/")
+        script = await client.get("/control/static/app.js")
+        styles = await client.get("/control/static/styles.css")
+        refreshed = await client.post(
+            "/control/api/refresh",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
+        config = await client.get("/control/api/codex-config")
+        shutdown = await client.post(
+            "/control/api/shutdown",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Codex 本地中转", page.text)
+        self.assertIn('id="theme-button"', page.text)
+        self.assertIn('data-theme-value="dark"', page.text)
+        self.assertIn('id="recovery-details-button"', page.text)
+        self.assertIn('id="usage-window"', page.text)
+        self.assertIn('id="manage-providers"', page.text)
+        self.assertIn('id="usage-total"', page.text)
+        self.assertIn("Token 用量", page.text)
+        self.assertIn("styles.css?v=8", page.text)
+        self.assertIn("app.js?v=8", page.text)
+        self.assertIn("selectProvider", script.text)
+        self.assertIn("setProviderHidden", script.text)
+        self.assertIn("saveProviderOrder", script.text)
+        self.assertIn("usage_window", script.text)
+        self.assertIn('suffix: "K"', script.text)
+        self.assertIn('suffix: "M"', script.text)
+        self.assertIn('suffix: "B"', script.text)
+        self.assertIn("provider-token-cell", script.text)
+        self.assertIn("尚未输出且再次失败的旧请求将由新供应商接管", script.text)
+        self.assertIn("codex-local-proxy-theme", script.text)
+        self.assertIn("recent_errors", script.text)
+        self.assertIn("positionRecoveryPopover", script.text)
+        self.assertIn(':root[data-theme="dark"]', styles.text)
+        self.assertIn(".provider-list::-webkit-scrollbar", styles.text)
+        self.assertIn(".recovery-popover", styles.text)
+        self.assertIn(".usage-summary", styles.text)
+        self.assertIn(".provider-token-cell", styles.text)
+        self.assertIn("112px 82px", styles.text)
+        self.assertIn(".drag-handle", styles.text)
+        self.assertIn(".hidden-provider", styles.text)
+        self.assertIn("-webkit-line-clamp: 2", styles.text)
+        self.assertIn("max-height: min(320px", styles.text)
+        self.assertEqual(script.headers["cache-control"], "no-store")
+        self.assertEqual(refreshed.json()["current_provider_id"], "refreshed")
+        self.assertIn("127.0.0.1:17890", config.text)
+        self.assertEqual(shutdown.json()["status"], "stopping")
+        self.assertEqual(stopped, [True])
+
+
+class LiveProxyTests(unittest.TestCase):
+    def test_uvicorn_proxy_forwards_to_live_streaming_upstream(self) -> None:
+        observed: dict[str, object] = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                observed["path"] = self.path
+                observed["authorization"] = self.headers.get("Authorization")
+                observed["body"] = self.rfile.read(content_length)
+                body = b"data: live-ok\n\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args) -> None:
+                return
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        upstream_thread.start()
+        self.addCleanup(upstream.server_close)
+        self.addCleanup(upstream.shutdown)
+
+        proxy_port = self._free_port()
+        selected = ProxyProvider(
+            provider_id="live",
+            name="Live",
+            base_url=f"http://127.0.0.1:{upstream.server_port}/v1",
+            is_cc_switch_current=True,
+            api_key="live-fixture-key",
+        )
+        router = ProviderRouter((selected,))
+        server = LocalProxyServer(router, port=proxy_port)
+        server.start()
+        self.addCleanup(server.stop)
+
+        response = httpx.post(
+            f"http://127.0.0.1:{proxy_port}/v1/responses?stream=true",
+            headers={"Authorization": "Bearer local-placeholder"},
+            json={"model": "fixture-model"},
+            timeout=5,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"data: live-ok\n\n")
+        self.assertEqual(observed["path"], "/v1/responses?stream=true")
+        self.assertEqual(observed["authorization"], "Bearer live-fixture-key")
+        self.assertIn(b"fixture-model", observed["body"])
+        self.assertEqual(router.status().active_by_provider, {})
+
+    @staticmethod
+    def _free_port() -> int:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            return int(listener.getsockname()[1])
+
+
+if __name__ == "__main__":
+    unittest.main()

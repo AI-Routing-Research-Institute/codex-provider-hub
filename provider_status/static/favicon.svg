@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Channel monitor</title>
+  <rect width="64" height="64" rx="14" fill="#172019"/>
+  <rect x="11" y="14" width="42" height="36" rx="5" fill="#ffffff"/>
+  <rect x="16" y="20" width="6" height="22" rx="3" fill="#218653"/>
+  <rect x="29" y="26" width="6" height="16" rx="3" fill="#c58416"/>
+  <rect x="42" y="32" width="6" height="10" rx="3" fill="#c5443a"/>
+</svg>

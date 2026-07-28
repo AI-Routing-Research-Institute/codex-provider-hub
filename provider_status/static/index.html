@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="static/apple-touch-icon.png">
+  <title>Codex 渠道监测</title>
+  <script src="static/theme-init.js?v=1"></script>
+  <link rel="stylesheet" href="static/styles.css?v=15">
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <div>
+        <p class="eyebrow">CODEX CHANNEL MONITOR</p>
+        <h1>Codex 渠道监测</h1>
+      </div>
+      <div class="header-meta">
+        <span id="refresh-countdown">60 秒后自动刷新</span>
+        <div class="header-actions">
+          <div class="theme-picker">
+            <button
+              id="theme-button"
+              class="icon-button theme-button"
+              type="button"
+              aria-label="切换主题，当前跟随系统"
+              aria-haspopup="menu"
+              aria-controls="theme-menu"
+              aria-expanded="false"
+              title="切换主题"
+            >
+              <svg class="theme-trigger-icon" data-theme-trigger-icon="system" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <rect width="20" height="14" x="2" y="3" rx="2"></rect>
+                <line x1="8" x2="16" y1="21" y2="21"></line>
+                <line x1="12" x2="12" y1="17" y2="21"></line>
+              </svg>
+              <svg class="theme-trigger-icon" data-theme-trigger-icon="light" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
+                <circle cx="12" cy="12" r="4"></circle>
+                <path d="M12 2v2"></path>
+                <path d="M12 20v2"></path>
+                <path d="m4.93 4.93 1.42 1.42"></path>
+                <path d="m17.66 17.66 1.41 1.41"></path>
+                <path d="M2 12h2"></path>
+                <path d="M20 12h2"></path>
+                <path d="m6.34 17.66-1.41 1.41"></path>
+                <path d="m19.07 4.93-1.41 1.41"></path>
+              </svg>
+              <svg class="theme-trigger-icon" data-theme-trigger-icon="dark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
+                <path d="M12 3a6 6 0 1 0 9 9 9 9 0 0 1-9-9Z"></path>
+              </svg>
+            </button>
+            <div id="theme-menu" class="theme-menu" role="menu" aria-label="主题模式" hidden>
+              <div class="theme-menu-options">
+                <button class="theme-option" type="button" role="menuitemradio" aria-checked="false" tabindex="-1" data-theme-value="light">
+                  <svg class="theme-option-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <circle cx="12" cy="12" r="4"></circle>
+                    <path d="M12 2v2"></path>
+                    <path d="M12 20v2"></path>
+                    <path d="m4.93 4.93 1.42 1.42"></path>
+                    <path d="m17.66 17.66 1.41 1.41"></path>
+                    <path d="M2 12h2"></path>
+                    <path d="M20 12h2"></path>
+                    <path d="m6.34 17.66-1.41 1.41"></path>
+                    <path d="m19.07 4.93-1.41 1.41"></path>
+                  </svg>
+                  <span class="theme-option-copy">
+                    <strong>浅色模式</strong>
+                    <span>始终使用浅色主题</span>
+                  </span>
+                  <svg class="theme-option-check" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="m20 6-11 11-5-5"></path>
+                  </svg>
+                </button>
+                <button class="theme-option" type="button" role="menuitemradio" aria-checked="false" tabindex="-1" data-theme-value="dark">
+                  <svg class="theme-option-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M12 3a6 6 0 1 0 9 9 9 9 0 0 1-9-9Z"></path>
+                  </svg>
+                  <span class="theme-option-copy">
+                    <strong>深色模式</strong>
+                    <span>始终使用深色主题</span>
+                  </span>
+                  <svg class="theme-option-check" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="m20 6-11 11-5-5"></path>
+                  </svg>
+                </button>
+                <button class="theme-option is-active" type="button" role="menuitemradio" aria-checked="true" tabindex="0" data-theme-value="system">
+                  <svg class="theme-option-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <rect width="20" height="14" x="2" y="3" rx="2"></rect>
+                    <line x1="8" x2="16" y1="21" y2="21"></line>
+                    <line x1="12" x2="12" y1="17" y2="21"></line>
+                  </svg>
+                  <span class="theme-option-copy">
+                    <strong>跟随系统</strong>
+                    <span>跟随系统主题设置</span>
+                  </span>
+                  <svg class="theme-option-check" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="m20 6-11 11-5-5"></path>
+                  </svg>
+                </button>
+              </div>
+              <p id="system-theme-status" class="theme-menu-footer">当前系统主题：浅色</p>
+            </div>
+          </div>
+          <button id="refresh-button" class="button button-secondary" type="button">立即刷新</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <section class="summary-row" aria-labelledby="summary-title">
+      <div>
+        <p id="summary-title" class="section-label">当前可用情况</p>
+        <div class="overall-status">
+          <span id="overall-dot" class="status-dot status-unknown" aria-hidden="true"></span>
+          <div class="overall-status-copy">
+            <strong id="overall-state">正在读取</strong>
+            <span id="overall-detail" class="overall-detail">正在汇总模型状态</span>
+          </div>
+        </div>
+      </div>
+      <div class="summary-copy">
+        <span id="provider-count">0 个供应商</span>
+        <span id="updated-at">尚未刷新</span>
+      </div>
+    </section>
+
+    <div class="toolbar" aria-label="状态窗口选择">
+      <div class="window-tabs" role="group" aria-label="统计窗口">
+        <button class="window-button" type="button" data-window="3h">3 小时</button>
+        <button class="window-button is-active" type="button" data-window="24h">24 小时</button>
+        <button class="window-button" type="button" data-window="7d">7 天</button>
+        <button class="window-button" type="button" data-window="15d">15 天</button>
+        <button class="window-button" type="button" data-window="30d">30 天</button>
+      </div>
+      <p id="load-message" class="load-message" role="status" aria-live="polite">正在连接状态服务…</p>
+    </div>
+
+    <section aria-labelledby="providers-title">
+      <div class="section-heading">
+        <div>
+          <p class="section-label">实时监测</p>
+          <h2 id="providers-title">供应商列表</h2>
+        </div>
+        <p>模型连续两次失败后标记为暂不可用，连续两次成功恢复正常</p>
+      </div>
+      <div id="provider-list" class="provider-list"></div>
+    </section>
+  </main>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="static/app.js?v=16" defer></script>
+</body>
+</html>
