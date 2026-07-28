@@ -17,8 +17,8 @@ let recoveryDetailsPinned = false;
 let recoveryHideTimer = null;
 let manageProvidersMode = false;
 let draggedProviderId = null;
-let lastAutoExpandedProviderId = null;
-const expandedHealthProviderIds = new Set();
+let healthDetailButton = null;
+let historyDetailPinned = false;
 
 const providerList = document.querySelector("#provider-list");
 const emptyState = document.querySelector("#empty-state");
@@ -37,6 +37,8 @@ const recovery = document.querySelector("#recovery");
 const recoveryDetailsButton = document.querySelector("#recovery-details-button");
 const recoveryPopover = document.querySelector("#recovery-popover");
 const recoveryErrorList = document.querySelector("#recovery-error-list");
+const providerHealthPopover = document.querySelector("#provider-health-popover");
+const historyDetailPopover = document.querySelector("#history-detail-popover");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 const THEME_STORAGE_KEY = "codex-local-proxy-theme";
 
@@ -350,30 +352,93 @@ function formatRelativeHealthTime(value) {
   return Math.floor(seconds / 86400) + " 天前更新";
 }
 
-function historyStates(history, limit) {
+function historyEntries(history, limit) {
   const items = Array.isArray(history) ? history.slice(0, limit).reverse() : [];
-  const states = items.map((item) => normalizeHealthState(item?.state));
-  while (states.length < limit) states.unshift("unknown");
-  return states;
+  while (items.length < limit) items.unshift(null);
+  return items;
 }
 
 function createHistoryBars(history, limit, label) {
   const bars = document.createElement("span");
   bars.className = limit > 16 ? "provider-health-history full" : "provider-health-history";
-  const states = historyStates(history, limit);
+  const entries = historyEntries(history, limit);
+  const states = entries.map((item) => normalizeHealthState(item?.state));
   const healthyCount = states.filter((state) => state === "healthy").length;
   const failedCount = states.filter((state) => state === "down").length;
   bars.setAttribute(
     "aria-label",
     label + "：" + healthyCount + " 次可用，" + failedCount + " 次不可用",
   );
-  for (const state of states) {
+  for (const [index, state] of states.entries()) {
     const mark = document.createElement("span");
     mark.className = "provider-health-mark " + healthStateTone(state);
     mark.setAttribute("aria-hidden", "true");
+    mark.dataset.historyIndex = String(index);
     bars.append(mark);
   }
+  bars.addEventListener("pointermove", (event) => {
+    if (event.pointerType !== "mouse" || historyDetailPinned) return;
+    const rect = bars.getBoundingClientRect();
+    const index = Math.max(0, Math.min(
+      entries.length - 1,
+      Math.floor(((event.clientX - rect.left) / rect.width) * entries.length),
+    ));
+    showHistoryDetail(entries[index], label, bars.children[index]);
+  });
+  bars.addEventListener("pointerleave", (event) => {
+    if (event.pointerType === "mouse" && !historyDetailPinned) hideHistoryDetail();
+  });
+  bars.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const rect = bars.getBoundingClientRect();
+    const index = Math.max(0, Math.min(
+      entries.length - 1,
+      Math.floor(((event.clientX - rect.left) / rect.width) * entries.length),
+    ));
+    if (!entries[index]) return;
+    historyDetailPinned = true;
+    showHistoryDetail(entries[index], label, bars.children[index]);
+  });
   return bars;
+}
+
+function showHistoryDetail(entry, label, anchor) {
+  if (!entry || !anchor) {
+    if (!historyDetailPinned) hideHistoryDetail();
+    return;
+  }
+  const state = normalizeHealthState(entry.state);
+  const time = entry.recorded_at || entry.finished_at;
+  const latency = entry.latency_ms ?? entry.latency;
+  const title = document.createElement("strong");
+  title.textContent = label;
+  const meta = document.createElement("span");
+  meta.textContent = [formatHealthTime(time), healthStateLabel(state),
+    latency == null ? "" : formatLatency(latency)].filter(Boolean).join(" · ");
+  historyDetailPopover.replaceChildren(title, meta);
+  if (entry.error_summary || entry.error_code) {
+    const reason = document.createElement("span");
+    reason.textContent = "原因：" + (entry.error_summary || entry.error_code);
+    historyDetailPopover.append(reason);
+  }
+  historyDetailPopover.classList.add("show");
+  const rect = anchor.getBoundingClientRect();
+  const popoverRect = historyDetailPopover.getBoundingClientRect();
+  const margin = 10;
+  const left = Math.min(
+    window.innerWidth - popoverRect.width - margin,
+    Math.max(margin, rect.left + rect.width / 2 - popoverRect.width / 2),
+  );
+  const above = rect.top - popoverRect.height - 8;
+  const top = above >= margin ? above : rect.bottom + 8;
+  historyDetailPopover.style.left = `${Math.round(left)}px`;
+  historyDetailPopover.style.top = `${Math.round(top)}px`;
+}
+
+function hideHistoryDetail({ force = false } = {}) {
+  if (historyDetailPinned && !force) return;
+  historyDetailPinned = false;
+  historyDetailPopover.classList.remove("show");
 }
 
 function healthModels(providerHealth) {
@@ -415,6 +480,7 @@ function healthModels(providerHealth) {
       availability: null,
       latestLatency: latest?.latency_ms,
       history: manualItems.map((item) => ({
+        ...item,
         state: item?.success ? "healthy" : "down",
       })),
       source: "manual",
@@ -478,7 +544,17 @@ function createProviderHealthDetail(provider, providerHealth) {
   title.textContent = "服务器检测详情";
   const checked = document.createElement("span");
   checked.textContent = "最后探测 " + formatHealthTime(providerHealth.last_checked);
-  heading.append(title, checked);
+  const headingMeta = document.createElement("span");
+  headingMeta.className = "provider-health-detail-meta";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "provider-health-close";
+  close.textContent = "×";
+  close.title = "关闭检测详情";
+  close.setAttribute("aria-label", "关闭检测详情");
+  close.addEventListener("click", closeProviderHealthPopover);
+  headingMeta.append(checked, close);
+  heading.append(title, headingMeta);
 
   const models = healthModels(providerHealth);
   const metrics = document.createElement("div");
@@ -536,12 +612,42 @@ function createProviderHealthDetail(provider, providerHealth) {
   return detail;
 }
 
-function ensureCurrentHealthExpanded() {
-  const current = latestStatus ? currentProvider(latestStatus) : null;
-  if (!current || !healthStatusForProvider(current)) return;
-  if (lastAutoExpandedProviderId === current.provider_id) return;
-  expandedHealthProviderIds.add(current.provider_id);
-  lastAutoExpandedProviderId = current.provider_id;
+function positionProviderHealthPopover() {
+  if (!healthDetailButton || !providerHealthPopover.classList.contains("show")) return;
+  const anchor = healthDetailButton.getBoundingClientRect();
+  const rect = providerHealthPopover.getBoundingClientRect();
+  const margin = 12;
+  const left = Math.min(
+    window.innerWidth - rect.width - margin,
+    Math.max(margin, anchor.right - rect.width),
+  );
+  const preferredTop = anchor.bottom + 8;
+  const top = preferredTop + rect.height <= window.innerHeight - margin
+    ? preferredTop
+    : Math.max(margin, anchor.top - rect.height - 8);
+  providerHealthPopover.style.left = `${Math.round(left)}px`;
+  providerHealthPopover.style.top = `${Math.round(top)}px`;
+}
+
+function openProviderHealthPopover(button, provider, providerHealth) {
+  hideHistoryDetail({ force: true });
+  if (healthDetailButton === button && providerHealthPopover.classList.contains("show")) {
+    closeProviderHealthPopover();
+    return;
+  }
+  if (healthDetailButton) healthDetailButton.setAttribute("aria-expanded", "false");
+  healthDetailButton = button;
+  button.setAttribute("aria-expanded", "true");
+  providerHealthPopover.replaceChildren(createProviderHealthDetail(provider, providerHealth));
+  providerHealthPopover.classList.add("show");
+  positionProviderHealthPopover();
+}
+
+function closeProviderHealthPopover() {
+  if (healthDetailButton) healthDetailButton.setAttribute("aria-expanded", "false");
+  healthDetailButton = null;
+  providerHealthPopover.classList.remove("show");
+  hideHistoryDetail({ force: true });
 }
 
 function renderHealthSourceStatus() {
@@ -592,7 +698,6 @@ function renderUsageSummary() {
 
 function renderProviderList() {
   if (!latestStatus) return;
-  ensureCurrentHealthExpanded();
   const query = searchInput.value.trim().toLocaleLowerCase();
   const signature = JSON.stringify([
     query,
@@ -601,7 +706,6 @@ function renderProviderList() {
     latestHealthStatus?.generated_at,
     latestHealthStatus?.data_status,
     healthStatusError,
-    [...expandedHealthProviderIds].sort(),
     latestStatus.providers.map((provider) => [
       provider.provider_id,
       provider.name,
@@ -617,6 +721,7 @@ function renderProviderList() {
   ]);
   if (signature === renderedListSignature) return;
   renderedListSignature = signature;
+  closeProviderHealthPopover();
   const providers = latestStatus.providers.filter((provider) => {
     if (provider.hidden && !manageProvidersMode) return false;
     return `${provider.name} ${provider.endpoint}`.toLocaleLowerCase().includes(query);
@@ -671,33 +776,18 @@ function renderProviderList() {
     const healthCell = document.createElement("span");
     healthCell.className = "provider-health-cell";
     healthCell.append(createProviderHealthSummary(providerHealth));
-    const healthExpanded = Boolean(
-      providerHealth && expandedHealthProviderIds.has(provider.provider_id),
-    );
     if (providerHealth && !manageProvidersMode) {
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "provider-health-toggle";
-      toggle.textContent = healthExpanded ? "⌃" : "⌄";
-      toggle.title = healthExpanded ? "收起检测详情" : "查看检测详情";
-      toggle.setAttribute(
-        "aria-label",
-        (healthExpanded ? "收起 " : "展开 ") + provider.name + " 检测详情",
-      );
-      toggle.setAttribute("aria-expanded", String(healthExpanded));
-      toggle.setAttribute(
-        "aria-controls",
-        "provider-health-detail-" + provider.provider_id,
-      );
+      toggle.textContent = "详情";
+      toggle.title = "查看检测详情";
+      toggle.setAttribute("aria-label", "查看 " + provider.name + " 检测详情");
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.setAttribute("aria-controls", "provider-health-popover");
       toggle.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (expandedHealthProviderIds.has(provider.provider_id)) {
-          expandedHealthProviderIds.delete(provider.provider_id);
-        } else {
-          expandedHealthProviderIds.add(provider.provider_id);
-        }
-        renderedListSignature = null;
-        renderProviderList();
+        openProviderHealthPopover(toggle, provider, providerHealth);
       });
       healthCell.append(toggle);
     }
@@ -740,9 +830,6 @@ function renderProviderList() {
       meta.append(visibility);
     }
     row.append(state, copy, healthCell, tokenCell, meta);
-    if (providerHealth && healthExpanded && !manageProvidersMode) {
-      row.append(createProviderHealthDetail(provider, providerHealth));
-    }
     copy.addEventListener("click", (event) => {
       event.stopPropagation();
       if (!manageProvidersMode) selectProvider(provider);
@@ -1137,6 +1224,12 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest("#recovery") && !event.target.closest("#recovery-popover")) {
     hideRecoveryDetails({ force: true });
   }
+  if (!event.target.closest("#provider-health-popover") && !event.target.closest(".provider-health-toggle")) {
+    closeProviderHealthPopover();
+  }
+  if (!event.target.closest("#history-detail-popover") && !event.target.closest(".provider-health-history")) {
+    hideHistoryDetail({ force: true });
+  }
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !themeMenu.hidden) {
@@ -1147,9 +1240,18 @@ document.addEventListener("keydown", (event) => {
     hideRecoveryDetails({ force: true });
     recoveryDetailsButton.focus();
   }
+  if (event.key === "Escape" && historyDetailPopover.classList.contains("show")) {
+    hideHistoryDetail({ force: true });
+  } else if (event.key === "Escape" && providerHealthPopover.classList.contains("show")) {
+    const button = healthDetailButton;
+    closeProviderHealthPopover();
+    button?.focus();
+  }
 });
 window.addEventListener("resize", () => {
   if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
+  if (providerHealthPopover.classList.contains("show")) positionProviderHealthPopover();
+  hideHistoryDetail({ force: true });
 });
 themeMedia.addEventListener("change", () => {
   if (themePreference() === "system") applyTheme("system");

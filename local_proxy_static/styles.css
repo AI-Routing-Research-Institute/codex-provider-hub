@@ -424,7 +424,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .provider-health-cell {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 26px;
+  grid-template-columns: minmax(0, 1fr) 42px;
   align-items: center;
   gap: 6px;
 }
@@ -454,7 +454,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .provider-health-history { display: flex; gap: 2px; margin-top: 5px; }
 .provider-health-mark { min-width: 2px; height: 9px; flex: 1 1 0; border-radius: 1px; }
 .provider-health-toggle {
-  width: 26px;
+  min-width: 42px;
   height: 26px;
   display: grid;
   place-items: center;
@@ -463,17 +463,50 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   border-radius: 4px;
   background: transparent;
   color: var(--muted);
-  font-size: 17px;
+  font-size: 10px;
+  font-weight: 700;
   line-height: 1;
 }
-.provider-health-toggle:hover, .provider-health-toggle:focus-visible { background: var(--teal-soft); color: var(--teal); outline: none; }
-.provider-health-detail {
-  grid-column: 1 / -1;
-  margin: 7px -13px -7px;
-  padding: 13px 13px 14px 95px;
-  border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--surface-soft) 76%, transparent);
+.provider-health-toggle:hover, .provider-health-toggle:focus-visible, .provider-health-toggle[aria-expanded="true"] { background: var(--teal-soft); color: var(--teal); outline: none; }
+.provider-health-popover {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 70;
+  width: min(500px, calc(100vw - 24px));
+  max-height: min(560px, calc(100vh - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 38px rgb(0 0 0 / 30%);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(5px);
+  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+  pointer-events: none;
 }
+.provider-health-popover.show { opacity: 1; visibility: visible; transform: translateY(0); pointer-events: auto; }
+.provider-health-detail {
+  padding: 14px;
+}
+.provider-health-detail-meta { display: flex; align-items: center; gap: 8px; }
+.provider-health-close {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+.provider-health-close:hover, .provider-health-close:focus-visible { background: var(--surface-soft); color: var(--text); outline: none; }
 .provider-health-detail-head span, .provider-health-model-copy > span {
   color: var(--muted);
   font-size: 10px;
@@ -502,6 +535,27 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .provider-health-history-label { margin-bottom: 4px; color: var(--muted); font-size: 9px; }
 .provider-health-history.full { margin-top: 0; }
 .provider-health-history.full .provider-health-mark { height: 11px; }
+.history-detail-popover {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 80;
+  width: min(310px, calc(100vw - 20px));
+  display: grid;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 28%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.history-detail-popover.show { opacity: 1; visibility: visible; }
+.history-detail-popover strong { font-size: 11px; }
+.history-detail-popover span { color: var(--muted); font-size: 10px; line-height: 1.45; }
 .provider-token-cell { min-width: 0; display: grid; justify-items: end; padding-right: 8px; font-variant-numeric: tabular-nums; }
 .provider-token-value { color: var(--teal); font-size: 14px; line-height: 1.15; }
 .provider-token-unit { margin-top: 2px; color: var(--muted); font-size: 9px; line-height: 1; text-transform: uppercase; }
@@ -679,7 +733,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   .provider-row.managing { grid-template-areas: "state copy meta" "health health health"; }
   .provider-row.managing .provider-token-cell { display: none; }
   .provider-row.managing .provider-meta { grid-area: meta; display: grid; align-self: center; }
-  .provider-health-detail { grid-column: 1 / -1; margin: 3px -12px -11px; padding: 12px; }
+  .provider-health-popover { right: 12px; bottom: 12px; left: 12px !important; top: auto !important; width: auto; max-height: calc(100vh - 24px); }
   .usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; padding-block: 12px; }
   .usage-metric { padding-inline: 12px 0; }
   .usage-metric:nth-child(odd) { padding-left: 0; border-left: 0; }

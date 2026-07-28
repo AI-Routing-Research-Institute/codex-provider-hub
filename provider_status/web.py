@@ -399,6 +399,10 @@ def _public_provider(
                         "recorded_at": item.get("recorded_at"),
                         "state": item.get("state"),
                         "error_code": item.get("error_code"),
+                        "error_summary": _public_error_summary(
+                            item.get("error_code"),
+                            None,
+                        ),
                     }
                     for item in model.get("history", [])
                 ],
@@ -414,6 +418,10 @@ def _public_provider(
                 "success": bool(result.get("success")),
                 "latency_ms": result.get("latency_ms"),
                 "error_code": result.get("error_code"),
+                "error_summary": _public_error_summary(
+                    result.get("error_code"),
+                    result.get("error_summary"),
+                ),
                 "finished_at": result.get("finished_at"),
             }
             for result in results

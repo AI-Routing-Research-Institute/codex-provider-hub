@@ -313,7 +313,10 @@ class StatusWebTests(unittest.TestCase):
         history = payload["providers"][0]["manual_history"]["gpt-5.5"]
         self.assertEqual(len(history), 1)
         self.assertFalse(history[0]["success"])
-        self.assertNotIn("error_summary", history[0])
+        self.assertEqual(
+            history[0]["error_summary"],
+            "供应商明确返回该模型不存在或不支持。",
+        )
         self.assertNotIn("raw upstream", json.dumps(payload))
 
     def test_status_api_sorts_real_probe_data_without_exposing_sort_signals(
