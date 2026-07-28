@@ -1120,6 +1120,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
             reload_providers=lambda: (provider("refreshed", current=True),),
             config_fragment=lambda: 'base_url = "http://127.0.0.1:17890/v1"\n',
             on_shutdown_requested=lambda: stopped.append(True),
+            health_status_url="https://status.example.test/api/status?window=24h",
         )
         client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -1150,8 +1151,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="manage-providers"', page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=8", page.text)
-        self.assertIn("app.js?v=8", page.text)
+        self.assertIn("styles.css?v=9", page.text)
+        self.assertIn("app.js?v=9", page.text)
         self.assertIn("selectProvider", script.text)
         self.assertIn("setProviderHidden", script.text)
         self.assertIn("saveProviderOrder", script.text)
@@ -1160,22 +1161,36 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('suffix: "M"', script.text)
         self.assertIn('suffix: "B"', script.text)
         self.assertIn("provider-token-cell", script.text)
+        self.assertIn("healthStatusUrl", script.text)
+        self.assertNotIn("HEALTH_STATUS_URL", script.text)
+        self.assertIn("normalizeProviderEndpoint", script.text)
+        self.assertIn("createProviderHealthDetail", script.text)
+        self.assertIn("expandedHealthProviderIds", script.text)
+        self.assertIn("最近 60 次", script.text)
         self.assertIn("尚未输出且再次失败的旧请求将由新供应商接管", script.text)
         self.assertIn("codex-local-proxy-theme", script.text)
         self.assertIn("recent_errors", script.text)
         self.assertIn("positionRecoveryPopover", script.text)
         self.assertIn(':root[data-theme="dark"]', styles.text)
         self.assertIn(".provider-list::-webkit-scrollbar", styles.text)
+        self.assertIn("flex-direction: column", styles.text)
+        self.assertIn("flex: 0 0 auto", styles.text)
         self.assertIn(".recovery-popover", styles.text)
         self.assertIn(".usage-summary", styles.text)
         self.assertIn(".provider-token-cell", styles.text)
-        self.assertIn("112px 82px", styles.text)
+        self.assertIn(".provider-health-cell", styles.text)
+        self.assertIn(".provider-health-detail", styles.text)
+        self.assertIn("minmax(190px, 240px)", styles.text)
         self.assertIn(".drag-handle", styles.text)
         self.assertIn(".hidden-provider", styles.text)
         self.assertIn("-webkit-line-clamp: 2", styles.text)
         self.assertIn("max-height: min(320px", styles.text)
         self.assertEqual(script.headers["cache-control"], "no-store")
         self.assertEqual(refreshed.json()["current_provider_id"], "refreshed")
+        self.assertEqual(
+            refreshed.json()["health_status_url"],
+            "https://status.example.test/api/status?window=24h",
+        )
         self.assertIn("127.0.0.1:17890", config.text)
         self.assertEqual(shutdown.json()["status"], "stopping")
         self.assertEqual(stopped, [True])

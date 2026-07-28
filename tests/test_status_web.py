@@ -209,6 +209,7 @@ class StatusWebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["cache-control"], "public, max-age=30")
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
         payload = response.json()
         self.assertEqual(payload["window"], "7d")
         self.assertEqual(payload["overall_state"], "degraded")

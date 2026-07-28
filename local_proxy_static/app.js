@@ -2,22 +2,33 @@
 
 const CONTROL_HEADER = { "X-Local-Proxy-Control": "1" };
 let latestStatus = null;
+let latestHealthStatus = null;
+let healthStatusError = null;
 let pollTimer = null;
+let healthPollTimer = null;
 let toastTimer = null;
 let renderedListSignature = null;
 let statusRequestSequence = 0;
+let healthRequestSequence = 0;
 let controlRequestActive = false;
+let healthRequestActive = false;
 let retryFormLoaded = false;
 let recoveryDetailsPinned = false;
 let recoveryHideTimer = null;
 let manageProvidersMode = false;
 let draggedProviderId = null;
+let lastAutoExpandedProviderId = null;
+const expandedHealthProviderIds = new Set();
 
 const providerList = document.querySelector("#provider-list");
 const emptyState = document.querySelector("#empty-state");
 const searchInput = document.querySelector("#search");
 const usageWindow = document.querySelector("#usage-window");
 const manageProvidersButton = document.querySelector("#manage-providers");
+const healthSource = document.querySelector("#health-source");
+const healthSourceDot = document.querySelector("#health-source-dot");
+const healthSourceText = document.querySelector("#health-source-text");
+const healthRefreshButton = document.querySelector("#health-refresh-button");
 const footerMessage = document.querySelector("#footer-message");
 const retryForm = document.querySelector("#retry-form");
 const themeButton = document.querySelector("#theme-button");
@@ -246,6 +257,327 @@ function providerUsage(providerId) {
   };
 }
 
+function healthStatusUrl() {
+  return typeof latestStatus?.health_status_url === "string"
+    ? latestStatus.health_status_url.trim()
+    : "";
+}
+
+function normalizeProviderEndpoint(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : "https://" + raw);
+    const path = parsed.pathname.replace(/\/{2,}/g, "/").replace(/\/+$/, "");
+    return parsed.host.toLocaleLowerCase() + (path === "/" ? "" : path);
+  } catch (error) {
+    return raw
+      .toLocaleLowerCase()
+      .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+      .replace(/[?#].*$/, "")
+      .replace(/\/+$/, "");
+  }
+}
+
+function healthStatusForProvider(provider) {
+  if (!Array.isArray(latestHealthStatus?.providers)) return null;
+  const endpoint = normalizeProviderEndpoint(provider.endpoint);
+  return latestHealthStatus.providers.find(
+    (candidate) => normalizeProviderEndpoint(candidate?.base_url) === endpoint,
+  ) || null;
+}
+
+function normalizeHealthState(value) {
+  return ["healthy", "degraded", "recovering", "down"].includes(value)
+    ? value
+    : "unknown";
+}
+
+function healthStateLabel(value) {
+  return {
+    healthy: "可用",
+    degraded: "有波动",
+    recovering: "恢复中",
+    down: "暂不可用",
+    unknown: "等待检测",
+  }[normalizeHealthState(value)];
+}
+
+function healthStateTone(value) {
+  return {
+    healthy: "healthy",
+    degraded: "warning",
+    recovering: "warning",
+    down: "down",
+    unknown: "unknown",
+  }[normalizeHealthState(value)];
+}
+
+function formatAvailability(value) {
+  const availability = Number(value);
+  if (!Number.isFinite(availability)) return "—";
+  return Number(availability.toFixed(2)) + "%";
+}
+
+function formatLatency(value) {
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+  if (milliseconds < 1000) return Math.round(milliseconds) + " ms";
+  return Number((milliseconds / 1000).toFixed(1)) + " 秒";
+}
+
+function formatHealthTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function formatRelativeHealthTime(value) {
+  const recordedAt = new Date(value);
+  if (Number.isNaN(recordedAt.getTime())) return "更新时间未知";
+  const seconds = Math.max(0, Math.round((Date.now() - recordedAt.getTime()) / 1000));
+  if (seconds < 10) return "刚刚更新";
+  if (seconds < 60) return seconds + " 秒前更新";
+  if (seconds < 3600) return Math.floor(seconds / 60) + " 分钟前更新";
+  if (seconds < 86400) return Math.floor(seconds / 3600) + " 小时前更新";
+  return Math.floor(seconds / 86400) + " 天前更新";
+}
+
+function historyStates(history, limit) {
+  const items = Array.isArray(history) ? history.slice(0, limit).reverse() : [];
+  const states = items.map((item) => normalizeHealthState(item?.state));
+  while (states.length < limit) states.unshift("unknown");
+  return states;
+}
+
+function createHistoryBars(history, limit, label) {
+  const bars = document.createElement("span");
+  bars.className = limit > 16 ? "provider-health-history full" : "provider-health-history";
+  const states = historyStates(history, limit);
+  const healthyCount = states.filter((state) => state === "healthy").length;
+  const failedCount = states.filter((state) => state === "down").length;
+  bars.setAttribute(
+    "aria-label",
+    label + "：" + healthyCount + " 次可用，" + failedCount + " 次不可用",
+  );
+  for (const state of states) {
+    const mark = document.createElement("span");
+    mark.className = "provider-health-mark " + healthStateTone(state);
+    mark.setAttribute("aria-hidden", "true");
+    bars.append(mark);
+  }
+  return bars;
+}
+
+function healthModels(providerHealth) {
+  const automaticModels = Array.isArray(providerHealth?.models)
+    ? providerHealth.models
+    : [];
+  const automaticByName = new Map(
+    automaticModels.map((model) => [String(model?.model || ""), model]),
+  );
+  const manualHistory = providerHealth?.manual_history &&
+    typeof providerHealth.manual_history === "object"
+    ? providerHealth.manual_history
+    : {};
+  const configuredNames = Array.isArray(providerHealth?.display_models)
+    ? providerHealth.display_models
+    : [];
+  const names = [...new Set([
+    ...configuredNames,
+    ...automaticModels.map((model) => model?.model),
+    ...Object.keys(manualHistory),
+  ].filter(Boolean))];
+  return names.map((name) => {
+    const automatic = automaticByName.get(name);
+    if (automatic) {
+      return {
+        model: name,
+        state: normalizeHealthState(automatic.state),
+        availability: automatic.availability,
+        latestLatency: automatic.latest_latency,
+        history: automatic.history,
+        source: "automatic",
+      };
+    }
+    const manualItems = Array.isArray(manualHistory[name]) ? manualHistory[name] : [];
+    const latest = manualItems[0] || null;
+    return {
+      model: name,
+      state: latest ? latest.success ? "healthy" : "down" : "unknown",
+      availability: null,
+      latestLatency: latest?.latency_ms,
+      history: manualItems.map((item) => ({
+        state: item?.success ? "healthy" : "down",
+      })),
+      source: "manual",
+    };
+  });
+}
+
+function createProviderHealthSummary(providerHealth) {
+  const summary = document.createElement("span");
+  summary.className = "provider-health-summary";
+  const top = document.createElement("span");
+  top.className = "provider-health-top";
+  const label = document.createElement("span");
+  label.className = "provider-health-label";
+  const dot = document.createElement("span");
+  dot.className = "provider-health-dot";
+  dot.setAttribute("aria-hidden", "true");
+  const stateText = document.createElement("span");
+  const latency = document.createElement("span");
+  latency.className = "provider-health-latency";
+  const meta = document.createElement("span");
+  meta.className = "provider-health-meta";
+  const modelName = document.createElement("span");
+  const availability = document.createElement("span");
+
+  if (providerHealth) {
+    const state = normalizeHealthState(providerHealth.state);
+    dot.classList.add(healthStateTone(state));
+    stateText.textContent = healthStateLabel(state);
+    latency.textContent = formatLatency(providerHealth.latest_latency);
+    modelName.textContent = providerHealth.display_models?.[0] ||
+      providerHealth.models?.[0]?.model ||
+      "未配置模型";
+    availability.textContent = "24h " + formatAvailability(providerHealth.availability);
+    summary.append(top, meta, createHistoryBars(providerHealth.history, 16, "最近 16 次检测"));
+  } else {
+    dot.classList.add("unknown");
+    stateText.textContent = latestHealthStatus ? "未纳入检测" : "检测数据暂不可用";
+    latency.textContent = "";
+    modelName.textContent = latestHealthStatus
+      ? "未匹配服务器供应商"
+      : "等待服务器检测数据";
+    availability.textContent = "";
+    summary.append(top, meta, createHistoryBars([], 16, "暂无检测历史"));
+  }
+
+  label.append(dot, stateText);
+  top.append(label, latency);
+  meta.append(modelName, availability);
+  return summary;
+}
+
+function createProviderHealthDetail(provider, providerHealth) {
+  const detail = document.createElement("div");
+  detail.className = "provider-health-detail";
+  detail.id = "provider-health-detail-" + provider.provider_id;
+
+  const heading = document.createElement("div");
+  heading.className = "provider-health-detail-head";
+  const title = document.createElement("strong");
+  title.textContent = "服务器检测详情";
+  const checked = document.createElement("span");
+  checked.textContent = "最后探测 " + formatHealthTime(providerHealth.last_checked);
+  heading.append(title, checked);
+
+  const models = healthModels(providerHealth);
+  const metrics = document.createElement("div");
+  metrics.className = "provider-health-metrics";
+  for (const [label, value] of [
+    ["24 小时可用率", formatAvailability(providerHealth.availability)],
+    ["最近延迟", formatLatency(providerHealth.latest_latency)],
+    ["检测模型", models.length + " 个"],
+  ]) {
+    const metric = document.createElement("span");
+    const metricLabel = document.createElement("span");
+    metricLabel.textContent = label;
+    const metricValue = document.createElement("strong");
+    metricValue.textContent = value;
+    metric.append(metricLabel, metricValue);
+    metrics.append(metric);
+  }
+
+  detail.append(heading, metrics);
+  for (const model of models) {
+    const row = document.createElement("div");
+    row.className = "provider-health-model";
+    const modelCopy = document.createElement("span");
+    modelCopy.className = "provider-health-model-copy";
+    const modelTitle = document.createElement("span");
+    modelTitle.className = "provider-health-model-title";
+    const modelDot = document.createElement("span");
+    modelDot.className = "provider-health-dot " + healthStateTone(model.state);
+    modelDot.setAttribute("aria-hidden", "true");
+    const modelName = document.createElement("strong");
+    modelName.textContent = model.model;
+    const modelSummary = document.createElement("span");
+    modelSummary.textContent = model.source === "manual"
+      ? "手动检测" + healthStateLabel(model.state) + " · " + formatLatency(model.latestLatency)
+      : healthStateLabel(model.state) + " · " + formatAvailability(model.availability);
+    modelTitle.append(modelDot, modelName);
+    modelCopy.append(modelTitle, modelSummary);
+
+    const history = document.createElement("span");
+    history.className = "provider-health-model-history";
+    const historyLabel = document.createElement("span");
+    historyLabel.className = "provider-health-history-label";
+    const historyName = document.createElement("span");
+    historyName.textContent = model.source === "manual" ? "最近点击检测" : "最近 60 次";
+    const historyDirection = document.createElement("span");
+    historyDirection.textContent = "较早 → 最近";
+    historyLabel.append(historyName, historyDirection);
+    history.append(
+      historyLabel,
+      createHistoryBars(model.history, 60, model.model + " 最近检测历史"),
+    );
+    row.append(modelCopy, history);
+    detail.append(row);
+  }
+  return detail;
+}
+
+function ensureCurrentHealthExpanded() {
+  const current = latestStatus ? currentProvider(latestStatus) : null;
+  if (!current || !healthStatusForProvider(current)) return;
+  if (lastAutoExpandedProviderId === current.provider_id) return;
+  expandedHealthProviderIds.add(current.provider_id);
+  lastAutoExpandedProviderId = current.provider_id;
+}
+
+function renderHealthSourceStatus() {
+  const configuredUrl = healthStatusUrl();
+  if (!configuredUrl) {
+    healthSource.dataset.state = "unknown";
+    healthSourceDot.className = "health-source-dot unknown";
+    healthSourceText.textContent = "未配置服务器检测地址";
+    healthRefreshButton.disabled = true;
+    return;
+  }
+  const freshnessValue = latestHealthStatus?.last_checked ||
+    latestHealthStatus?.generated_at;
+  const dataStatus = healthStatusError
+    ? "error"
+    : latestHealthStatus?.data_status || "unknown";
+  healthSource.dataset.state = dataStatus;
+  healthSourceDot.className = "health-source-dot " + dataStatus;
+  if (!latestHealthStatus) {
+    healthSourceText.textContent = healthStatusError
+      ? "服务器检测数据暂不可用"
+      : "正在读取服务器检测数据";
+  } else if (healthStatusError) {
+    healthSourceText.textContent = "服务器检测数据 · " +
+      formatRelativeHealthTime(freshnessValue) +
+      "（刷新失败）";
+  } else if (dataStatus === "stale") {
+    healthSourceText.textContent = "服务器检测数据已过期 · " +
+      formatRelativeHealthTime(freshnessValue);
+  } else {
+    healthSourceText.textContent = "服务器检测数据 · " +
+      formatRelativeHealthTime(freshnessValue);
+  }
+  healthRefreshButton.disabled = healthRequestActive;
+}
+
 function renderUsageSummary() {
   const total = latestStatus?.usage?.total || {};
   document.querySelector("#usage-total").textContent = formatTokenCount(total.total_tokens);
@@ -260,11 +592,16 @@ function renderUsageSummary() {
 
 function renderProviderList() {
   if (!latestStatus) return;
+  ensureCurrentHealthExpanded();
   const query = searchInput.value.trim().toLocaleLowerCase();
   const signature = JSON.stringify([
     query,
     manageProvidersMode,
     latestStatus.usage?.window,
+    latestHealthStatus?.generated_at,
+    latestHealthStatus?.data_status,
+    healthStatusError,
+    [...expandedHealthProviderIds].sort(),
     latestStatus.providers.map((provider) => [
       provider.provider_id,
       provider.name,
@@ -275,6 +612,7 @@ function renderProviderList() {
       provider.hidden,
       providerUsage(provider.provider_id).total_tokens,
       providerUsage(provider.provider_id).estimated_requests,
+      healthStatusForProvider(provider)?.last_checked,
     ]),
   ]);
   if (signature === renderedListSignature) return;
@@ -288,12 +626,8 @@ function renderProviderList() {
     const row = document.createElement("div");
     row.className = `provider-row${provider.current ? " current" : ""}${provider.hidden ? " hidden-provider" : ""}${manageProvidersMode ? " managing" : ""}`;
     row.dataset.providerId = provider.provider_id;
-    row.setAttribute("role", manageProvidersMode ? "group" : "button");
-    row.tabIndex = manageProvidersMode ? -1 : 0;
-    if (!manageProvidersMode) row.setAttribute("aria-pressed", String(provider.current));
-    row.setAttribute("aria-label", manageProvidersMode
-      ? `供应商 ${provider.name}`
-      : `${provider.current ? "当前供应商" : "切换到"} ${provider.name}`);
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", "供应商 " + provider.name);
     row.draggable = manageProvidersMode && query === "";
 
     const state = document.createElement("span");
@@ -308,8 +642,15 @@ function renderProviderList() {
     state.append(Object.assign(document.createElement("span"), { className: "dot" }));
     state.append(provider.hidden ? "已隐藏" : provider.current ? "当前使用" : "可切换");
 
-    const copy = document.createElement("span");
+    const copy = document.createElement("button");
+    copy.type = "button";
     copy.className = "provider-copy";
+    copy.disabled = manageProvidersMode;
+    copy.setAttribute(
+      "aria-label",
+      (provider.current ? "当前供应商 " : "切换到 ") + provider.name,
+    );
+    copy.setAttribute("aria-pressed", String(provider.current));
     const title = document.createElement("span");
     title.className = "provider-title";
     const name = document.createElement("strong");
@@ -325,6 +666,41 @@ function renderProviderList() {
     endpoint.textContent = escapeText(provider.endpoint);
     const usage = providerUsage(provider.provider_id);
     copy.append(title, endpoint);
+
+    const providerHealth = healthStatusForProvider(provider);
+    const healthCell = document.createElement("span");
+    healthCell.className = "provider-health-cell";
+    healthCell.append(createProviderHealthSummary(providerHealth));
+    const healthExpanded = Boolean(
+      providerHealth && expandedHealthProviderIds.has(provider.provider_id),
+    );
+    if (providerHealth && !manageProvidersMode) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "provider-health-toggle";
+      toggle.textContent = healthExpanded ? "⌃" : "⌄";
+      toggle.title = healthExpanded ? "收起检测详情" : "查看检测详情";
+      toggle.setAttribute(
+        "aria-label",
+        (healthExpanded ? "收起 " : "展开 ") + provider.name + " 检测详情",
+      );
+      toggle.setAttribute("aria-expanded", String(healthExpanded));
+      toggle.setAttribute(
+        "aria-controls",
+        "provider-health-detail-" + provider.provider_id,
+      );
+      toggle.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (expandedHealthProviderIds.has(provider.provider_id)) {
+          expandedHealthProviderIds.delete(provider.provider_id);
+        } else {
+          expandedHealthProviderIds.add(provider.provider_id);
+        }
+        renderedListSignature = null;
+        renderProviderList();
+      });
+      healthCell.append(toggle);
+    }
 
     const tokenCell = document.createElement("span");
     tokenCell.className = "provider-token-cell";
@@ -363,13 +739,20 @@ function renderProviderList() {
       });
       meta.append(visibility);
     }
-    row.append(state, copy, tokenCell, meta);
-    row.addEventListener("click", () => {
+    row.append(state, copy, healthCell, tokenCell, meta);
+    if (providerHealth && healthExpanded && !manageProvidersMode) {
+      row.append(createProviderHealthDetail(provider, providerHealth));
+    }
+    copy.addEventListener("click", (event) => {
+      event.stopPropagation();
       if (!manageProvidersMode) selectProvider(provider);
     });
-    row.addEventListener("keydown", (event) => {
-      if (!manageProvidersMode && (event.key === "Enter" || event.key === " ")) {
-        event.preventDefault();
+    row.addEventListener("click", (event) => {
+      if (
+        !manageProvidersMode &&
+        !event.target.closest("button") &&
+        !event.target.closest(".provider-health-detail")
+      ) {
         selectProvider(provider);
       }
     });
@@ -407,7 +790,18 @@ function renderProviderList() {
 }
 
 function renderStatus(status) {
+  const previousHealthStatusUrl = healthStatusUrl();
   latestStatus = status;
+  const configuredHealthStatusUrl = healthStatusUrl();
+  if (configuredHealthStatusUrl !== previousHealthStatusUrl) {
+    healthRequestSequence += 1;
+    healthRequestActive = false;
+    latestHealthStatus = null;
+    healthStatusError = null;
+    renderedListSignature = null;
+    renderHealthSourceStatus();
+    if (configuredHealthStatusUrl) readHealthStatus({ quiet: true });
+  }
   renderUsageSummary();
   const current = currentProvider(status);
   document.querySelector("#current-name").textContent = current?.name || "尚未选择";
@@ -484,6 +878,53 @@ async function readStatus({ quiet = false } = {}) {
   } catch (error) {
     footerMessage.textContent = "无法连接本地中转，服务可能已经退出";
     if (!quiet) showToast("连接失败", "无法读取本地中转状态。", "error");
+  }
+}
+
+async function readHealthStatus({ quiet = false } = {}) {
+  const configuredUrl = healthStatusUrl();
+  if (!configuredUrl) {
+    latestHealthStatus = null;
+    healthStatusError = null;
+    renderHealthSourceStatus();
+    return;
+  }
+  if (healthRequestActive) return;
+  healthRequestActive = true;
+  const requestSequence = ++healthRequestSequence;
+  renderHealthSourceStatus();
+  try {
+    const response = await fetch(configuredUrl, {
+      cache: "no-store",
+      mode: "cors",
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const payload = await response.json();
+    if (!payload || !Array.isArray(payload.providers)) {
+      throw new Error("检测数据格式无效");
+    }
+    if (requestSequence !== healthRequestSequence) return;
+    latestHealthStatus = payload;
+    healthStatusError = null;
+  } catch (error) {
+    if (requestSequence !== healthRequestSequence) return;
+    healthStatusError = error?.message || "无法读取服务器检测数据";
+    if (!quiet) {
+      showToast(
+        "检测数据刷新失败",
+        latestHealthStatus
+          ? "继续显示上次成功获取的检测结果。"
+          : "暂时无法连接服务器检测接口。",
+        "error",
+      );
+    }
+  } finally {
+    if (requestSequence === healthRequestSequence) {
+      healthRequestActive = false;
+      renderedListSignature = null;
+      renderHealthSourceStatus();
+      renderProviderList();
+    }
   }
 }
 
@@ -643,6 +1084,7 @@ async function shutdownProxy() {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     window.clearInterval(pollTimer);
+    window.clearInterval(healthPollTimer);
     footerMessage.textContent = "本地中转正在退出，可以关闭此页面";
     showToast("本地中转正在退出", "再次使用时从桌面快捷方式启动。", "success");
   } catch (error) {
@@ -656,6 +1098,7 @@ usageWindow.addEventListener("change", () => {
   readStatus();
 });
 manageProvidersButton.addEventListener("click", toggleProviderManagement);
+healthRefreshButton.addEventListener("click", () => readHealthStatus());
 document.querySelector("#refresh-button").addEventListener("click", refreshProviders);
 document.querySelector("#copy-config").addEventListener("click", copyConfig);
 document.querySelector("#shutdown-button").addEventListener("click", shutdownProxy);
@@ -714,5 +1157,10 @@ themeMedia.addEventListener("change", () => {
 document.querySelector("#proxy-url").textContent = `${window.location.origin}/v1`;
 
 applyTheme(themePreference());
+renderHealthSourceStatus();
 readStatus();
 pollTimer = window.setInterval(() => readStatus({ quiet: true }), 1000);
+healthPollTimer = window.setInterval(
+  () => readHealthStatus({ quiet: true }),
+  30000,
+);

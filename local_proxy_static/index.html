@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="/control/static/styles.css?v=8">
+  <link rel="stylesheet" href="/control/static/styles.css?v=9">
 </head>
 <body>
   <main class="stage">
@@ -63,9 +63,14 @@
       <div id="providers-view" class="workspace view-panel">
         <section class="provider-pane" aria-labelledby="providers-title">
           <div class="toolbar">
-            <div>
+            <div class="toolbar-copy">
               <h2 id="providers-title">选择转发供应商</h2>
               <p id="provider-count">正在读取 CC Switch...</p>
+              <div id="health-source" class="health-source" aria-live="polite">
+                <span id="health-source-dot" class="health-source-dot unknown" aria-hidden="true"></span>
+                <span id="health-source-text">正在读取服务器检测配置</span>
+                <button id="health-refresh-button" class="health-refresh-button" type="button" title="刷新服务器检测数据" aria-label="刷新服务器检测数据">↻</button>
+              </div>
             </div>
             <div class="toolbar-actions">
               <label class="usage-window-control">
@@ -97,7 +102,7 @@
           </div>
           <div class="provider-list-shell">
             <div class="manage-hint" id="manage-hint" hidden>拖动左侧手柄调整顺序；搜索时暂停拖动。隐藏的供应商仅在管理模式显示。</div>
-            <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>Token 用量</span><span>认证</span></div>
+            <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>服务器检测</span><span>Token 用量</span><span>认证</span></div>
             <div id="provider-list" class="provider-list" aria-live="polite"></div>
             <div id="empty-state" class="empty-state" hidden>没有匹配的供应商</div>
           </div>
@@ -216,6 +221,6 @@
     <ol id="recovery-error-list"></ol>
   </div>
 
-  <script src="/control/static/app.js?v=8" defer></script>
+  <script src="/control/static/app.js?v=9" defer></script>
 </body>
 </html>

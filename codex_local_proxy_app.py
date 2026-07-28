@@ -31,12 +31,13 @@ from codex_local_proxy import (
     UsageStore,
     filter_self_referencing_providers,
     load_proxy_providers,
+    normalize_health_status_url,
     order_proxy_providers,
     retry_policy_from_mapping,
 )
 
 
-SETTINGS_VERSION = 3
+SETTINGS_VERSION = 4
 
 
 def settings_path() -> Path:
@@ -57,6 +58,7 @@ def default_settings() -> dict[str, Any]:
         "retry": RetryPolicy().as_public_dict(),
         "provider_order": [],
         "hidden_provider_ids": [],
+        "health_status_url": None,
     }
 
 
@@ -91,6 +93,12 @@ def load_settings(path: Path | None = None) -> dict[str, Any]:
                     if isinstance(value, str) and value.strip()
                 )
             )
+    try:
+        settings["health_status_url"] = normalize_health_status_url(
+            payload.get("health_status_url")
+        )
+    except ValueError:
+        pass
     return settings
 
 
@@ -214,6 +222,7 @@ def run_application(
         on_retry_policy_changed=remember_retry_policy,
         on_shutdown_requested=stop_tray if tray else None,
         usage_store=usage_store,
+        health_status_url=settings.get("health_status_url"),
     )
     server.start()
     control_url = f"http://127.0.0.1:{port}/control/"

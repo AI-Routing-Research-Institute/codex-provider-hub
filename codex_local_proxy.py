@@ -1025,6 +1025,22 @@ def _normalize_base_url(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
 
+def normalize_health_status_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("health_status_url must be an HTTP or HTTPS URL")
+    raw = value.strip()
+    if not raw:
+        return None
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("health_status_url must be an HTTP or HTTPS URL")
+    if parsed.username or parsed.password or parsed.fragment:
+        raise ValueError("health_status_url cannot contain credentials or a fragment")
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+
+
 def _nonempty_string(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
@@ -1058,6 +1074,7 @@ def create_proxy_app(
     retry_policy_store: RetryPolicyStore | None = None,
     on_retry_policy_changed: Callable[[RetryPolicy], None] | None = None,
     usage_store: UsageStore | None = None,
+    health_status_url: str | None = None,
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> FastAPI:
     active_retry_policy_store = retry_policy_store or RetryPolicyStore(retry_policy)
@@ -1073,6 +1090,7 @@ def create_proxy_app(
         follow_redirects=False,
     )
     owns_client = client is None
+    active_health_status_url = normalize_health_status_url(health_status_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -1129,6 +1147,7 @@ def create_proxy_app(
             active_retry_policy_store.get(),
             hidden_provider_ids=hidden,
             usage_summary=usage,
+            health_status_url=active_health_status_url,
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
@@ -1293,6 +1312,7 @@ def _public_control_status(
     *,
     hidden_provider_ids: Iterable[str] = (),
     usage_summary: dict[str, Any] | None = None,
+    health_status_url: str | None = None,
 ) -> dict[str, Any]:
     status = router.status()
     policy = retry_policy or RetryPolicy()
@@ -1307,6 +1327,7 @@ def _public_control_status(
         "last_provider_id": status.last_provider_id,
         "last_status_code": status.last_status_code,
         "last_error": status.last_error,
+        "health_status_url": health_status_url,
         "usage": usage_summary or _empty_usage_summary("today"),
         "retry": {
             **policy.as_public_dict(),
@@ -1881,6 +1902,7 @@ class LocalProxyServer:
         on_retry_policy_changed: Callable[[RetryPolicy], None] | None = None,
         on_shutdown_requested: Callable[[], None] | None = None,
         usage_store: UsageStore | None = None,
+        health_status_url: str | None = None,
     ) -> None:
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("本地中转只允许监听回环地址")
@@ -1906,6 +1928,7 @@ class LocalProxyServer:
             retry_policy_store=retry_policy_store,
             on_retry_policy_changed=on_retry_policy_changed,
             usage_store=usage_store,
+            health_status_url=health_status_url,
         )
 
     @property
@@ -1958,11 +1981,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--provider")
+    parser.add_argument("--health-status-url")
     args = parser.parse_args(argv)
     providers = load_proxy_providers(args.database)
     router = ProviderRouter(providers, current_provider_id=args.provider)
     uvicorn.run(
-        create_proxy_app(router),
+        create_proxy_app(router, health_status_url=args.health_status_url),
         host=args.host,
         port=args.port,
         log_level="warning",

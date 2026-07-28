@@ -20,6 +20,9 @@ class LocalProxySettingsTests(unittest.TestCase):
             settings["retry"]["max_attempts"] = -1
             settings["provider_order"] = ["provider-b", "provider-a"]
             settings["hidden_provider_ids"] = ["provider-c"]
+            settings["health_status_url"] = (
+                "https://status.example.test/api/status?window=24h"
+            )
 
             save_settings(settings, path)
 
@@ -30,6 +33,10 @@ class LocalProxySettingsTests(unittest.TestCase):
                 load_settings(path)["provider_order"], ["provider-b", "provider-a"]
             )
             self.assertEqual(load_settings(path)["hidden_provider_ids"], ["provider-c"])
+            self.assertEqual(
+                load_settings(path)["health_status_url"],
+                "https://status.example.test/api/status?window=24h",
+            )
             path.write_text("not-json", encoding="utf-8")
             self.assertEqual(load_settings(path), default_settings())
 
@@ -37,7 +44,13 @@ class LocalProxySettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "settings.json"
             path.write_text(
-                json.dumps({"selected_provider_id": "", "port": 70000}),
+                json.dumps(
+                    {
+                        "selected_provider_id": "",
+                        "port": 70000,
+                        "health_status_url": "file:///private/status.json",
+                    }
+                ),
                 encoding="utf-8",
             )
 

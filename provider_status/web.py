@@ -109,6 +109,7 @@ def create_app(
         manual_jobs = _latest_manual_jobs(control_store, providers)
         manual_histories = _manual_histories(control_store, providers)
         response.headers["Cache-Control"] = "public, max-age=30"
+        response.headers["Access-Control-Allow-Origin"] = "*"
         return {
             "window": window,
             "generated_at": now.isoformat(),
