@@ -21,6 +21,7 @@ if sys.stderr is None:
 import httpx
 
 from codex_local_proxy import (
+    CONTROL_ASSET_DIR,
     DEFAULT_DATABASE,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -37,6 +38,7 @@ from codex_local_proxy import (
 )
 
 
+APP_VERSION = "0.1.0"
 SETTINGS_VERSION = 4
 
 
@@ -138,18 +140,47 @@ def existing_proxy_url(port: int) -> str | None:
 
 
 def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
+    asset_names = ("index.html", "app.js", "styles.css")
+    missing_assets = [
+        name for name in asset_names if not (CONTROL_ASSET_DIR / name).is_file()
+    ]
+    if missing_assets:
+        raise FileNotFoundError(
+            "本地中转页面资源缺失：" + "、".join(missing_assets)
+        )
+    icon = create_app_icon()
     providers = filter_self_referencing_providers(
         load_proxy_providers(database), DEFAULT_PORT
     )
     router = ProviderRouter(providers)
     current = router.current_provider()
     return {
+        "app_version": APP_VERSION,
         "provider_count": len(providers),
         "current_provider_configured": current is not None,
         "credential_count": sum(provider.has_credentials for provider in providers),
         "listen_address": f"{DEFAULT_HOST}:{DEFAULT_PORT}",
         "control_path": "/control/",
+        "control_asset_count": len(asset_names),
+        "icon_size": list(icon.size),
     }
+
+
+def show_startup_error(message: str) -> None:
+    print(message, file=sys.stderr)
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            message,
+            "Codex 本地中转",
+            0x10,
+        )
+    except (AttributeError, OSError):
+        pass
 
 
 def run_application(
@@ -307,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tray", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--write-icon", type=Path)
+    parser.add_argument("--version", action="version", version=APP_VERSION)
     args = parser.parse_args(argv)
     if args.write_icon is not None:
         try:
@@ -320,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.smoke_test:
         try:
             result = smoke_test(args.database)
-        except (OSError, ValueError, sqlite3.Error) as exc:
+        except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             return 1
         print(json.dumps({"ok": True, **result}, ensure_ascii=False))
@@ -330,10 +362,10 @@ def main(argv: list[str] | None = None) -> int:
             database=args.database,
             port=port,
             open_browser=not args.no_browser,
-            tray=args.tray,
+            tray=args.tray or bool(getattr(sys, "frozen", False)),
         )
     except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
-        print(str(exc), file=sys.stderr)
+        show_startup_error(str(exc))
         return 1
 
 

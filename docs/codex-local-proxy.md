@@ -6,6 +6,14 @@
 http://127.0.0.1:17890/control/
 ```
 
+## Windows 便携版
+
+从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，默认打开控制台并常驻 Windows 通知区域，不需要安装项目虚拟环境。
+
+便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。程序不会把 CC Switch 数据库、Key、本地设置或用量数据写入 EXE；设置和用量仍保存在 `%LOCALAPPDATA%\CodexLocalProxy`。
+
+可以使用同一 Release 中的 `.sha256` 文件校验下载内容。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
+
 ## 启动
 
 ```powershell

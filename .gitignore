@@ -7,6 +7,8 @@ htmlcov/
 .venv/
 venv/
 .worktrees/
+.build/
+dist/
 
 # Local private configuration and credentials
 config/providers.toml
