@@ -1,6 +1,6 @@
 # Codex 本地中转
 
-本地中转固定监听 `127.0.0.1:17890`，从 `~/.cc-switch/cc-switch.db` 只读加载 Codex API 供应商。控制台地址：
+本地中转默认监听 `127.0.0.1:17890`，从 `~/.cc-switch/cc-switch.db` 只读加载 Codex API 供应商。控制台地址：
 
 ```text
 http://127.0.0.1:17890/control/
@@ -10,7 +10,9 @@ http://127.0.0.1:17890/control/
 
 从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，默认打开控制台并常驻 Windows 通知区域，不需要安装项目虚拟环境。
 
-便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。程序不会把 CC Switch 数据库、Key、本地设置或用量数据写入 EXE；设置和用量仍保存在 `%LOCALAPPDATA%\CodexLocalProxy`。
+便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。程序不会把 CC Switch 数据库、Key、本地设置或用量数据写入 EXE；设置和用量保存在 `~/.codex-local-proxy/`。
+
+从旧版本首次启动时，程序会把 `%LOCALAPPDATA%\CodexLocalProxy` 中的 `settings.json` 和 `usage.sqlite3` 安全迁移到新目录，并保留旧文件作为备份。
 
 可以使用同一 Release 中的 `.sha256` 文件校验下载内容。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
 
@@ -28,6 +30,12 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 
 桌面快捷方式使用 `pythonw.exe` 在后台启动。首次启动会打开控制台并在 Windows 通知区域显示常驻图标；双击图标或右键选择“打开控制台”可再次打开页面，选择“退出本地中转”会停止服务。重复启动快捷方式只会打开已有控制台，不会创建第二个服务进程。
 
+## 运行设置
+
+控制台的“运行设置”页可以修改本地端口、供应商数据源和服务器检测地址。数据源保存前会以只读方式验证，保存后立即替换新请求使用的供应商列表；检测地址也会立即生效。端口修改需要退出并重新启动本地中转，随后重新复制一次 Codex 配置。
+
+本地数据目录固定为 `~/.codex-local-proxy/`，页面只展示该位置，不允许修改。`settings.json` 保存端口、数据源、检测地址、重试策略和供应商显示偏好，`usage.sqlite3` 保存 Token 聚合数据。Codex 自身的配置文件仍是 `~/.codex/config.toml`，本地中转不会自动覆盖它。
+
 ## 首次接入 Codex
 
 在控制台点击“复制 Codex 配置”，把片段合并到 Codex 的 `config.toml`，然后重启一次 Codex。此后 Codex 始终连接本机地址，切换供应商不再需要重启。
@@ -37,10 +45,10 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 ## 供应商列表与 Token 统计
 
 - “管理列表”模式可以拖动供应商调整顺序，也可以隐藏和恢复供应商。当前正在使用的供应商需要先切换后才能隐藏。
-- 排序和隐藏状态保存在 `%LOCALAPPDATA%\CodexLocalProxy\settings.json`，不会修改 CC Switch 数据库。
+- 排序和隐藏状态保存在 `~/.codex-local-proxy/settings.json`，不会修改 CC Switch 数据库。
 - 指向当前本地中转监听端口的回环供应商会在加载时排除，避免把“Codex 本地中转”自身显示为可选上游。
 - Token 数据优先读取上游 Responses 终止事件或非流式响应中的 `usage`；上游没有返回 `usage` 时，才使用与模型匹配的 `tiktoken` 编码估算输入和可见输出。
-- 用量保存在 `%LOCALAPPDATA%\CodexLocalProxy\usage.sqlite3`。只保存供应商 ID、模型、时间、状态和 Token 数值，不保存请求正文、回答正文或 Key。
+- 用量保存在 `~/.codex-local-proxy/usage.sqlite3`。只保存供应商 ID、模型、时间、状态和 Token 数值，不保存请求正文、回答正文或 Key。
 - 控制台支持今日、近 24 小时、近 7 日（严格 `7 × 24` 小时）、近 30 日和全部时间范围。
 
 ## 自动恢复

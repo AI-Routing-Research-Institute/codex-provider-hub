@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from codex_local_proxy import (
+    HealthStatusUrlStore,
     LocalProxyServer,
     ProviderRouter,
     ProxyProvider,
@@ -605,6 +606,100 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.get().strategy, "fixed")
         self.assertEqual(changed, [store.get()])
         self.assertNotIn("fixture-secret", updated.text)
+
+    async def test_runtime_settings_api_validates_updates_and_refreshes_health_url(self) -> None:
+        runtime = {
+            "configured_port": 17890,
+            "active_port": 17890,
+            "restart_required": False,
+            "database_path": "~/.cc-switch/cc-switch.db",
+            "health_status_url": None,
+            "data_directory": "~/.codex-local-proxy",
+            "codex_config_file": "~/.codex/config.toml",
+        }
+        changed: list[dict[str, object]] = []
+        health_store = HealthStatusUrlStore()
+
+        def snapshot() -> dict[str, object]:
+            return dict(runtime)
+
+        def update(payload: dict[str, object]) -> dict[str, object]:
+            if payload.get("port") == 80:
+                raise ValueError("端口无效")
+            changed.append(dict(payload))
+            runtime["configured_port"] = payload["port"]
+            runtime["restart_required"] = payload["port"] != runtime["active_port"]
+            runtime["database_path"] = payload["database_path"]
+            runtime["health_status_url"] = payload["health_status_url"]
+            health_store.replace(payload["health_status_url"])
+            return snapshot()
+
+        def validate_database(database_path: str) -> dict[str, object]:
+            if database_path == "missing.db":
+                raise ValueError("未找到数据库")
+            return {
+                "database_path": database_path,
+                "provider_count": 2,
+                "current_provider_configured": True,
+            }
+
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            health_status_url_store=health_store,
+            runtime_settings_snapshot=snapshot,
+            on_runtime_settings_changed=update,
+            validate_runtime_database=validate_database,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+        payload = {
+            "port": 18888,
+            "database_path": "~/.cc-switch/alternate.db",
+            "health_status_url": "https://status.example.test/api/status",
+        }
+
+        current = await client.get("/control/api/runtime-settings")
+        forbidden = await client.post("/control/api/runtime-settings", json=payload)
+        invalid = await client.post(
+            "/control/api/runtime-settings",
+            headers={"X-Local-Proxy-Control": "1"},
+            json={**payload, "port": 80},
+        )
+        invalid_database = await client.post(
+            "/control/api/runtime-settings/validate-database",
+            headers={"X-Local-Proxy-Control": "1"},
+            json={"database_path": "missing.db"},
+        )
+        valid_database = await client.post(
+            "/control/api/runtime-settings/validate-database",
+            headers={"X-Local-Proxy-Control": "1"},
+            json={"database_path": payload["database_path"]},
+        )
+        updated = await client.post(
+            "/control/api/runtime-settings",
+            headers={"X-Local-Proxy-Control": "1"},
+            json=payload,
+        )
+        status = await client.get("/control/api/status")
+
+        self.assertEqual(current.status_code, 200)
+        self.assertEqual(current.headers["cache-control"], "no-store")
+        self.assertEqual(forbidden.status_code, 403)
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(invalid_database.status_code, 422)
+        self.assertEqual(valid_database.json()["provider_count"], 2)
+        self.assertTrue(updated.json()["restart_required"])
+        self.assertEqual(changed, [payload])
+        self.assertEqual(
+            status.json()["health_status_url"],
+            "https://status.example.test/api/status",
+        )
+
     async def test_retries_retryable_status_before_returning_response(self) -> None:
         attempts = 0
         sleeps: list[float] = []
@@ -1235,10 +1330,15 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="recovery-details-button"', page.text)
         self.assertIn('id="usage-window"', page.text)
         self.assertIn('id="manage-providers"', page.text)
+        self.assertIn('id="runtime-view"', page.text)
+        self.assertIn('id="runtime-port"', page.text)
+        self.assertIn('id="runtime-database-path"', page.text)
+        self.assertIn('id="runtime-health-url"', page.text)
+        self.assertIn("~/.codex-local-proxy/", page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=10", page.text)
-        self.assertIn("app.js?v=10", page.text)
+        self.assertIn("styles.css?v=11", page.text)
+        self.assertIn("app.js?v=11", page.text)
         self.assertIn("selectProvider", script.text)
         self.assertIn("setProviderHidden", script.text)
         self.assertIn("saveProviderOrder", script.text)
@@ -1275,6 +1375,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(".hidden-provider", styles.text)
         self.assertIn("-webkit-line-clamp: 2", styles.text)
         self.assertIn("max-height: min(320px", styles.text)
+        self.assertIn(".setting-control-with-action", styles.text)
         self.assertEqual(script.headers["cache-control"], "no-store")
         self.assertEqual(refreshed.json()["current_provider_id"], "refreshed")
         self.assertEqual(

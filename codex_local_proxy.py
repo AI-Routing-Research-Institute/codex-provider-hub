@@ -626,6 +626,21 @@ class RetryPolicyStore:
             self._policy = policy
 
 
+class HealthStatusUrlStore:
+    def __init__(self, url: str | None = None) -> None:
+        self._lock = threading.RLock()
+        self._url = normalize_health_status_url(url)
+
+    def get(self) -> str | None:
+        with self._lock:
+            return self._url
+
+    def replace(self, url: str | None) -> None:
+        normalized = normalize_health_status_url(url)
+        with self._lock:
+            self._url = normalized
+
+
 def retry_policy_from_mapping(payload: Any) -> RetryPolicy:
     if not isinstance(payload, dict):
         raise ValueError("retry policy must be an object")
@@ -1075,6 +1090,10 @@ def create_proxy_app(
     on_retry_policy_changed: Callable[[RetryPolicy], None] | None = None,
     usage_store: UsageStore | None = None,
     health_status_url: str | None = None,
+    health_status_url_store: HealthStatusUrlStore | None = None,
+    runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None,
+    on_runtime_settings_changed: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    validate_runtime_database: Callable[[str], dict[str, Any]] | None = None,
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> FastAPI:
     active_retry_policy_store = retry_policy_store or RetryPolicyStore(retry_policy)
@@ -1090,7 +1109,9 @@ def create_proxy_app(
         follow_redirects=False,
     )
     owns_client = client is None
-    active_health_status_url = normalize_health_status_url(health_status_url)
+    active_health_status_url_store = health_status_url_store or HealthStatusUrlStore(
+        health_status_url
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -1147,7 +1168,7 @@ def create_proxy_app(
             active_retry_policy_store.get(),
             hidden_provider_ids=hidden,
             usage_summary=usage,
-            health_status_url=active_health_status_url,
+            health_status_url=active_health_status_url_store.get(),
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
@@ -1174,6 +1195,56 @@ def create_proxy_app(
         if on_retry_policy_changed is not None:
             on_retry_policy_changed(policy)
         return public_status_for_request(request)
+
+    @app.get("/control/api/runtime-settings", include_in_schema=False)
+    async def control_runtime_settings():
+        if runtime_settings_snapshot is None:
+            return JSONResponse(status_code=503, content={"detail": "运行设置功能不可用"})
+        return JSONResponse(
+            content=runtime_settings_snapshot(),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/control/api/runtime-settings", include_in_schema=False)
+    async def control_update_runtime_settings(request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if on_runtime_settings_changed is None:
+            return JSONResponse(status_code=503, content={"detail": "运行设置功能不可用"})
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("运行设置必须是对象")
+            updated = on_runtime_settings_changed(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": str(exc) or "运行设置格式无效"},
+            )
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法保存运行设置"})
+        return JSONResponse(content=updated, headers={"Cache-Control": "no-store"})
+
+    @app.post("/control/api/runtime-settings/validate-database", include_in_schema=False)
+    async def control_validate_runtime_database(request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if validate_runtime_database is None:
+            return JSONResponse(status_code=503, content={"detail": "数据源验证功能不可用"})
+        try:
+            payload = await request.json()
+            database_path = payload.get("database_path") if isinstance(payload, dict) else None
+            if not isinstance(database_path, str) or not database_path.strip():
+                raise ValueError("数据来源不能为空")
+            result = validate_runtime_database(database_path)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": str(exc) or "数据来源无效"},
+            )
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=422, content={"detail": "无法读取供应商数据库"})
+        return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
 
     @app.post("/control/api/providers/{provider_id}/select", include_in_schema=False)
     async def control_select(provider_id: str, request: Request):
@@ -1940,6 +2011,10 @@ class LocalProxyServer:
         on_shutdown_requested: Callable[[], None] | None = None,
         usage_store: UsageStore | None = None,
         health_status_url: str | None = None,
+        health_status_url_store: HealthStatusUrlStore | None = None,
+        runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None,
+        on_runtime_settings_changed: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        validate_runtime_database: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("本地中转只允许监听回环地址")
@@ -1966,6 +2041,10 @@ class LocalProxyServer:
             on_retry_policy_changed=on_retry_policy_changed,
             usage_store=usage_store,
             health_status_url=health_status_url,
+            health_status_url_store=health_status_url_store,
+            runtime_settings_snapshot=runtime_settings_snapshot,
+            on_runtime_settings_changed=on_runtime_settings_changed,
+            validate_runtime_database=validate_runtime_database,
         )
 
     @property

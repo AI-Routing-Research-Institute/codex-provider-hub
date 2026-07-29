@@ -65,10 +65,11 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 
 ### 本地中转与控制台
 
-- 固定监听 `127.0.0.1:17890`，Codex 只需配置一次。
+- 默认监听 `127.0.0.1:17890`，Codex 只需配置一次。
 - 从 `~/.cc-switch/cc-switch.db` 只读加载 Codex API 供应商。
 - 支持供应商即时切换、隐藏、拖动排序和搜索。
 - 支持 Windows 通知区域常驻、重复启动检测和桌面快捷方式。
+- 支持从控制台配置本地端口、供应商数据源和服务器检测地址。
 - 控制台提供浅色、深色和跟随系统主题。
 
 ### 自动恢复
@@ -100,7 +101,7 @@ Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-
 - [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
 
-下载后直接双击 EXE，程序会打开本地控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
+下载后直接双击 EXE，程序会打开本地控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`；本地设置和 Token 聚合数据保存在 `~/.codex-local-proxy/`。从旧版本首次启动时会迁移原有设置和用量数据，并保留旧文件作为备份。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
 
 ### 从源码运行
 

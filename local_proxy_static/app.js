@@ -13,6 +13,7 @@ let healthRequestSequence = 0;
 let controlRequestActive = false;
 let healthRequestActive = false;
 let retryFormLoaded = false;
+let latestRuntimeSettings = null;
 let recoveryDetailsPinned = false;
 let recoveryHideTimer = null;
 let manageProvidersMode = false;
@@ -31,6 +32,10 @@ const healthSourceText = document.querySelector("#health-source-text");
 const healthRefreshButton = document.querySelector("#health-refresh-button");
 const footerMessage = document.querySelector("#footer-message");
 const retryForm = document.querySelector("#retry-form");
+const runtimeForm = document.querySelector("#runtime-form");
+const runtimePortInput = document.querySelector("#runtime-port");
+const runtimeDatabaseInput = document.querySelector("#runtime-database-path");
+const runtimeHealthUrlInput = document.querySelector("#runtime-health-url");
 const themeButton = document.querySelector("#theme-button");
 const themeMenu = document.querySelector("#theme-menu");
 const recovery = document.querySelector("#recovery");
@@ -189,6 +194,61 @@ function renderSettingsSummary() {
     : "临时错误将直接返回 Codex";
 }
 
+function runtimePayloadFromForm() {
+  const healthStatusUrl = runtimeHealthUrlInput.value.trim();
+  return {
+    port: Number(runtimePortInput.value),
+    database_path: runtimeDatabaseInput.value.trim(),
+    health_status_url: healthStatusUrl || null,
+  };
+}
+
+function renderRuntimeSettingsSummary() {
+  const summary = document.querySelector("#runtime-settings-summary");
+  const configuredPort = Number(runtimePortInput.value);
+  const activePort = Number(latestRuntimeSettings?.active_port);
+  if (latestRuntimeSettings && configuredPort !== activePort) {
+    summary.textContent = `当前使用 ${activePort}，重启后切换到 ${configuredPort}`;
+  } else {
+    summary.textContent = "数据源和检测地址保存后即时生效";
+  }
+}
+
+function renderRuntimeSettings(settings) {
+  latestRuntimeSettings = settings;
+  runtimePortInput.value = String(settings.configured_port ?? settings.active_port ?? 17890);
+  runtimeDatabaseInput.value = settings.database_path || "~/.cc-switch/cc-switch.db";
+  runtimeHealthUrlInput.value = settings.health_status_url || "";
+  document.querySelector("#database-path").textContent = runtimeDatabaseInput.value;
+  document.querySelector("#runtime-data-directory").textContent = settings.data_directory || "~/.codex-local-proxy";
+  document.querySelector("#runtime-codex-config").textContent = settings.codex_config_file || "~/.codex/config.toml";
+  const restartRequired = settings.restart_required === true;
+  document.querySelector("#runtime-restart-notice").hidden = !restartRequired;
+  const state = document.querySelector("#runtime-settings-state");
+  state.classList.toggle("pending", restartRequired);
+  state.lastChild.textContent = restartRequired ? "等待重启" : "配置已生效";
+  renderRuntimeSettingsSummary();
+}
+
+async function responseDetail(response, fallback) {
+  try {
+    const payload = await response.json();
+    return typeof payload?.detail === "string" && payload.detail ? payload.detail : fallback;
+  } catch (error) {
+    return fallback;
+  }
+}
+
+async function readRuntimeSettings({ quiet = false } = {}) {
+  try {
+    const response = await fetch("/control/api/runtime-settings", { cache: "no-store" });
+    if (!response.ok) throw new Error(await responseDetail(response, `HTTP ${response.status}`));
+    renderRuntimeSettings(await response.json());
+  } catch (error) {
+    if (!quiet) showToast("读取设置失败", error?.message || "无法读取运行设置。", "error");
+  }
+}
+
 function switchView(viewName) {
   for (const button of document.querySelectorAll(".view-tab")) {
     const active = button.dataset.view === viewName;
@@ -197,6 +257,10 @@ function switchView(viewName) {
   }
   document.querySelector("#providers-view").hidden = viewName !== "providers";
   document.querySelector("#settings-view").hidden = viewName !== "settings";
+  document.querySelector("#runtime-view").hidden = viewName !== "runtime";
+  if (viewName === "runtime" && latestRuntimeSettings === null) {
+    readRuntimeSettings();
+  }
 }
 
 function escapeText(value) {
@@ -1150,6 +1214,128 @@ async function saveRetrySettings(event) {
   }
 }
 
+async function validateRuntimeDatabase() {
+  const button = document.querySelector("#validate-database");
+  const databasePath = runtimeDatabaseInput.value.trim();
+  if (!databasePath) {
+    showToast("数据来源无效", "请输入 CC Switch 数据库路径。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const response = await fetch("/control/api/runtime-settings/validate-database", {
+      method: "POST",
+      headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+      body: JSON.stringify({ database_path: databasePath }),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(await responseDetail(response, "无法读取供应商数据库"));
+    const result = await response.json();
+    runtimeDatabaseInput.value = result.database_path;
+    showToast(
+      "数据来源可用",
+      `已读取 ${result.provider_count} 个 Codex API 供应商。`,
+    );
+  } catch (error) {
+    showToast("数据来源不可用", error?.message || "无法读取供应商数据库。", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function normalizedHealthUrl(value) {
+  const raw = value.trim();
+  if (!raw) return "";
+  const parsed = new URL(raw);
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) {
+    throw new Error("检测地址必须是无凭据、无片段的 HTTP 或 HTTPS 地址");
+  }
+  return parsed.href;
+}
+
+async function testRuntimeHealthUrl() {
+  const button = document.querySelector("#test-health-url");
+  let url;
+  try {
+    url = normalizedHealthUrl(runtimeHealthUrlInput.value);
+  } catch (error) {
+    showToast("检测地址无效", error?.message || "请输入有效地址。", "error");
+    return;
+  }
+  if (!url) {
+    showToast("检测地址为空", "保存后将关闭服务器检测数据。", "success");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const response = await fetch(url, { cache: "no-store", mode: "cors" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (!payload || !Array.isArray(payload.providers)) throw new Error("检测数据格式无效");
+    runtimeHealthUrlInput.value = url;
+    showToast("检测地址可用", `接口返回 ${payload.providers.length} 个供应商状态。`);
+  } catch (error) {
+    showToast("检测地址不可用", error?.message || "无法读取服务器检测接口。", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveRuntimeSettings(event) {
+  event.preventDefault();
+  const button = document.querySelector("#save-runtime-settings");
+  const payload = runtimePayloadFromForm();
+  if (!Number.isInteger(payload.port) || payload.port < 1024 || payload.port > 65535) {
+    showToast("端口无效", "端口必须是 1024 到 65535 之间的整数。", "error");
+    return;
+  }
+  if (!payload.database_path) {
+    showToast("数据来源无效", "请输入 CC Switch 数据库路径。", "error");
+    return;
+  }
+  try {
+    if (payload.health_status_url) payload.health_status_url = normalizedHealthUrl(payload.health_status_url);
+  } catch (error) {
+    showToast("检测地址无效", error?.message || "请输入有效地址。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const response = await fetch("/control/api/runtime-settings", {
+      method: "POST",
+      headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(await responseDetail(response, "本地中转没有接受这组设置"));
+    const settings = await response.json();
+    renderRuntimeSettings(settings);
+    renderedListSignature = null;
+    await readStatus();
+    await readHealthStatus({ quiet: true });
+    showToast(
+      "运行设置已保存",
+      settings.restart_required
+        ? "数据源和检测地址已生效；端口将在重新启动后生效。"
+        : "数据源和检测地址已即时生效。",
+    );
+  } catch (error) {
+    showToast("保存失败", error?.message || "本地中转没有接受这组设置。", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function copyDataDirectory() {
+  const value = document.querySelector("#runtime-data-directory").textContent.trim();
+  try {
+    await navigator.clipboard.writeText(value);
+    showToast("路径已复制", value);
+  } catch (error) {
+    showToast("复制失败", "浏览器没有允许写入剪贴板。", "error");
+  }
+}
+
 async function copyConfig() {
   try {
     const response = await fetch("/control/api/codex-config", { cache: "no-store" });
@@ -1196,6 +1382,15 @@ for (const control of retryForm.querySelectorAll("input, select")) {
   control.addEventListener("change", renderSettingsSummary);
 }
 retryForm.addEventListener("submit", saveRetrySettings);
+for (const control of runtimeForm.querySelectorAll("input")) {
+  control.addEventListener("input", () => {
+    renderRuntimeSettingsSummary();
+  });
+}
+runtimeForm.addEventListener("submit", saveRuntimeSettings);
+document.querySelector("#validate-database").addEventListener("click", validateRuntimeDatabase);
+document.querySelector("#test-health-url").addEventListener("click", testRuntimeHealthUrl);
+document.querySelector("#copy-data-directory").addEventListener("click", copyDataDirectory);
 recoveryDetailsButton.addEventListener("click", () => {
   if (recoveryDetailsPinned) {
     hideRecoveryDetails({ force: true });
@@ -1261,6 +1456,7 @@ document.querySelector("#proxy-url").textContent = `${window.location.origin}/v1
 applyTheme(themePreference());
 renderHealthSourceStatus();
 readStatus();
+readRuntimeSettings({ quiet: true });
 pollTimer = window.setInterval(() => readStatus({ quiet: true }), 1000);
 healthPollTimer = window.setInterval(
   () => readHealthStatus({ quiet: true }),

@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="/control/static/styles.css?v=10">
+  <link rel="stylesheet" href="/control/static/styles.css?v=11">
 </head>
 <body>
   <main class="stage">
@@ -52,12 +52,13 @@
       <div class="connection-strip">
         <div class="connection-value"><span>Codex 固定连接</span><code id="proxy-url">http://127.0.0.1:17890/v1</code></div>
         <div class="status-group"><span class="dot"></span><span>本机可用</span></div>
-        <div class="connection-value database"><span>数据来源</span><code>~/.cc-switch/cc-switch.db</code></div>
+        <div class="connection-value database"><span>数据来源</span><code id="database-path">~/.cc-switch/cc-switch.db</code></div>
       </div>
 
       <nav class="view-tabs" aria-label="控制台页面">
         <button class="view-tab active" type="button" data-view="providers" aria-selected="true">供应商</button>
         <button class="view-tab" type="button" data-view="settings" aria-selected="false">重试设置</button>
+        <button class="view-tab" type="button" data-view="runtime" aria-selected="false">运行设置</button>
       </nav>
 
       <div id="providers-view" class="workspace view-panel">
@@ -204,6 +205,54 @@
         </form>
       </section>
 
+      <section id="runtime-view" class="settings-view view-panel" aria-labelledby="runtime-title" hidden>
+        <div class="settings-heading">
+          <div>
+            <h2 id="runtime-title">运行设置</h2>
+            <p>数据源和检测地址即时生效；端口在重新启动本地中转后生效</p>
+          </div>
+          <span id="runtime-settings-state" class="live-pill"><span class="dot"></span>配置已生效</span>
+        </div>
+        <form id="runtime-form" class="settings-form">
+          <label class="setting-row">
+            <span><strong>本地端口</strong><small>只监听 127.0.0.1；修改后需要重启并重新复制 Codex 配置</small></span>
+            <input id="runtime-port" type="number" min="1024" max="65535" step="1" inputmode="numeric" required>
+          </label>
+          <div class="setting-row">
+            <label for="runtime-database-path"><strong>供应商数据源</strong><small>默认只读加载 CC Switch 数据库</small></label>
+            <div class="setting-control-with-action">
+              <input id="runtime-database-path" type="text" spellcheck="false" autocomplete="off" required>
+              <button id="validate-database" class="secondary-button setting-action-button" type="button">验证</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <label for="runtime-health-url"><strong>服务器检测地址</strong><small>公开只读检测接口；留空则不显示服务器检测数据</small></label>
+            <div class="setting-control-with-action">
+              <input id="runtime-health-url" type="url" inputmode="url" spellcheck="false" autocomplete="off" placeholder="https://status.example.com/api/status">
+              <button id="test-health-url" class="secondary-button setting-action-button" type="button">测试</button>
+            </div>
+          </div>
+          <div class="setting-row setting-readonly-row">
+            <span><strong>本地数据目录</strong><small>固定保存 settings.json 与 usage.sqlite3，不保存供应商 Key</small></span>
+            <div class="setting-path-value">
+              <code id="runtime-data-directory">~/.codex-local-proxy/</code>
+              <button id="copy-data-directory" class="secondary-button setting-action-button" type="button">复制路径</button>
+            </div>
+          </div>
+          <div class="setting-row setting-readonly-row">
+            <span><strong>Codex 配置文件</strong><small>“复制 Codex 配置”生成的片段需要合并到此文件</small></span>
+            <code id="runtime-codex-config">~/.codex/config.toml</code>
+          </div>
+          <div id="runtime-restart-notice" class="setting-notice" hidden>
+            端口将在退出并重新启动本地中转后生效；届时需要重新复制 Codex 配置。
+          </div>
+          <div class="settings-actions">
+            <span id="runtime-settings-summary">正在读取运行设置</span>
+            <button id="save-runtime-settings" class="primary-button" type="submit">保存设置</button>
+          </div>
+        </form>
+      </section>
+
       <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
       <footer class="footer">
@@ -224,6 +273,6 @@
   <div id="provider-health-popover" class="provider-health-popover" role="dialog" aria-modal="false" aria-label="服务器检测详情"></div>
   <div id="history-detail-popover" class="history-detail-popover" role="tooltip"></div>
 
-  <script src="/control/static/app.js?v=10" defer></script>
+  <script src="/control/static/app.js?v=11" defer></script>
 </body>
 </html>

@@ -1,13 +1,20 @@
 import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from codex_local_proxy_app import (
     codex_config_fragment,
+    data_directory,
     default_settings,
+    display_path,
     load_settings,
+    migrate_legacy_data_directory,
     save_settings,
+    settings_path,
+    usage_database_path,
 )
 
 
@@ -17,6 +24,7 @@ class LocalProxySettingsTests(unittest.TestCase):
             path = Path(temp_dir) / "settings.json"
             settings = default_settings()
             settings.update(selected_provider_id="provider-a", port=18888)
+            settings["database_path"] = str(Path(temp_dir) / "cc-switch.db")
             settings["retry"]["max_attempts"] = -1
             settings["provider_order"] = ["provider-b", "provider-a"]
             settings["hidden_provider_ids"] = ["provider-c"]
@@ -28,6 +36,10 @@ class LocalProxySettingsTests(unittest.TestCase):
 
             self.assertEqual(load_settings(path)["selected_provider_id"], "provider-a")
             self.assertEqual(load_settings(path)["port"], 18888)
+            self.assertEqual(
+                load_settings(path)["database_path"],
+                display_path(Path(temp_dir) / "cc-switch.db"),
+            )
             self.assertEqual(load_settings(path)["retry"]["max_attempts"], -1)
             self.assertEqual(
                 load_settings(path)["provider_order"], ["provider-b", "provider-a"]
@@ -73,6 +85,38 @@ class LocalProxySettingsTests(unittest.TestCase):
 
             self.assertEqual(settings["provider_order"], ["second", "first"])
             self.assertEqual(settings["hidden_provider_ids"], ["hidden"])
+
+    def test_default_data_files_use_fixed_home_directory(self) -> None:
+        self.assertEqual(data_directory().name, ".codex-local-proxy")
+        self.assertEqual(settings_path(), data_directory() / "settings.json")
+        self.assertEqual(usage_database_path(), data_directory() / "usage.sqlite3")
+
+    def test_legacy_settings_and_usage_are_copied_without_removing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            legacy = root / "legacy"
+            destination = root / ".codex-local-proxy"
+            legacy.mkdir()
+            (legacy / "settings.json").write_text(
+                json.dumps({"port": 18888}),
+                encoding="utf-8",
+            )
+            with closing(sqlite3.connect(legacy / "usage.sqlite3")) as connection:
+                connection.execute("CREATE TABLE marker (value TEXT)")
+                connection.execute("INSERT INTO marker VALUES ('preserved')")
+                connection.commit()
+
+            migrated = migrate_legacy_data_directory(legacy, destination)
+
+            self.assertEqual(set(migrated), {"settings.json", "usage.sqlite3"})
+            self.assertTrue((legacy / "settings.json").is_file())
+            self.assertTrue((legacy / "usage.sqlite3").is_file())
+            self.assertEqual(load_settings(destination / "settings.json")["port"], 18888)
+            with closing(sqlite3.connect(destination / "usage.sqlite3")) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM marker").fetchone()[0],
+                    "preserved",
+                )
 
 
 class CodexConfigTests(unittest.TestCase):

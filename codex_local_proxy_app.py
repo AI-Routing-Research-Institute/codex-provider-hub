@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import threading
 import time
 import webbrowser
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,7 @@ from codex_local_proxy import (
     DEFAULT_DATABASE,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    HealthStatusUrlStore,
     LocalProxyServer,
     ProviderRouter,
     RetryPolicy,
@@ -39,17 +42,72 @@ from codex_local_proxy import (
 
 
 APP_VERSION = "0.1.0"
-SETTINGS_VERSION = 4
+SETTINGS_VERSION = 5
+APP_DATA_DIRECTORY_NAME = ".codex-local-proxy"
+
+
+def data_directory() -> Path:
+    return Path.home() / APP_DATA_DIRECTORY_NAME
 
 
 def settings_path() -> Path:
+    return data_directory() / "settings.json"
+
+
+def legacy_data_directory() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     base = Path(local_app_data) if local_app_data else Path.home() / ".config"
-    return base / "CodexLocalProxy" / "settings.json"
+    return base / "CodexLocalProxy"
 
 
 def usage_database_path() -> Path:
-    return settings_path().with_name("usage.sqlite3")
+    return data_directory() / "usage.sqlite3"
+
+
+def display_path(path: Path) -> str:
+    resolved = path.expanduser().resolve()
+    try:
+        relative = resolved.relative_to(Path.home().resolve())
+    except ValueError:
+        return str(resolved)
+    return "~" if not relative.parts else f"~/{relative.as_posix()}"
+
+
+def resolve_user_path(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve()
+
+
+def migrate_legacy_data_directory(
+    source: Path | None = None,
+    target: Path | None = None,
+) -> tuple[str, ...]:
+    legacy = (source or legacy_data_directory()).expanduser().resolve()
+    destination = (target or data_directory()).expanduser().resolve()
+    if legacy == destination or not legacy.is_dir():
+        return ()
+
+    migrated: list[str] = []
+    for name in ("settings.json", "usage.sqlite3"):
+        legacy_file = legacy / name
+        destination_file = destination / name
+        if not legacy_file.is_file() or destination_file.exists():
+            continue
+        destination.mkdir(parents=True, exist_ok=True)
+        temporary = destination / f".{name}.migrating"
+        temporary.unlink(missing_ok=True)
+        try:
+            if name == "usage.sqlite3":
+                source_uri = legacy_file.resolve().as_uri() + "?mode=ro"
+                with closing(sqlite3.connect(source_uri, uri=True)) as source_db:
+                    with closing(sqlite3.connect(temporary)) as destination_db:
+                        source_db.backup(destination_db)
+            else:
+                shutil.copy2(legacy_file, temporary)
+            temporary.replace(destination_file)
+        finally:
+            temporary.unlink(missing_ok=True)
+        migrated.append(name)
+    return tuple(migrated)
 
 
 def default_settings() -> dict[str, Any]:
@@ -57,6 +115,7 @@ def default_settings() -> dict[str, Any]:
         "schema_version": SETTINGS_VERSION,
         "selected_provider_id": None,
         "port": DEFAULT_PORT,
+        "database_path": display_path(DEFAULT_DATABASE),
         "retry": RetryPolicy().as_public_dict(),
         "provider_order": [],
         "hidden_provider_ids": [],
@@ -79,8 +138,16 @@ def load_settings(path: Path | None = None) -> dict[str, Any]:
     if isinstance(provider_id, str) and provider_id.strip():
         settings["selected_provider_id"] = provider_id.strip()
     port = payload.get("port")
-    if isinstance(port, int) and 1 <= port <= 65535:
+    if isinstance(port, int) and not isinstance(port, bool) and 1024 <= port <= 65535:
         settings["port"] = port
+    database_path = payload.get("database_path")
+    if isinstance(database_path, str) and database_path.strip():
+        try:
+            settings["database_path"] = display_path(
+                resolve_user_path(database_path.strip())
+            )
+        except (OSError, RuntimeError, ValueError):
+            pass
     try:
         settings["retry"] = retry_policy_from_mapping(payload.get("retry", {})).as_public_dict()
     except ValueError:
@@ -197,9 +264,22 @@ def run_application(
         return 0
 
     settings = load_settings()
+    settings_lock = threading.RLock()
+    active_database_path = database.expanduser().resolve()
+
+    def load_prepared_providers(source: Path) -> tuple:
+        loaded = filter_self_referencing_providers(
+            load_proxy_providers(source),
+            port,
+        )
+        with settings_lock:
+            provider_order = tuple(settings.get("provider_order", ()))
+        return order_proxy_providers(loaded, provider_order)
+
     def prepared_providers() -> tuple:
-        loaded = filter_self_referencing_providers(load_proxy_providers(database), port)
-        return order_proxy_providers(loaded, settings.get("provider_order", ()))
+        with settings_lock:
+            source = active_database_path
+        return load_prepared_providers(source)
 
     providers = prepared_providers()
     router = ProviderRouter(
@@ -209,14 +289,15 @@ def run_application(
     retry_policy_store = RetryPolicyStore(
         retry_policy_from_mapping(settings.get("retry", {}))
     )
+    health_status_url_store = HealthStatusUrlStore(
+        settings.get("health_status_url")
+    )
     usage_store = UsageStore(usage_database_path())
-    settings_lock = threading.RLock()
 
     def update_settings(**changes: Any) -> None:
         with settings_lock:
             settings.update(changes)
             settings["schema_version"] = SETTINGS_VERSION
-            settings["port"] = port
             save_settings(settings)
 
     def remember_selection(provider_id: str) -> None:
@@ -230,6 +311,86 @@ def run_application(
 
     def remember_provider_order(provider_ids: tuple[str, ...]) -> None:
         update_settings(provider_order=list(provider_ids))
+
+    def runtime_settings_snapshot() -> dict[str, Any]:
+        with settings_lock:
+            configured_port = int(settings.get("port", port))
+            database_display = display_path(active_database_path)
+        return {
+            "configured_port": configured_port,
+            "active_port": port,
+            "restart_required": configured_port != port,
+            "database_path": database_display,
+            "health_status_url": health_status_url_store.get(),
+            "data_directory": display_path(data_directory()),
+            "settings_file": display_path(settings_path()),
+            "usage_database": display_path(usage_database_path()),
+            "codex_config_file": "~/.codex/config.toml",
+        }
+
+    def validate_database_source(value: str) -> tuple[Path, tuple]:
+        source = resolve_user_path(value.strip())
+        if not source.is_file():
+            raise ValueError(f"未找到 CC Switch 数据库：{display_path(source)}")
+        try:
+            loaded = load_prepared_providers(source)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            raise ValueError("无法读取 CC Switch 数据库或数据库结构不兼容") from exc
+        if not loaded:
+            raise ValueError("数据库中没有可用的 Codex 供应商")
+        return source, loaded
+
+    def validate_runtime_database(value: str) -> dict[str, Any]:
+        source, loaded = validate_database_source(value)
+        return {
+            "database_path": display_path(source),
+            "provider_count": len(loaded),
+            "current_provider_configured": any(
+                provider.is_cc_switch_current for provider in loaded
+            ),
+        }
+
+    def apply_runtime_settings(payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal active_database_path
+        configured_port = payload.get("port")
+        if (
+            isinstance(configured_port, bool)
+            or not isinstance(configured_port, int)
+            or not 1024 <= configured_port <= 65535
+        ):
+            raise ValueError("端口必须是 1024 到 65535 之间的整数")
+        database_value = payload.get("database_path")
+        if not isinstance(database_value, str) or not database_value.strip():
+            raise ValueError("数据来源不能为空")
+        health_status_url = normalize_health_status_url(
+            payload.get("health_status_url")
+        )
+        source, loaded = validate_database_source(database_value)
+
+        with settings_lock:
+            candidate = dict(settings)
+            candidate.update(
+                schema_version=SETTINGS_VERSION,
+                port=configured_port,
+                database_path=display_path(source),
+                health_status_url=health_status_url,
+            )
+            save_settings(candidate)
+            settings.clear()
+            settings.update(candidate)
+            active_database_path = source
+
+        health_status_url_store.replace(health_status_url)
+        current = router.current_provider()
+        selected = router.replace_providers(
+            loaded,
+            preferred_id=current.provider_id if current else None,
+        )
+        if selected is not None and selected.provider_id != settings.get(
+            "selected_provider_id"
+        ):
+            update_settings(selected_provider_id=selected.provider_id)
+        return runtime_settings_snapshot()
 
     tray_holder: dict[str, Any] = {}
 
@@ -253,7 +414,10 @@ def run_application(
         on_retry_policy_changed=remember_retry_policy,
         on_shutdown_requested=stop_tray if tray else None,
         usage_store=usage_store,
-        health_status_url=settings.get("health_status_url"),
+        health_status_url_store=health_status_url_store,
+        runtime_settings_snapshot=runtime_settings_snapshot,
+        on_runtime_settings_changed=apply_runtime_settings,
+        validate_runtime_database=validate_runtime_database,
     )
     server.start()
     control_url = f"http://127.0.0.1:{port}/control/"
@@ -332,7 +496,7 @@ def write_app_icon(path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Codex CC Switch 本地中转")
-    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument("--database", type=Path)
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--tray", action="store_true")
@@ -347,19 +511,25 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         return 0
-    settings = load_settings()
-    port = args.port or int(settings["port"])
     if args.smoke_test:
         try:
-            result = smoke_test(args.database)
+            result = smoke_test(args.database or DEFAULT_DATABASE)
         except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             return 1
         print(json.dumps({"ok": True, **result}, ensure_ascii=False))
         return 0
     try:
+        migrate_legacy_data_directory()
+    except (OSError, sqlite3.Error) as exc:
+        show_startup_error(f"无法迁移旧版本地数据：{exc}")
+        return 1
+    settings = load_settings()
+    port = args.port if args.port is not None else int(settings["port"])
+    database = args.database or resolve_user_path(settings["database_path"])
+    try:
         return run_application(
-            database=args.database,
+            database=database,
             port=port,
             open_browser=not args.no_browser,
             tray=args.tray or bool(getattr(sys, "frozen", False)),
