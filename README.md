@@ -8,6 +8,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-4b5563?style=flat-square)
 ![README](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-c43d3d?style=flat-square)
+[![Release](https://img.shields.io/github/v/release/loongkkk/codex-provider-hub?style=flat-square)](https://github.com/loongkkk/codex-provider-hub/releases/latest)
 
 </div>
 
@@ -91,6 +92,17 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 - Worker 与 Web 服务分离，包含 systemd 和 Nginx 部署模板。
 
 ## 安装与快速启动
+
+### Windows 便携版（推荐）
+
+Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载便携版，无需安装 Python 或项目依赖：
+
+- [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
+- [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
+
+下载后直接双击 EXE，程序会打开本地控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
+
+### 从源码运行
 
 ### 1. 创建 Python 环境
 
