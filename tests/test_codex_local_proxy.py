@@ -882,6 +882,92 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"429 Too Many Requests", response.content)
         self.assertEqual(router.status().total_retries, 0)
 
+    async def test_embedded_upstream_failure_before_output_is_retried(self) -> None:
+        attempts = 0
+
+        class FailedStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
+                yield b'data: {"type":"response.failed","response":{"status":"failed","error":'
+                yield b'{"code":"upstream_error","message":"Upstream request failed"}}}\n\n'
+
+        class RecoveredStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n'
+                yield b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            stream = FailedStream() if attempts == 1 else RecoveredStream()
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertIn(b"recovered", response.content)
+        self.assertNotIn(b"Upstream request failed", response.content)
+        status = router.status()
+        self.assertEqual(status.total_retries, 1)
+        self.assertEqual(status.last_retry_kind, "upstream_error")
+        self.assertIn("Upstream request failed", status.recent_retry_errors[0].summary)
+
+    async def test_embedded_permanent_failure_is_not_retried(self) -> None:
+        attempts = 0
+
+        class InvalidRequestStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (
+                    b'data: {"type":"response.failed","response":{"status":"failed",'
+                    b'"error":{"code":"invalid_request_error",'
+                    b'"message":"Unknown parameter"}}}\n\n'
+                )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=InvalidRequestStream(),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(attempts, 1)
+        self.assertIn(b"Unknown parameter", response.content)
+        self.assertEqual(router.status().total_retries, 0)
+
     async def test_retries_stream_failure_before_first_chunk(self) -> None:
         attempts = 0
 

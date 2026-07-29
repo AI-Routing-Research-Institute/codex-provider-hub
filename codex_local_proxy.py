@@ -1651,9 +1651,9 @@ def _sse_preflight_decision(
         root = _decode_json(payload)
         if not isinstance(root, dict):
             return "commit", None, None
-        retry_summary = _embedded_rate_limit_summary(root, event_name)
-        if retry_summary is not None:
-            return "retry", "rate_limited", retry_summary
+        retry_kind, retry_summary = _embedded_retry_failure(root, event_name)
+        if retry_kind is not None:
+            return "retry", retry_kind, retry_summary
         if _sse_event_commits_response(root, event_name):
             return "commit", None, None
     return "wait", None, None
@@ -1670,10 +1670,10 @@ def _sse_event_payload(event: bytes) -> tuple[str, bytes | None]:
     return event_name, b"\n".join(data_lines) if data_lines else None
 
 
-def _embedded_rate_limit_summary(
+def _embedded_retry_failure(
     root: dict[str, Any],
     event_name: str,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     event_type = root.get("type") if isinstance(root.get("type"), str) else event_name
     response = root.get("response") if isinstance(root.get("response"), dict) else {}
     error_nodes = [root.get("error"), response.get("error")]
@@ -1684,7 +1684,7 @@ def _embedded_rate_limit_summary(
         or response.get("status") == "failed"
     )
     if not failed:
-        return None
+        return None, None
 
     details: list[str] = []
     for node in (root, response, *error_nodes):
@@ -1695,9 +1695,14 @@ def _embedded_rate_limit_summary(
                     details.append(str(value))
         elif isinstance(node, (str, int, float)):
             details.append(str(node))
+    error_codes = {
+        str(node.get(key)).strip().casefold()
+        for node in error_nodes
+        if isinstance(node, dict)
+        for key in ("code", "type")
+        if isinstance(node.get(key), (str, int, float))
+    }
     combined = " ".join(details)
-    if not re.search(r"(?i)(?:\b429\b|too many requests|rate[_ -]?limit)", combined):
-        return None
     message = next(
         (
             str(node.get(key))
@@ -1706,9 +1711,40 @@ def _embedded_rate_limit_summary(
             for key in ("message", "detail")
             if isinstance(node.get(key), (str, int, float)) and str(node.get(key)).strip()
         ),
-        "请求频率受限",
+        "上游临时错误",
     )
-    return _sanitize_retry_summary(f"HTTP 429：{message}")
+    if re.search(r"(?i)(?:\b429\b|too many requests|rate[_ -]?limit)", combined):
+        rate_message = message if message != "上游临时错误" else "请求频率受限"
+        return "rate_limited", _sanitize_retry_summary(f"HTTP 429：{rate_message}")
+
+    permanent_codes = {
+        "authentication_error",
+        "billing_error",
+        "content_policy_violation",
+        "insufficient_quota",
+        "invalid_request_error",
+        "model_not_found",
+        "not_found_error",
+        "permission_denied",
+    }
+    if error_codes & permanent_codes:
+        return None, None
+
+    transient_codes = {
+        "internal_server_error",
+        "server_error",
+        "upstream_error",
+    }
+    transient_message = re.search(
+        r"(?i)(?:\b(?:500|502|503|504)\b|bad gateway|gateway timeout|"
+        r"service unavailable|temporar(?:y|ily) unavailable|upstream (?:request )?failed)",
+        combined,
+    )
+    if (error_codes & transient_codes) or transient_message is not None:
+        return "upstream_error", _sanitize_retry_summary(
+            f"上游请求失败：{message}"
+        )
+    return None, None
 
 
 def _sse_event_commits_response(root: dict[str, Any], event_name: str) -> bool:
@@ -1731,6 +1767,7 @@ def _retry_kind_summary(kind: str) -> str:
         "rate_limited": "HTTP 429 请求频率受限",
         "connection": "连接上游失败",
         "stream_start": "响应开始前连接中断",
+        "upstream_error": "上游请求失败",
     }.get(kind, "上游临时错误")
 
 
