@@ -194,6 +194,32 @@ function renderSettingsSummary() {
     : "临时错误将直接返回 Codex";
 }
 
+function formatRetryKind(kind) {
+  const value = String(kind || "");
+  if (value.startsWith("http_")) return `HTTP ${value.slice(5)}`;
+  return {
+    rate_limited: "HTTP 429",
+    connection: "连接上游失败",
+    stream_start: "响应开始前断流",
+    upstream_error: "上游请求失败",
+  }[value] || "上游临时错误";
+}
+
+function formatRetryDelay(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  return `${Number(seconds.toFixed(1))} 秒后重试`;
+}
+
+function formatRecoverySummary(recoveryItem, { waiting = false } = {}) {
+  const parts = [formatRetryKind(recoveryItem?.kind)];
+  if (waiting) {
+    const delay = formatRetryDelay(recoveryItem?.delay_seconds);
+    if (delay) parts.push(delay);
+  }
+  return parts.join(" · ");
+}
+
 function runtimePayloadFromForm() {
   const healthStatusUrl = runtimeHealthUrlInput.value.trim();
   return {
@@ -977,15 +1003,15 @@ function renderStatus(status) {
     recoveryTitle.textContent = activeRecoveries.length > 1
       ? `${activeRecoveries.length} 个请求正在自动恢复`
       : `正在自动恢复 · 第 ${activeRecovery.attempt}/${attemptLabel(activeRecovery.max_attempts)} 次`;
-    recoveryDetail.textContent = `已拦截：${activeRecovery.summary || "上游临时错误"}；等待 ${activeRecovery.delay_seconds} 秒后重试。`;
+    recoveryDetail.textContent = formatRecoverySummary(activeRecovery, { waiting: true });
   } else if (openCircuit) {
     recoveryTitle.textContent = "当前供应商短暂熔断";
     recoveryDetail.textContent = `约 ${Math.ceil(openCircuit.retry_after_seconds)} 秒后恢复接收新请求。`;
   } else if (retry.total_retries > 0) {
     recoveryTitle.textContent = `自动恢复已就绪 · 已拦截 ${retry.total_retries} 次`;
-    const latestError = retry.recent_errors?.[0]?.summary;
+    const latestError = retry.recent_errors?.[0];
     recoveryDetail.textContent = latestError
-      ? `最近一次：${latestError}`
+      ? `最近一次 · ${formatRecoverySummary(latestError)}`
       : "只在内容输出前重试，不会重放已经开始的响应。";
   } else {
     recoveryTitle.textContent = "自动恢复已就绪";

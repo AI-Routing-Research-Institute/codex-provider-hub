@@ -34,6 +34,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "timeout",
         "network_error",
         "invalid_output",
+        "stream_interrupted",
         "unknown_error",
     }
 )
@@ -65,6 +66,10 @@ _SENSITIVE_KEY_VALUE_RE = re.compile(
 )
 _SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{10,}")
 _URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\|$))"
+)
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _MAX_ERROR_SUMMARY_LENGTH = 240
 _AVAILABILITY_COLUMNS = {
     0.125: "availability_3h",
@@ -93,6 +98,9 @@ class ProbeRecord:
     latency_ms: int | None
     error_code: str | None = None
     error_summary: str | None = None
+    http_status_code: int | None = None
+    failure_stage: str | None = None
+    diagnostic_source: str | None = None
 
 
 class StatusStore:
@@ -369,8 +377,11 @@ class StatusStore:
                         latency_ms,
                         error_code,
                         error_summary,
+                        http_status_code,
+                        failure_stage,
+                        diagnostic_source,
                         state_after
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         target_id,
@@ -380,6 +391,9 @@ class StatusStore:
                         result.latency_ms,
                         error_code,
                         error_summary,
+                        result.http_status_code,
+                        result.failure_stage,
+                        result.diagnostic_source,
                         transition.state.value,
                     ),
                 )
@@ -394,7 +408,10 @@ class StatusStore:
                         next_check_at = ?,
                         last_latency_ms = ?,
                         last_error_code = ?,
-                        last_error_summary = ?
+                        last_error_summary = ?,
+                        last_http_status_code = ?,
+                        last_failure_stage = ?,
+                        last_diagnostic_source = ?
                     WHERE id = ?
                     """,
                     (
@@ -409,6 +426,9 @@ class StatusStore:
                         result.latency_ms,
                         error_code,
                         error_summary,
+                        None if result.success else result.http_status_code,
+                        None if result.success else result.failure_stage,
+                        None if result.success else result.diagnostic_source,
                         target_id,
                     ),
                 )
@@ -619,6 +639,9 @@ class StatusStore:
                 last_latency_ms INTEGER,
                 last_error_code TEXT,
                 last_error_summary TEXT,
+                last_http_status_code INTEGER,
+                last_failure_stage TEXT,
+                last_diagnostic_source TEXT,
                 UNIQUE(provider_id, model)
             );
 
@@ -631,6 +654,9 @@ class StatusStore:
                 latency_ms INTEGER,
                 error_code TEXT,
                 error_summary TEXT,
+                http_status_code INTEGER,
+                failure_stage TEXT,
+                diagnostic_source TEXT,
                 state_after TEXT NOT NULL
             );
 
@@ -672,6 +698,30 @@ class StatusStore:
                 "ALTER TABLE providers "
                 "ADD COLUMN probe_mode TEXT NOT NULL DEFAULT 'automatic'"
             )
+        target_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(probe_targets)")
+        }
+        for column, column_type in (
+            ("last_http_status_code", "INTEGER"),
+            ("last_failure_stage", "TEXT"),
+            ("last_diagnostic_source", "TEXT"),
+        ):
+            if column not in target_columns:
+                connection.execute(
+                    f"ALTER TABLE probe_targets ADD COLUMN {column} {column_type}"
+                )
+        run_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(probe_runs)")
+        }
+        for column, column_type in (
+            ("http_status_code", "INTEGER"),
+            ("failure_stage", "TEXT"),
+            ("diagnostic_source", "TEXT"),
+        ):
+            if column not in run_columns:
+                connection.execute(
+                    f"ALTER TABLE probe_runs ADD COLUMN {column} {column_type}"
+                )
         snapshot_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(provider_snapshots)")
@@ -750,6 +800,25 @@ class StatusStore:
         ).fetchall()
         models = []
         model_availabilities: list[float] = []
+        run_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(probe_runs)")
+        }
+        history_http_status = (
+            "http_status_code"
+            if "http_status_code" in run_columns
+            else "NULL AS http_status_code"
+        )
+        history_failure_stage = (
+            "failure_stage"
+            if "failure_stage" in run_columns
+            else "NULL AS failure_stage"
+        )
+        history_diagnostic_source = (
+            "diagnostic_source"
+            if "diagnostic_source" in run_columns
+            else "NULL AS diagnostic_source"
+        )
         for target in targets:
             availability = self._target_availability(
                 connection,
@@ -760,11 +829,14 @@ class StatusStore:
             if availability is not None:
                 model_availabilities.append(availability)
             model_history_rows = connection.execute(
-                """
+                f"""
                 SELECT
                     finished_at AS recorded_at,
                     state_after AS state,
-                    error_code
+                    error_code,
+                    {history_http_status},
+                    {history_failure_stage},
+                    {history_diagnostic_source}
                 FROM probe_runs
                 WHERE target_id = ? AND finished_at <= ?
                 ORDER BY finished_at DESC, id DESC
@@ -795,6 +867,15 @@ class StatusStore:
                     "error_summary": sanitize_error_summary(
                         target["last_error_summary"]
                     ),
+                    "http_status_code": _optional_row_value(
+                        target, "last_http_status_code"
+                    ),
+                    "failure_stage": _optional_row_value(
+                        target, "last_failure_stage"
+                    ),
+                    "diagnostic_source": _optional_row_value(
+                        target, "last_diagnostic_source"
+                    ),
                     "consecutive_successes": target["consecutive_successes"],
                     "last_success_at": last_success["finished_at"],
                     "history": [
@@ -805,6 +886,9 @@ class StatusStore:
                                 row["error_code"],
                                 allow_none=True,
                             ),
+                            "http_status_code": row["http_status_code"],
+                            "failure_stage": row["failure_stage"],
+                            "diagnostic_source": row["diagnostic_source"],
                         }
                         for row in model_history_rows
                     ],
@@ -964,7 +1048,10 @@ def sanitize_error_summary(
 ) -> str | None:
     if value is None:
         return None
-    sanitized = value
+    sanitized = _CONTROL_CHARACTER_RE.sub(
+        "",
+        _ANSI_ESCAPE_RE.sub("", value),
+    )
     for sensitive_value in sensitive_values:
         if sensitive_value:
             sanitized = sanitized.replace(sensitive_value, "[REDACTED]")
@@ -975,6 +1062,10 @@ def sanitize_error_summary(
     sanitized = _SENSITIVE_KEY_VALUE_RE.sub(_redact_matched_value, sanitized)
     sanitized = _SK_TOKEN_RE.sub("[REDACTED]", sanitized)
     return sanitized[:_MAX_ERROR_SUMMARY_LENGTH]
+
+
+def _optional_row_value(row: sqlite3.Row, key: str) -> Any:
+    return row[key] if key in row.keys() else None
 
 
 def _redact_matched_value(match: re.Match[str]) -> str:

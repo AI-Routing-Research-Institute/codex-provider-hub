@@ -83,6 +83,9 @@ class ManualProbeControlStore:
                     latency_ms INTEGER,
                     error_code TEXT,
                     error_summary TEXT,
+                    http_status_code INTEGER,
+                    failure_stage TEXT,
+                    diagnostic_source TEXT,
                     finished_at TEXT NOT NULL,
                     PRIMARY KEY(job_id, model)
                 );
@@ -101,6 +104,22 @@ class ManualProbeControlStore:
                 connection.execute(
                     "ALTER TABLE manual_probe_jobs ADD COLUMN requested_models_json TEXT"
                 )
+            result_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(manual_probe_results)"
+                )
+            }
+            for column, column_type in (
+                ("http_status_code", "INTEGER"),
+                ("failure_stage", "TEXT"),
+                ("diagnostic_source", "TEXT"),
+            ):
+                if column not in result_columns:
+                    connection.execute(
+                        "ALTER TABLE manual_probe_results "
+                        f"ADD COLUMN {column} {column_type}"
+                    )
             connection.commit()
         finally:
             connection.close()
@@ -253,6 +272,9 @@ class ManualProbeControlStore:
         error_code: str | None,
         error_summary: str | None,
         finished_at: datetime,
+        http_status_code: int | None = None,
+        failure_stage: str | None = None,
+        diagnostic_source: str | None = None,
     ) -> None:
         sanitized_summary = sanitize_error_summary(error_summary)
         connection = self._connect()
@@ -262,8 +284,9 @@ class ManualProbeControlStore:
                     """
                     INSERT INTO manual_probe_results (
                         job_id, model, position, scheduled, success, latency_ms,
-                        error_code, error_summary, finished_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        error_code, error_summary, http_status_code,
+                        failure_stage, diagnostic_source, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(job_id, model) DO UPDATE SET
                         position = excluded.position,
                         scheduled = excluded.scheduled,
@@ -271,6 +294,9 @@ class ManualProbeControlStore:
                         latency_ms = excluded.latency_ms,
                         error_code = excluded.error_code,
                         error_summary = excluded.error_summary,
+                        http_status_code = excluded.http_status_code,
+                        failure_stage = excluded.failure_stage,
+                        diagnostic_source = excluded.diagnostic_source,
                         finished_at = excluded.finished_at
                     """,
                     (
@@ -282,6 +308,9 @@ class ManualProbeControlStore:
                         latency_ms,
                         error_code,
                         sanitized_summary,
+                        http_status_code,
+                        failure_stage,
+                        diagnostic_source,
                         _to_iso(finished_at),
                     ),
                 )
@@ -339,7 +368,8 @@ class ManualProbeControlStore:
             results = connection.execute(
                 """
                 SELECT model, position, scheduled, success, latency_ms,
-                       error_code, error_summary, finished_at
+                       error_code, error_summary, http_status_code,
+                       failure_stage, diagnostic_source, finished_at
                 FROM manual_probe_results
                 WHERE job_id = ?
                 ORDER BY position, model
@@ -390,6 +420,8 @@ class ManualProbeControlStore:
                 WITH ranked_results AS (
                     SELECT jobs.provider_id, results.model, results.success,
                            results.latency_ms, results.error_code,
+                           results.http_status_code, results.failure_stage,
+                           results.diagnostic_source,
                            results.finished_at, jobs.requested_at,
                            results.position,
                            ROW_NUMBER() OVER (
@@ -403,6 +435,7 @@ class ManualProbeControlStore:
                     WHERE jobs.provider_id IN ({placeholders})
                 )
                 SELECT provider_id, model, success, latency_ms, error_code,
+                       http_status_code, failure_stage, diagnostic_source,
                        finished_at
                 FROM ranked_results
                 WHERE result_rank <= ?
@@ -424,6 +457,9 @@ class ManualProbeControlStore:
                     "success": bool(row["success"]),
                     "latency_ms": row["latency_ms"],
                     "error_code": row["error_code"],
+                    "http_status_code": row["http_status_code"],
+                    "failure_stage": row["failure_stage"],
+                    "diagnostic_source": row["diagnostic_source"],
                     "finished_at": row["finished_at"],
                 }
             )
@@ -456,6 +492,9 @@ def public_manual_job(job: ManualProbeJob) -> dict[str, Any]:
                 "latency_ms": result["latency_ms"],
                 "error_code": result["error_code"],
                 "error_summary": sanitize_error_summary(result["error_summary"]),
+                "http_status_code": result["http_status_code"],
+                "failure_stage": result["failure_stage"],
+                "diagnostic_source": result["diagnostic_source"],
                 "finished_at": result["finished_at"],
             }
             for result in job.results

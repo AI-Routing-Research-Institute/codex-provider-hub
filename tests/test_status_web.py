@@ -389,10 +389,19 @@ class StatusWebTests(unittest.TestCase):
             connection.execute(
                 """
                 UPDATE probe_targets
-                SET last_error_code = ?, last_error_summary = ?
+                SET last_error_code = ?, last_error_summary = ?,
+                    last_http_status_code = ?, last_failure_stage = ?,
+                    last_diagnostic_source = ?
                 WHERE model = ?
                 """,
-                ("upstream_unavailable", "raw upstream detail", "gpt-5.6-terra"),
+                (
+                    "upstream_unavailable",
+                    "raw upstream detail",
+                    520,
+                    "provider_response",
+                    "direct_responses",
+                    "gpt-5.6-terra",
+                ),
             )
 
         models = self.client.get("/api/status").json()["providers"][0]["models"]
@@ -403,7 +412,7 @@ class StatusWebTests(unittest.TestCase):
         )
         self.assertEqual(
             summaries["gpt-5.6-terra"],
-            "供应商上游服务暂时不可用（HTTP 502、503 或 504）。",
+            "HTTP 520 · Cloudflare 已接收请求，但供应商源站返回异常。",
         )
 
     def test_status_api_allowlists_auth_401_without_exposing_stored_detail(
@@ -425,12 +434,17 @@ class StatusWebTests(unittest.TestCase):
             connection.execute(
                 """
                 UPDATE probe_targets
-                SET last_error_code = ?, last_error_summary = ?
+                SET last_error_code = ?, last_error_summary = ?,
+                    last_http_status_code = ?, last_failure_stage = ?,
+                    last_diagnostic_source = ?
                 WHERE model = ?
                 """,
                 (
                     "auth_failed",
                     "invalid API key; raw upstream detail secret-generic",
+                    999,
+                    "secret-stage",
+                    "secret-source",
                     "gpt-5.6-terra",
                 ),
             )
@@ -453,9 +467,14 @@ class StatusWebTests(unittest.TestCase):
             models["gpt-5.6-terra"]["error_summary"],
             "专用 Key 无效、已过期或没有访问权限。",
         )
+        self.assertIsNone(models["gpt-5.6-terra"]["http_status_code"])
+        self.assertIsNone(models["gpt-5.6-terra"]["failure_stage"])
+        self.assertIsNone(models["gpt-5.6-terra"]["diagnostic_source"])
         self.assertNotIn("raw upstream detail", response.text)
         self.assertNotIn("secret-401", response.text)
         self.assertNotIn("secret-generic", response.text)
+        self.assertNotIn("secret-stage", response.text)
+        self.assertNotIn("secret-source", response.text)
 
     def test_provider_detail_and_window_validation(self) -> None:
         default_status = self.client.get("/api/status")

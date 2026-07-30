@@ -1,9 +1,14 @@
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
+
+import codex_local_proxy_app
 
 from codex_local_proxy_app import (
     codex_config_fragment,
@@ -128,6 +133,80 @@ class CodexConfigTests(unittest.TestCase):
         self.assertIn('wire_api = "responses"', fragment)
         self.assertIn("requires_openai_auth = true", fragment)
         self.assertNotIn("api_key", fragment.casefold())
+
+    def test_replacement_process_uses_saved_settings_in_frozen_app(self) -> None:
+        executable = str(Path(sys.executable).resolve())
+        with (
+            mock.patch.object(sys, "frozen", True, create=True),
+            mock.patch.object(sys, "executable", executable),
+            mock.patch.object(subprocess, "Popen") as popen,
+        ):
+            codex_local_proxy_app.launch_replacement_process()
+
+        command = popen.call_args.args[0]
+        options = popen.call_args.kwargs
+        self.assertEqual(command, [executable, "--no-browser"])
+        self.assertEqual(options["cwd"], str(Path(executable).parent))
+        self.assertNotIn("--port", command)
+        self.assertNotIn("--database", command)
+
+    def test_replacement_process_preserves_tray_mode_from_source(self) -> None:
+        with (
+            mock.patch.object(sys, "frozen", False, create=True),
+            mock.patch.object(subprocess, "Popen") as popen,
+        ):
+            codex_local_proxy_app.launch_replacement_process()
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(Path(command[1]).name, "codex_local_proxy_app.py")
+        self.assertEqual(command[-2:], ["--tray", "--no-browser"])
+
+    def test_tray_restart_stops_server_and_returns_restart_request(self) -> None:
+        menu_labels: list[str] = []
+
+        class FakeMenuItem:
+            def __init__(self, label, action, default=False):
+                self.label = label
+                self.action = action
+                self.default = default
+                menu_labels.append(label)
+
+        class FakeMenu:
+            SEPARATOR = object()
+
+            def __init__(self, *items):
+                self.items = items
+
+        class FakeIcon:
+            def __init__(self, name, image, title, menu):
+                self.menu = menu
+                self.stopped = False
+
+            def run(self):
+                self.menu.items[1].action(self, self.menu.items[1])
+
+            def stop(self):
+                self.stopped = True
+
+        fake_pystray = mock.Mock(Menu=FakeMenu, MenuItem=FakeMenuItem, Icon=FakeIcon)
+        fake_pystray.Menu.SEPARATOR = FakeMenu.SEPARATOR
+        server = mock.Mock()
+        tray_holder: dict[str, object] = {}
+        with (
+            mock.patch.dict(sys.modules, {"pystray": fake_pystray}),
+            mock.patch.object(codex_local_proxy_app, "create_app_icon", return_value=object()),
+        ):
+            restart_requested = codex_local_proxy_app._run_tray(
+                server,
+                "http://127.0.0.1:17890/control/",
+                tray_holder,
+            )
+
+        self.assertTrue(restart_requested)
+        self.assertTrue(tray_holder["icon"].stopped)
+        server.request_stop.assert_called_once_with()
+        self.assertEqual(menu_labels, ["打开控制台", "重启本地中转", "退出本地中转"])
 
     def test_shortcut_targets_browser_app_launcher(self) -> None:
         script = (

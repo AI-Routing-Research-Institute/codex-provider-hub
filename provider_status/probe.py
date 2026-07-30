@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from probe_codex_cc_switch import build_env
 from provider_status.config import ProviderConfig
 from provider_status.store import sanitize_error_summary
@@ -42,10 +44,22 @@ class HealthProbeResult:
     latency_ms: int
     error_code: str | None
     error_summary: str | None
+    http_status_code: int | None = None
+    failure_stage: str | None = None
+    diagnostic_source: str | None = None
+
+
+@dataclass(frozen=True)
+class DirectDiagnosticResult:
+    error_code: str
+    error_summary: str
+    http_status_code: int | None
+    failure_stage: str
 
 
 ClientFactory = Callable[..., CodexTuiClient]
 Clock = Callable[[], float]
+DiagnosticRunner = Callable[..., DirectDiagnosticResult]
 
 
 class CodexHealthProbe:
@@ -55,11 +69,13 @@ class CodexHealthProbe:
         temp_root: Path,
         client_factory: ClientFactory = CodexTuiClient,
         clock: Clock = time.monotonic,
+        diagnostic_runner: DiagnosticRunner | None = None,
     ) -> None:
         self._codex_bin = str(codex_bin)
         self._temp_root = Path(temp_root)
         self._client_factory = client_factory
         self._clock = clock
+        self._diagnostic_runner = diagnostic_runner or _run_direct_diagnostic
 
     def run(
         self,
@@ -92,11 +108,14 @@ class CodexHealthProbe:
             )
             latency_ms = self._elapsed_ms(started_at)
             if turn.error_code:
-                return self._failure(
-                    latency_ms,
+                return self._resolve_failure(
+                    started_at,
+                    provider,
+                    model,
+                    api_key,
                     turn.error_code,
                     _turn_summary(turn),
-                    api_key,
+                    turn.http_status_code,
                 )
             if turn.timed_out:
                 return self._failure(
@@ -104,14 +123,20 @@ class CodexHealthProbe:
                     "timeout",
                     _turn_summary(turn),
                     api_key,
+                    http_status_code=turn.http_status_code,
+                    failure_stage="codex_tui",
+                    diagnostic_source="codex_tui",
                 )
             if turn.turn_status != "completed":
                 summary = _turn_summary(turn)
-                return self._failure(
-                    latency_ms,
+                return self._resolve_failure(
+                    started_at,
+                    provider,
+                    model,
+                    api_key,
                     _classify_error(turn.http_status_code, summary),
                     summary,
-                    api_key,
+                    turn.http_status_code,
                 )
             if not _is_valid_output(turn.output_text):
                 return self._failure(
@@ -119,12 +144,15 @@ class CodexHealthProbe:
                     "invalid_output",
                     turn.output_text or "model returned no output",
                     api_key,
+                    failure_stage="response_validation",
+                    diagnostic_source="codex_tui",
                 )
             return HealthProbeResult(
                 success=True,
                 latency_ms=latency_ms,
                 error_code=None,
                 error_summary=None,
+                diagnostic_source="codex_tui",
             )
         except Exception as exc:
             latency_ms = self._elapsed_ms(started_at)
@@ -134,7 +162,24 @@ class CodexHealthProbe:
                 if isinstance(exc, (TuiTimeoutError, TimeoutError))
                 else _classify_error(None, summary)
             )
-            return self._failure(latency_ms, error_code, summary, api_key)
+            if error_code == "network_error":
+                return self._resolve_failure(
+                    started_at,
+                    provider,
+                    model,
+                    api_key,
+                    error_code,
+                    summary,
+                    None,
+                )
+            return self._failure(
+                latency_ms,
+                error_code,
+                summary,
+                api_key,
+                failure_stage="codex_tui",
+                diagnostic_source="codex_tui",
+            )
         finally:
             if client is not None:
                 try:
@@ -185,12 +230,61 @@ class CodexHealthProbe:
     def _elapsed_ms(self, started_at: float) -> int:
         return max(0, round((self._clock() - started_at) * 1000))
 
+    def _resolve_failure(
+        self,
+        started_at: float,
+        provider: ProviderConfig,
+        model: str,
+        api_key: str,
+        error_code: str,
+        summary: str,
+        http_status_code: int | None,
+    ) -> HealthProbeResult:
+        if not _is_ambiguous_stream_failure(summary):
+            return self._failure(
+                self._elapsed_ms(started_at),
+                error_code,
+                summary,
+                api_key,
+                http_status_code=http_status_code,
+                failure_stage="codex_tui",
+                diagnostic_source="codex_tui",
+            )
+
+        try:
+            diagnostic = self._diagnostic_runner(
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                timeout_seconds=10.0,
+            )
+        except Exception:
+            diagnostic = DirectDiagnosticResult(
+                error_code="network_error",
+                error_summary="direct /responses diagnostic failed",
+                http_status_code=None,
+                failure_stage="network",
+            )
+        return self._failure(
+            self._elapsed_ms(started_at),
+            diagnostic.error_code,
+            diagnostic.error_summary,
+            api_key,
+            http_status_code=diagnostic.http_status_code,
+            failure_stage=diagnostic.failure_stage,
+            diagnostic_source="direct_responses",
+        )
+
     @staticmethod
     def _failure(
         latency_ms: int,
         error_code: str,
         summary: str,
         api_key: str,
+        *,
+        http_status_code: int | None = None,
+        failure_stage: str | None = None,
+        diagnostic_source: str | None = None,
     ) -> HealthProbeResult:
         return HealthProbeResult(
             success=False,
@@ -200,7 +294,96 @@ class CodexHealthProbe:
                 summary,
                 sensitive_values=(api_key,),
             ),
+            http_status_code=http_status_code,
+            failure_stage=failure_stage,
+            diagnostic_source=diagnostic_source,
         )
+
+
+def _run_direct_diagnostic(
+    *,
+    provider: ProviderConfig,
+    model: str,
+    api_key: str,
+    timeout_seconds: float,
+) -> DirectDiagnosticResult:
+    endpoint = f"{provider.base_url.rstrip('/')}/responses"
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(timeout_seconds),
+            follow_redirects=False,
+        ) as client:
+            with client.stream(
+                "POST",
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "input": HEALTH_PROMPT,
+                    "max_output_tokens": 64,
+                    "stream": False,
+                },
+            ) as response:
+                status_code = response.status_code
+    except httpx.TimeoutException:
+        return DirectDiagnosticResult(
+            "network_error",
+            "direct /responses diagnostic timed out",
+            None,
+            "network",
+        )
+    except httpx.ConnectError:
+        return DirectDiagnosticResult(
+            "network_error",
+            "direct /responses diagnostic could not connect",
+            None,
+            "network",
+        )
+    except httpx.TransportError:
+        return DirectDiagnosticResult(
+            "network_error",
+            "direct /responses diagnostic transport failed",
+            None,
+            "network",
+        )
+
+    return DirectDiagnosticResult(
+        error_code=_classify_direct_status(status_code),
+        error_summary=f"HTTP {status_code}",
+        http_status_code=status_code,
+        failure_stage=("codex_stream" if status_code == 200 else "provider_response"),
+    )
+
+
+def _classify_direct_status(status_code: int) -> str:
+    if status_code == 200:
+        return "stream_interrupted"
+    if status_code == 401:
+        return "auth_failed"
+    if status_code == 403:
+        return "client_blocked"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code in {502, 503, 504} or 520 <= status_code <= 526:
+        return "upstream_unavailable"
+    return "unknown_error"
+
+
+def _is_ambiguous_stream_failure(summary: str) -> bool:
+    normalized = summary.casefold()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "stream disconnected",
+            "upstream request failed",
+            "response stream disconnected",
+            "响应流中断",
+        )
+    )
 
 
 def _render_config(provider: ProviderConfig, model: str) -> str:
@@ -287,7 +470,9 @@ def _classify_error(http_status_code: int | None, summary: str) -> str:
         return "rate_limited"
     if "no available channel" in normalized:
         return "no_channel"
-    if http_status_code in {502, 503, 504} or any(
+    if http_status_code in {502, 503, 504} or (
+        http_status_code is not None and 520 <= http_status_code <= 526
+    ) or any(
         phrase in normalized
         for phrase in (
             "service unavailable",
@@ -309,4 +494,9 @@ def _classify_error(http_status_code: int | None, summary: str) -> str:
     return "unknown_error"
 
 
-__all__ = ["CodexHealthProbe", "HEALTH_PROMPT", "HealthProbeResult"]
+__all__ = [
+    "CodexHealthProbe",
+    "DirectDiagnosticResult",
+    "HEALTH_PROMPT",
+    "HealthProbeResult",
+]

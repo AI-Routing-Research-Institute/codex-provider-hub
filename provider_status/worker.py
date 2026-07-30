@@ -79,6 +79,9 @@ class StatusWorker:
                 latency_ms=result.latency_ms,
                 error_code=result.error_code,
                 error_summary=result.error_summary,
+                http_status_code=result.http_status_code,
+                failure_stage=result.failure_stage,
+                diagnostic_source=result.diagnostic_source,
             ),
             finished_at,
             healthy_interval_seconds=self._sample_interval(
@@ -129,6 +132,9 @@ class StatusWorker:
                             latency_ms=result.latency_ms,
                             error_code=result.error_code,
                             error_summary=result.error_summary,
+                            http_status_code=result.http_status_code,
+                            failure_stage=result.failure_stage,
+                            diagnostic_source=result.diagnostic_source,
                         ),
                         finished_at,
                         healthy_interval_seconds=self._sample_interval(
@@ -151,6 +157,9 @@ class StatusWorker:
                     error_code=result.error_code,
                     error_summary=result.error_summary,
                     finished_at=finished_at,
+                    http_status_code=result.http_status_code,
+                    failure_stage=result.failure_stage,
+                    diagnostic_source=result.diagnostic_source,
                 )
                 if self._on_result is not None:
                     self._on_result(provider.provider_id, model, result)

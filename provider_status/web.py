@@ -31,6 +31,16 @@ WindowName = Literal["3h", "24h", "7d", "15d", "30d"]
 _WINDOW_DAYS = {"3h": 0.125, "24h": 1, "7d": 7, "15d": 15, "30d": 30}
 _SORT_MODEL = "gpt-5.6-sol"
 _AUTH_HTTP_401_RE = re.compile(r"\bHTTP\s+401\b", re.IGNORECASE)
+_PUBLIC_FAILURE_STAGES = frozenset(
+    {
+        "codex_tui",
+        "response_validation",
+        "network",
+        "provider_response",
+        "codex_stream",
+    }
+)
+_PUBLIC_DIAGNOSTIC_SOURCES = frozenset({"codex_tui", "direct_responses"})
 _ERROR_SUMMARIES = {
     "auth_failed": "专用 Key 无效、已过期或没有访问权限。",
     "client_blocked": (
@@ -43,12 +53,22 @@ _ERROR_SUMMARIES = {
     "timeout": "探测请求在规定时间内没有完成。",
     "network_error": "连接供应商时发生网络、DNS、TLS 或连接中断。",
     "invalid_output": "模型已返回内容，但响应没有通过探测结果验证。",
+    "stream_interrupted": "接口可连接，但 Codex 响应流在完成前中断。",
     "unknown_error": "暂时无法识别失败原因，将等待下一次探测。",
 }
 _AUTH_HTTP_401_SUMMARY = (
     "供应商明确返回 HTTP 401 Unauthorized；"
     "专用 Key 无效、已过期或没有该模型访问权限。"
 )
+_CLOUDFLARE_UPSTREAM_SUMMARIES = {
+    520: "HTTP 520 · Cloudflare 已接收请求，但供应商源站返回异常。",
+    521: "HTTP 521 · Cloudflare 无法连接供应商源站。",
+    522: "HTTP 522 · Cloudflare 连接供应商源站超时。",
+    523: "HTTP 523 · Cloudflare 无法到达供应商源站。",
+    524: "HTTP 524 · 供应商源站响应超时。",
+    525: "HTTP 525 · Cloudflare 与供应商源站的 TLS 握手失败。",
+    526: "HTTP 526 · 供应商源站的 TLS 证书无效。",
+}
 _STATIC_DIRECTORY = Path(__file__).with_name("static")
 
 
@@ -381,6 +401,7 @@ def _public_provider(
     models = []
     for model in provider.get("models", []):
         error_code = model.get("error_code")
+        diagnostic = _public_diagnostic_metadata(model)
         models.append(
             {
                 "model": model.get("model"),
@@ -393,17 +414,11 @@ def _public_provider(
                 "error_summary": _public_error_summary(
                     error_code,
                     model.get("error_summary"),
+                    diagnostic["http_status_code"],
                 ),
+                **diagnostic,
                 "history": [
-                    {
-                        "recorded_at": item.get("recorded_at"),
-                        "state": item.get("state"),
-                        "error_code": item.get("error_code"),
-                        "error_summary": _public_error_summary(
-                            item.get("error_code"),
-                            None,
-                        ),
-                    }
+                    _public_history_item(item)
                     for item in model.get("history", [])
                 ],
             }
@@ -414,16 +429,7 @@ def _public_provider(
     )
     public["manual_history"] = {
         model: [
-            {
-                "success": bool(result.get("success")),
-                "latency_ms": result.get("latency_ms"),
-                "error_code": result.get("error_code"),
-                "error_summary": _public_error_summary(
-                    result.get("error_code"),
-                    result.get("error_summary"),
-                ),
-                "finished_at": result.get("finished_at"),
-            }
+            _public_manual_history_result(result)
             for result in results
         ]
         for model, results in (manual_history or {}).items()
@@ -459,25 +465,97 @@ def _public_manual_job(job: ManualProbeJob) -> dict[str, Any]:
         "立即检测未能完成。" if payload.get("error_summary") else None
     )
     for result in payload["results"]:
+        diagnostic = _public_diagnostic_metadata(result)
         result["error_summary"] = _public_error_summary(
             result.get("error_code"),
             result.get("error_summary"),
+            diagnostic["http_status_code"],
         )
+        result.update(diagnostic)
     return payload
+
+
+def _public_history_item(item: dict[str, Any]) -> dict[str, Any]:
+    diagnostic = _public_diagnostic_metadata(item)
+    error_code = item.get("error_code")
+    return {
+        "recorded_at": item.get("recorded_at"),
+        "state": item.get("state"),
+        "error_code": error_code,
+        "error_summary": _public_error_summary(
+            error_code,
+            None,
+            diagnostic["http_status_code"],
+        ),
+        **diagnostic,
+    }
+
+
+def _public_manual_history_result(result: dict[str, Any]) -> dict[str, Any]:
+    diagnostic = _public_diagnostic_metadata(result)
+    error_code = result.get("error_code")
+    return {
+        "success": bool(result.get("success")),
+        "latency_ms": result.get("latency_ms"),
+        "error_code": error_code,
+        "error_summary": _public_error_summary(
+            error_code,
+            result.get("error_summary"),
+            diagnostic["http_status_code"],
+        ),
+        **diagnostic,
+        "finished_at": result.get("finished_at"),
+    }
+
+
+def _public_diagnostic_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    raw_status = value.get("http_status_code")
+    try:
+        status_code = int(raw_status)
+    except (TypeError, ValueError):
+        status_code = None
+    if isinstance(raw_status, bool) or not status_code or not 100 <= status_code <= 599:
+        status_code = None
+    failure_stage = value.get("failure_stage")
+    diagnostic_source = value.get("diagnostic_source")
+    return {
+        "http_status_code": status_code,
+        "failure_stage": (
+            failure_stage if failure_stage in _PUBLIC_FAILURE_STAGES else None
+        ),
+        "diagnostic_source": (
+            diagnostic_source
+            if diagnostic_source in _PUBLIC_DIAGNOSTIC_SOURCES
+            else None
+        ),
+    }
 
 
 def _public_error_summary(
     error_code: str | None,
     sanitized_summary: Any,
+    http_status_code: Any = None,
 ) -> str | None:
     if not error_code:
         return None
     if (
         error_code == "auth_failed"
-        and isinstance(sanitized_summary, str)
-        and _AUTH_HTTP_401_RE.search(sanitized_summary)
+        and (
+            http_status_code == 401
+            or (
+                isinstance(sanitized_summary, str)
+                and _AUTH_HTTP_401_RE.search(sanitized_summary)
+            )
+        )
     ):
         return _AUTH_HTTP_401_SUMMARY
+    if error_code == "upstream_unavailable":
+        try:
+            status_code = int(http_status_code)
+        except (TypeError, ValueError):
+            status_code = None
+        if status_code in _CLOUDFLARE_UPSTREAM_SUMMARIES:
+            return _CLOUDFLARE_UPSTREAM_SUMMARIES[status_code]
     return _ERROR_SUMMARIES.get(error_code)
 
 

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -423,9 +424,10 @@ def run_application(
     control_url = f"http://127.0.0.1:{port}/control/"
     if open_browser:
         webbrowser.open(control_url)
+    restart_requested = False
     try:
         if tray:
-            _run_tray(server, control_url, tray_holder)
+            restart_requested = _run_tray(server, control_url, tray_holder)
         else:
             while server.running:
                 time.sleep(0.2)
@@ -433,6 +435,8 @@ def run_application(
         pass
     finally:
         server.stop()
+    if restart_requested:
+        launch_replacement_process()
     return 0
 
 
@@ -440,16 +444,24 @@ def _run_tray(
     server: LocalProxyServer,
     control_url: str,
     tray_holder: dict[str, Any],
-) -> None:
+) -> bool:
     try:
         import pystray
     except ImportError as exc:
         raise RuntimeError("托盘模式需要安装 pystray 和 Pillow") from exc
 
     image = create_app_icon()
+    restart_requested = threading.Event()
 
     def open_console(icon: Any = None, item: Any = None) -> None:
         webbrowser.open(control_url)
+
+    def restart_proxy(icon: Any, item: Any = None) -> None:
+        if restart_requested.is_set():
+            return
+        restart_requested.set()
+        server.request_stop()
+        icon.stop()
 
     def exit_proxy(icon: Any, item: Any = None) -> None:
         server.request_stop()
@@ -461,12 +473,40 @@ def _run_tray(
         "Codex 本地中转",
         menu=pystray.Menu(
             pystray.MenuItem("打开控制台", open_console, default=True),
+            pystray.MenuItem("重启本地中转", restart_proxy),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出本地中转", exit_proxy),
         ),
     )
     tray_holder["icon"] = icon
     icon.run()
+    return restart_requested.is_set()
+
+
+def launch_replacement_process() -> None:
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--no-browser"]
+        working_directory = Path(sys.executable).resolve().parent
+    else:
+        script = Path(__file__).resolve()
+        command = [sys.executable, str(script), "--tray", "--no-browser"]
+        working_directory = script.parent
+
+    options: dict[str, Any] = {
+        "cwd": str(working_directory),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        options["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+        )
+    else:
+        options["start_new_session"] = True
+    subprocess.Popen(command, **options)
 
 
 def create_app_icon() -> Any:

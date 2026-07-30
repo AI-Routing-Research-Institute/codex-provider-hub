@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -51,6 +52,15 @@ class ManualProbeControlStoreTests(unittest.TestCase):
                 completed_models INTEGER NOT NULL DEFAULT 0, error_summary TEXT
             )"""
         )
+        connection.execute(
+            """CREATE TABLE manual_probe_results (
+                job_id TEXT NOT NULL REFERENCES manual_probe_jobs(id) ON DELETE CASCADE,
+                model TEXT NOT NULL, position INTEGER NOT NULL,
+                scheduled INTEGER NOT NULL, success INTEGER NOT NULL,
+                latency_ms INTEGER, error_code TEXT, error_summary TEXT,
+                finished_at TEXT NOT NULL, PRIMARY KEY(job_id, model)
+            )"""
+        )
         connection.commit()
         connection.close()
 
@@ -59,6 +69,17 @@ class ManualProbeControlStoreTests(unittest.TestCase):
         job, _ = migrated.enqueue("provider", self.now)
 
         self.assertIsNone(job.requested_models)
+        with closing(sqlite3.connect(legacy_database)) as connection:
+            result_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(manual_probe_results)"
+                )
+            }
+        self.assertTrue(
+            {"http_status_code", "failure_stage", "diagnostic_source"}
+            <= result_columns
+        )
 
     def test_cooldown_and_global_queue_limit_are_enforced(self) -> None:
         job, _ = self.store.enqueue("first", self.now)

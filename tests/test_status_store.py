@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from provider_status.config import ProviderConfig
 from provider_status.state import TargetState
-from provider_status.store import ProbeRecord, StatusStore
+from provider_status.store import ProbeRecord, StatusStore, sanitize_error_summary
 
 
 def make_provider(
@@ -172,6 +172,39 @@ class StatusStoreTests(unittest.TestCase):
             [item["provider_id"] for item in self.store.get_public_status(7, self.now)],
             ["a-second", "z-first"],
         )
+
+    def test_initialize_adds_structured_diagnostic_columns_to_legacy_schema(self) -> None:
+        self.store.initialize((make_provider(models=("model-a",)),), self.now)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            for table, column in (
+                ("probe_targets", "last_http_status_code"),
+                ("probe_targets", "last_failure_stage"),
+                ("probe_targets", "last_diagnostic_source"),
+                ("probe_runs", "http_status_code"),
+                ("probe_runs", "failure_stage"),
+                ("probe_runs", "diagnostic_source"),
+            ):
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            connection.commit()
+
+        self.store.initialize((make_provider(models=("model-a",)),), self.now)
+
+        for table, expected in (
+            (
+                "probe_targets",
+                {
+                    "last_http_status_code",
+                    "last_failure_stage",
+                    "last_diagnostic_source",
+                },
+            ),
+            (
+                "probe_runs",
+                {"http_status_code", "failure_stage", "diagnostic_source"},
+            ),
+        ):
+            columns = {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}
+            self.assertTrue(expected <= columns)
 
     def test_initialize_disables_providers_removed_from_configuration(self) -> None:
         removed = make_provider(provider_id="removed", name="Removed")
@@ -406,6 +439,17 @@ class StatusStoreTests(unittest.TestCase):
             self.assertNotIn("legacy-api-secret", summary)
             self.assertIn("legacy channel error", summary)
             self.assertIn("REDACTED", summary)
+
+    def test_sanitize_error_summary_removes_ansi_osc_and_control_characters(self) -> None:
+        summary = (
+            "\x1b[31m响应流中断\x1b[0m\x00\x08 "
+            "\x1b]0;secret window title\x07Upstream request failed"
+        )
+
+        sanitized = sanitize_error_summary(summary)
+
+        self.assertEqual(sanitized, "响应流中断 Upstream request failed")
+        self.assertNotIn("\x1b", sanitized or "")
 
     def test_record_probe_transitions_target_and_updates_schedule(self) -> None:
         self.store.initialize((make_provider(models=("model-a",)),), self.now)
@@ -946,6 +990,9 @@ class StatusStoreTests(unittest.TestCase):
                 "next_check",
                 "error_code",
                 "error_summary",
+                "http_status_code",
+                "failure_stage",
+                "diagnostic_source",
                 "consecutive_successes",
                 "last_success_at",
                 "history",
@@ -959,6 +1006,9 @@ class StatusStoreTests(unittest.TestCase):
                 "recorded_at": (self.now + timedelta(minutes=64)).isoformat(),
                 "state": "recovering",
                 "error_code": None,
+                "http_status_code": None,
+                "failure_stage": None,
+                "diagnostic_source": None,
             },
         )
         self.assertEqual(
@@ -976,6 +1026,9 @@ class StatusStoreTests(unittest.TestCase):
                     "recorded_at": (self.now + timedelta(minutes=66)).isoformat(),
                     "state": "healthy",
                     "error_code": None,
+                    "http_status_code": None,
+                    "failure_stage": None,
+                    "diagnostic_source": None,
                 }
             ],
         )

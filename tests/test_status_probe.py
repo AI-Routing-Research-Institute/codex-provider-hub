@@ -6,8 +6,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import httpx
+
 from provider_status.config import ProviderConfig
-from provider_status.probe import CodexHealthProbe, HEALTH_PROMPT
+from provider_status.probe import (
+    CodexHealthProbe,
+    DirectDiagnosticResult,
+    HEALTH_PROMPT,
+    _run_direct_diagnostic,
+)
 from provider_status.tui_probe import (
     CodexTuiClient,
     TuiProtocolError,
@@ -69,6 +76,11 @@ class FakeClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class UnreadableResponseBody(httpx.SyncByteStream):
+    def __iter__(self):
+        raise AssertionError("diagnostic response body must not be read")
 
 
 class HealthProbeTests(unittest.TestCase):
@@ -225,7 +237,10 @@ class HealthProbeTests(unittest.TestCase):
                     http_status_code=503,
                 ),
             ),
-            ("network_error", make_turn(turn_status="failed", error_text="stream disconnected")),
+            (
+                "stream_interrupted",
+                make_turn(turn_status="failed", error_text="stream disconnected"),
+            ),
             ("network_error", make_turn(turn_status="failed", error_text="DNS lookup failed")),
             ("network_error", make_turn(turn_status="failed", error_text="TLS handshake failed")),
             ("network_error", make_turn(turn_status="failed", error_text="connect error")),
@@ -251,6 +266,12 @@ class HealthProbeTests(unittest.TestCase):
                         temp_root=Path(directory),
                         client_factory=lambda **kwargs: client,
                         clock=lambda: 1.0,
+                        diagnostic_runner=lambda **kwargs: DirectDiagnosticResult(
+                            "stream_interrupted",
+                            "HTTP 200",
+                            200,
+                            "codex_stream",
+                        ),
                     ).run(make_provider(), "model-a", API_KEY)
 
                 self.assertFalse(result.success)
@@ -298,13 +319,139 @@ class HealthProbeTests(unittest.TestCase):
                 temp_root=temp_root,
                 client_factory=lambda **kwargs: client,
                 clock=lambda: 1.0,
+                diagnostic_runner=lambda **kwargs: DirectDiagnosticResult(
+                    "stream_interrupted",
+                    "HTTP 200",
+                    200,
+                    "codex_stream",
+                ),
             ).run(make_provider(), "model-a", API_KEY)
             self.assertEqual(list(temp_root.iterdir()), [])
 
         self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "network_error")
+        self.assertEqual(result.error_code, "stream_interrupted")
         self.assertNotIn(API_KEY, result.error_summary or "")
         self.assertTrue(client.closed)
+
+    def test_ambiguous_stream_failure_uses_one_bounded_direct_diagnostic(self) -> None:
+        cases = (
+            (520, "upstream_unavailable", "provider_response"),
+            (401, "auth_failed", "provider_response"),
+            (200, "stream_interrupted", "codex_stream"),
+            (None, "network_error", "network"),
+        )
+
+        for status_code, expected_code, expected_stage in cases:
+            with self.subTest(status_code=status_code):
+                calls: list[dict[str, object]] = []
+
+                def diagnose(**kwargs):
+                    calls.append(kwargs)
+                    return DirectDiagnosticResult(
+                        expected_code,
+                        f"HTTP {status_code}" if status_code else "connection failed",
+                        status_code,
+                        expected_stage,
+                    )
+
+                with tempfile.TemporaryDirectory() as directory:
+                    result = CodexHealthProbe(
+                        codex_bin="codex",
+                        temp_root=Path(directory),
+                        client_factory=lambda **kwargs: FakeClient(
+                            make_turn(
+                                turn_status="failed",
+                                error_text=(
+                                    "stream disconnected before completion: "
+                                    "Upstream request failed"
+                                ),
+                                error_code="network_error",
+                            )
+                        ),
+                        clock=lambda: 1.0,
+                        diagnostic_runner=diagnose,
+                    ).run(make_provider(), "model-a", API_KEY)
+
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["timeout_seconds"], 10.0)
+                self.assertEqual(calls[0]["api_key"], API_KEY)
+                self.assertEqual(result.error_code, expected_code)
+                self.assertEqual(result.http_status_code, status_code)
+                self.assertEqual(result.failure_stage, expected_stage)
+                self.assertEqual(result.diagnostic_source, "direct_responses")
+                self.assertNotIn(API_KEY, result.error_summary or "")
+
+    def test_direct_diagnostic_classifies_headers_without_reading_body(self) -> None:
+        cases = (
+            (200, "stream_interrupted", "codex_stream"),
+            (401, "auth_failed", "provider_response"),
+            (403, "client_blocked", "provider_response"),
+            (429, "rate_limited", "provider_response"),
+            (502, "upstream_unavailable", "provider_response"),
+            (520, "upstream_unavailable", "provider_response"),
+            (526, "upstream_unavailable", "provider_response"),
+            (404, "unknown_error", "provider_response"),
+        )
+
+        for status_code, expected_code, expected_stage in cases:
+            with self.subTest(status_code=status_code):
+                requests: list[httpx.Request] = []
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    requests.append(request)
+                    return httpx.Response(
+                        status_code,
+                        stream=UnreadableResponseBody(),
+                    )
+
+                client = httpx.Client(transport=httpx.MockTransport(handler))
+                with mock.patch(
+                    "provider_status.probe.httpx.Client",
+                    return_value=client,
+                ):
+                    result = _run_direct_diagnostic(
+                        provider=make_provider(),
+                        model="model-a",
+                        api_key=API_KEY,
+                        timeout_seconds=10.0,
+                    )
+
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(
+                    requests[0].url,
+                    httpx.URL("https://provider.example.com/v1/responses"),
+                )
+                self.assertEqual(
+                    requests[0].headers["authorization"],
+                    f"Bearer {API_KEY}",
+                )
+                self.assertEqual(result.error_code, expected_code)
+                self.assertEqual(result.http_status_code, status_code)
+                self.assertEqual(result.failure_stage, expected_stage)
+                self.assertEqual(result.error_summary, f"HTTP {status_code}")
+                self.assertNotIn(API_KEY, repr(result))
+
+    def test_explicit_network_failure_does_not_run_direct_diagnostic(self) -> None:
+        def unexpected_diagnostic(**kwargs):
+            self.fail("explicit DNS/TLS failures must not trigger direct diagnosis")
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = CodexHealthProbe(
+                codex_bin="codex",
+                temp_root=Path(directory),
+                client_factory=lambda **kwargs: FakeClient(
+                    make_turn(
+                        turn_status="failed",
+                        error_text="DNS lookup failed during TLS connection",
+                    )
+                ),
+                clock=lambda: 1.0,
+                diagnostic_runner=unexpected_diagnostic,
+            ).run(make_provider(), "model-a", API_KEY)
+
+        self.assertEqual(result.error_code, "network_error")
+        self.assertEqual(result.failure_stage, "codex_tui")
+        self.assertEqual(result.diagnostic_source, "codex_tui")
 
     def test_setup_failure_removes_partially_created_run_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

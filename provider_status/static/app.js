@@ -40,6 +40,7 @@ const errorCodeLabels = {
   timeout: "请求超时",
   network_error: "无法连接供应商",
   invalid_output: "响应格式异常",
+  stream_interrupted: "响应流中断",
   unknown_error: "未识别的探测错误",
 };
 const windowLabels = {
@@ -368,9 +369,12 @@ function historyDetailContent(record) {
   const state = record?.state || "unknown";
   const time = record?.recorded_at ? formatTime(record.recorded_at) : "暂无记录";
   const reason = errorLabel(record?.error_code);
+  const detail = record?.error_summary;
   return {
     status: `${time} · ${modelStateLabels[state] || state}`,
-    message: reason ? `原因：${reason}` : "",
+    message: [reason ? `原因：${reason}` : "", detail]
+      .filter(Boolean)
+      .join("\n"),
   };
 }
 
