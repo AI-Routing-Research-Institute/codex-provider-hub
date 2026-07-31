@@ -78,6 +78,7 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 - 支持固定或递增等待、无限重试、最大等待时间和供应商熔断。
 - 能识别 HTTP 200 SSE 流中正文输出前的内嵌 429 错误。
 - 手动切换供应商后，等待中的旧请求会在下一次重试时切换到新供应商。
+- 脱敏后的恢复记录保留最近 24 小时，重启程序后仍可在控制台查看。
 
 ### Token 统计
 
@@ -101,7 +102,7 @@ Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-
 - [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
 
-下载后直接双击 EXE，程序会打开本地控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`；本地设置和 Token 聚合数据保存在 `~/.codex-local-proxy/`。从旧版本首次启动时会迁移原有设置和用量数据，并保留旧文件作为备份。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
+下载后直接双击 EXE，程序会打开本地控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`；本地设置、Token 聚合数据和脱敏后的恢复记录保存在 `~/.codex-local-proxy/`。从旧版本首次启动时会迁移原有设置和用量数据，并保留旧文件作为备份。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
 
 ### 从源码运行
 

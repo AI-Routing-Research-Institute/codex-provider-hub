@@ -10,7 +10,7 @@ http://127.0.0.1:17890/control/
 
 从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，默认打开控制台并常驻 Windows 通知区域，不需要安装项目虚拟环境。
 
-便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。程序不会把 CC Switch 数据库、Key、本地设置或用量数据写入 EXE；设置和用量保存在 `~/.codex-local-proxy/`。
+便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。程序不会把 CC Switch 数据库、Key、本地设置、用量数据或恢复记录写入 EXE；设置、用量和脱敏后的恢复记录保存在 `~/.codex-local-proxy/`。
 
 从旧版本首次启动时，程序会把 `%LOCALAPPDATA%\CodexLocalProxy` 中的 `settings.json` 和 `usage.sqlite3` 安全迁移到新目录，并保留旧文件作为备份。
 
@@ -34,7 +34,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 
 控制台的“运行设置”页可以修改本地端口、供应商数据源和服务器检测地址。数据源保存前会以只读方式验证，保存后立即替换新请求使用的供应商列表；检测地址也会立即生效。端口修改需要退出并重新启动本地中转，随后重新复制一次 Codex 配置。
 
-本地数据目录固定为 `~/.codex-local-proxy/`，页面只展示该位置，不允许修改。`settings.json` 保存端口、数据源、检测地址、重试策略和供应商显示偏好，`usage.sqlite3` 保存 Token 聚合数据。Codex 自身的配置文件仍是 `~/.codex/config.toml`，本地中转不会自动覆盖它。
+本地数据目录固定为 `~/.codex-local-proxy/`，页面只展示该位置，不允许修改。`settings.json` 保存端口、数据源、检测地址、重试策略和供应商显示偏好，`usage.sqlite3` 保存 Token 聚合数据和最近 24 小时的脱敏恢复记录。Codex 自身的配置文件仍是 `~/.codex/config.toml`，本地中转不会自动覆盖它。
 
 ## 首次接入 Codex
 
@@ -48,14 +48,14 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 - 排序和隐藏状态保存在 `~/.codex-local-proxy/settings.json`，不会修改 CC Switch 数据库。
 - 指向当前本地中转监听端口的回环供应商会在加载时排除，避免把“Codex 本地中转”自身显示为可选上游。
 - Token 数据优先读取上游 Responses 终止事件或非流式响应中的 `usage`；上游没有返回 `usage` 时，才使用与模型匹配的 `tiktoken` 编码估算输入和可见输出。
-- 用量保存在 `~/.codex-local-proxy/usage.sqlite3`。只保存供应商 ID、模型、时间、状态和 Token 数值，不保存请求正文、回答正文或 Key。
+- 用量保存在 `~/.codex-local-proxy/usage.sqlite3`。Token 记录只包含供应商 ID、模型、时间、状态和 Token 数值，不保存请求正文、回答正文或 Key。
 - 控制台支持今日、近 24 小时、近 7 日（严格 `7 × 24` 小时）、近 30 日和全部时间范围。
 
 ## 自动恢复
 
 - 建连错误、首个响应数据块前的流中断以及 HTTP `500/502/503/504` 会自动重试。
 - HTTP `429` 总是进入重试；`Retry-After` 仅作为等待提示，并受本地最大等待时间限制。
-- Responses SSE 在输出正文前出现内嵌 `429` 错误时会静默重试；正文已经输出后不会重放，避免客户端收到重复内容。
+- Responses SSE 在可见输出前出现内嵌 `429`、模型容量已满或临时上游错误时会静默重试；推理、状态和工具参数事件不会被误判为可见输出。正文已经输出后不会重放，避免客户端收到重复内容或工具调用。
 - 默认最多尝试 4 次，等待 1 秒后按递增间隔重试，单次等待最长 30 秒。
 - 控制台的“重试设置”页可以启用或关闭自动重试，设置最大尝试次数、首次等待、等待策略、最大等待和熔断参数。
 - 最大尝试次数选择“无限重试”时内部保存为 `-1`；只对尚未输出内容的临时错误持续重试，Codex 断开或中转退出时停止。
@@ -63,7 +63,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 - 供应商切换发生在重试前时，旧供应商的失败记录仍归属于旧供应商，活动请求计数会迁移到实际接管的新供应商。
 - 一旦响应内容已经转发给 Codex，中转不会重放整个请求，以免重复文本、工具调用或计费。
 - 同一供应商连续 3 个请求在重试后仍失败时会熔断 30 秒。
-- 控制台只显示错误类别、次数和等待时间，不保存请求正文、响应正文或认证信息。
+- 最近 24 小时的恢复记录会持久化到 `usage.sqlite3`，包括等待重试、重试耗尽、客户端断开以及输出后失败未重放；过期记录会自动清理，控制台最多加载最新 500 条。
+- 恢复记录只保存供应商、时间、尝试次数、阶段、结果和脱敏后的错误摘要，不保存请求正文、响应正文或认证信息。
 
 ## 安全边界
 
