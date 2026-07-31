@@ -3,7 +3,9 @@ import sqlite3
 import socket
 import tempfile
 import threading
+import time
 import unittest
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from codex_local_proxy import (
     LocalProxyServer,
     ProviderRouter,
     ProxyProvider,
+    RecoveryHistoryStore,
     RetryPolicy,
     RetryPolicyStore,
     TokenUsage,
@@ -254,6 +257,79 @@ class UsageTests(unittest.TestCase):
         self.assertNotIn("api_key", columns)
 
 
+class RecoveryHistoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_context.cleanup)
+        self.path = Path(self.temp_context.name) / "usage.sqlite3"
+        self.store = RecoveryHistoryStore(self.path)
+
+    def test_history_persists_only_recent_24_hours_and_sanitizes_summary(self) -> None:
+        now = time.time()
+        self.store.record(
+            request_id=1,
+            provider_id="expired",
+            attempt=1,
+            max_attempts=4,
+            delay_seconds=1,
+            kind="connection",
+            summary="expired",
+            stage="before_output",
+            outcome="retrying",
+            recorded_at=now - 25 * 3600,
+        )
+        self.store.record(
+            request_id=2,
+            provider_id="provider-a",
+            attempt=2,
+            max_attempts=-1,
+            delay_seconds=2,
+            kind="model_capacity",
+            summary='Authorization: Bearer fixture-private-token',
+            stage="before_output",
+            outcome="retrying",
+            recorded_at=now - 2,
+        )
+        self.store.record(
+            request_id=3,
+            provider_id="provider-b",
+            attempt=3,
+            max_attempts=4,
+            delay_seconds=None,
+            kind="stream_interrupted",
+            summary="stream disconnected",
+            stage="after_output",
+            outcome="passed_through",
+            recorded_at=now - 1,
+        )
+
+        reopened = RecoveryHistoryStore(self.path)
+        history = reopened.history(now=now)
+
+        self.assertEqual(history["window_hours"], 24)
+        self.assertEqual(history["total_count"], 2)
+        self.assertFalse(history["truncated"])
+        self.assertEqual(
+            [item["provider_id"] for item in history["items"]],
+            ["provider-b", "provider-a"],
+        )
+        self.assertEqual(history["items"][0]["stage"], "after_output")
+        self.assertIn("[已隐藏]", history["items"][1]["summary"])
+        self.assertNotIn("fixture-private-token", str(history))
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(recovery_events)")
+            }
+            stored_count = connection.execute(
+                "SELECT COUNT(*) FROM recovery_events"
+            ).fetchone()[0]
+        self.assertEqual(stored_count, 2)
+        self.assertNotIn("request_body", columns)
+        self.assertNotIn("response_body", columns)
+        self.assertNotIn("api_key", columns)
+
+
 class CCSourceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_context = tempfile.TemporaryDirectory()
@@ -374,6 +450,48 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             status["usage"]["by_provider"]["selected"]["input_tokens"], 12
         )
+
+    async def test_status_summarizes_history_and_detail_endpoint_returns_all(self) -> None:
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "usage.sqlite3"
+        )
+        now = time.time()
+        for index in range(3):
+            history_store.record(
+                request_id=index + 1,
+                provider_id="selected",
+                attempt=index + 1,
+                max_attempts=4,
+                delay_seconds=1,
+                kind="connection",
+                summary=f"failure {index + 1}",
+                stage="before_output",
+                outcome="retrying",
+                recorded_at=now - index,
+            )
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        status = (await client.get("/control/api/status")).json()
+        detail = (await client.get("/control/api/recovery-history")).json()
+
+        self.assertEqual(status["retry"]["history"]["total_count"], 3)
+        self.assertEqual(len(status["retry"]["history"]["items"]), 1)
+        self.assertTrue(status["retry"]["history"]["truncated"])
+        self.assertEqual(detail["total_count"], 3)
+        self.assertEqual(len(detail["items"]), 3)
+        self.assertFalse(detail["truncated"])
 
     async def test_provider_visibility_and_order_control_api(self) -> None:
         hidden_changes: list[tuple[str, ...]] = []
@@ -977,6 +1095,132 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"429 Too Many Requests", response.content)
         self.assertEqual(router.status().total_retries, 0)
 
+    async def test_embedded_model_capacity_before_output_is_retried(self) -> None:
+        attempts = 0
+
+        class AtCapacityStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
+                yield b'data: {"type":"response.reasoning_text.delta","delta":"hidden"}\n\n'
+                yield b'data: {"type":"response.function_call_arguments.delta","delta":"{}"}\n\n'
+                yield b'data: {"type":"response.failed","response":{"status":"failed","error":'
+                yield (
+                    b'{"message":"Selected model is at capacity. '
+                    b'Please try a different model."}}}'
+                )
+
+        class RecoveredStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n'
+                yield b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            stream = AtCapacityStream() if attempts == 1 else RecoveredStream()
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "usage.sqlite3"
+        )
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_sleep=no_wait,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+        api_history = (
+            await client.get("/control/api/status")
+        ).json()["retry"]["history"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertIn(b"recovered", response.content)
+        self.assertNotIn(b"at capacity", response.content)
+        status = router.status()
+        self.assertEqual(status.total_retries, 1)
+        self.assertEqual(status.last_retry_kind, "model_capacity")
+        self.assertIn(
+            "Selected model is at capacity",
+            status.recent_retry_errors[0].summary,
+        )
+        history = history_store.history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["kind"], "model_capacity")
+        self.assertEqual(history["items"][0]["stage"], "before_output")
+        self.assertEqual(history["items"][0]["outcome"], "retrying")
+        self.assertEqual(api_history["total_count"], 1)
+        self.assertEqual(api_history["items"][0]["kind"], "model_capacity")
+
+    async def test_embedded_model_capacity_after_output_is_not_replayed(self) -> None:
+        attempts = 0
+
+        class OutputThenCapacity(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                yield (
+                    b'data: {"type":"response.failed","response":{"status":"failed",'
+                    b'"error":{"message":"Selected model is at capacity. '
+                    b'Please try a different model."}}}\n\n'
+                )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=OutputThenCapacity(),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "usage.sqlite3"
+        )
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(attempts, 1)
+        self.assertIn(b"partial", response.content)
+        self.assertIn(b"at capacity", response.content)
+        self.assertEqual(router.status().total_retries, 0)
+        history = history_store.history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["kind"], "model_capacity")
+        self.assertEqual(history["items"][0]["stage"], "after_output")
+        self.assertEqual(history["items"][0]["outcome"], "passed_through")
+
     async def test_embedded_upstream_failure_before_output_is_retried(self) -> None:
         attempts = 0
 
@@ -1340,8 +1584,9 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("~/.codex-local-proxy/", page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=12", page.text)
-        self.assertIn("app.js?v=12", page.text)
+        self.assertIn("styles.css?v=13", page.text)
+        self.assertIn("app.js?v=13", page.text)
+        self.assertIn('id="recovery-history-meta"', page.text)
         self.assertIn("selectProvider", script.text)
         self.assertIn("setProviderHidden", script.text)
         self.assertIn("saveProviderOrder", script.text)
@@ -1361,13 +1606,19 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("尚未输出且再次失败的旧请求将由新供应商接管", script.text)
         self.assertIn("codex-local-proxy-theme", script.text)
         self.assertIn("recent_errors", script.text)
+        self.assertIn("retry.history", script.text)
+        self.assertIn("/control/api/recovery-history", script.text)
+        self.assertIn("recoveryOutcomeLabel", script.text)
+        self.assertIn("输出后未重放", script.text)
         self.assertIn("positionRecoveryPopover", script.text)
         self.assertIn("formatRecoverySummary", script.text)
+        self.assertIn("model_capacity", script.text)
         self.assertIn(':root[data-theme="dark"]', styles.text)
         self.assertIn(".provider-list::-webkit-scrollbar", styles.text)
         self.assertIn("flex-direction: column", styles.text)
         self.assertIn("flex: 0 0 auto", styles.text)
         self.assertIn(".recovery-popover", styles.text)
+        self.assertIn(".recovery-popover ol::-webkit-scrollbar", styles.text)
         self.assertIn(".usage-summary", styles.text)
         self.assertIn(".provider-token-cell", styles.text)
         self.assertIn(".provider-health-cell", styles.text)
@@ -1379,7 +1630,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(".hidden-provider", styles.text)
         self.assertNotIn("-webkit-line-clamp: 2", styles.text)
         self.assertIn("overflow-y: auto; overscroll-behavior: contain", styles.text)
-        self.assertIn("max-height: min(320px", styles.text)
+        self.assertIn("max-height: min(340px", styles.text)
         self.assertIn(".setting-control-with-action", styles.text)
         self.assertEqual(script.headers["cache-control"], "no-store")
         self.assertEqual(refreshed.json()["current_provider_id"], "refreshed")

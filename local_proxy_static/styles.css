@@ -619,9 +619,10 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   left: 0;
   z-index: 60;
   width: min(360px, calc(100vw - 24px));
-  max-height: min(320px, calc(100vh - 24px));
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  max-height: min(340px, calc(100vh - 24px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 12px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -638,7 +639,18 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .recovery-popover-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 .recovery-popover-heading strong { font-size: 12px; }
 .recovery-popover-heading span { color: var(--muted); font-size: 10px; }
-.recovery-popover ol { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.recovery-popover ol {
+  min-height: 0;
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 5px 0 0;
+  list-style: none;
+}
+.recovery-popover ol::-webkit-scrollbar { width: 7px; }
+.recovery-popover ol::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--line-strong); }
 .recovery-popover li { padding-top: 8px; border-top: 1px solid var(--line); }
 .recovery-popover li:first-child { padding-top: 0; border-top: 0; }
 .recovery-error-meta, .recovery-error-summary { display: block; }

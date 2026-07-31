@@ -14,6 +14,8 @@ let controlRequestActive = false;
 let healthRequestActive = false;
 let retryFormLoaded = false;
 let latestRuntimeSettings = null;
+let latestRecoveryHistory = null;
+let recoveryHistoryRequestActive = false;
 let recoveryDetailsPinned = false;
 let recoveryHideTimer = null;
 let manageProvidersMode = false;
@@ -42,6 +44,7 @@ const recovery = document.querySelector("#recovery");
 const recoveryDetailsButton = document.querySelector("#recovery-details-button");
 const recoveryPopover = document.querySelector("#recovery-popover");
 const recoveryErrorList = document.querySelector("#recovery-error-list");
+const recoveryHistoryMeta = document.querySelector("#recovery-history-meta");
 const providerHealthPopover = document.querySelector("#provider-health-popover");
 const historyDetailPopover = document.querySelector("#history-detail-popover");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
@@ -110,6 +113,7 @@ function showRecoveryDetails({ pinned = false } = {}) {
   recoveryPopover.classList.add("show");
   recoveryDetailsButton.setAttribute("aria-expanded", "true");
   positionRecoveryPopover();
+  readRecoveryHistory();
 }
 
 function hideRecoveryDetails({ force = false } = {}) {
@@ -127,21 +131,79 @@ function scheduleRecoveryDetailsHide() {
 
 function formatRetryTime(value) {
   const recordedAt = new Date(Number(value));
-  return Number.isNaN(recordedAt.getTime())
-    ? "刚刚"
-    : recordedAt.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  if (Number.isNaN(recordedAt.getTime())) return "刚刚";
+  const now = new Date();
+  const sameDay = recordedAt.getFullYear() === now.getFullYear()
+    && recordedAt.getMonth() === now.getMonth()
+    && recordedAt.getDate() === now.getDate();
+  return recordedAt.toLocaleString("zh-CN", {
+    ...(sameDay ? {} : { month: "2-digit", day: "2-digit" }),
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function recoveryOutcomeLabel(error) {
+  return {
+    retrying: "已安排重试",
+    exhausted: "重试已结束",
+    client_disconnected: "客户端已断开",
+    passed_through: error?.stage === "after_output" ? "输出后未重放" : "已透传",
+  }[error?.outcome] || "已记录";
+}
+
+function sameRecoveryHistorySnapshot(left, right) {
+  const leftLatest = Array.isArray(left?.items) ? left.items[0]?.recorded_at : null;
+  const rightLatest = Array.isArray(right?.items) ? right.items[0]?.recorded_at : null;
+  return Number(left?.total_count) === Number(right?.total_count)
+    && Number(leftLatest || 0) === Number(rightLatest || 0);
+}
+
+async function readRecoveryHistory() {
+  const summary = latestStatus?.retry?.history;
+  if (recoveryHistoryRequestActive || sameRecoveryHistorySnapshot(latestRecoveryHistory, summary)) return;
+  recoveryHistoryRequestActive = true;
+  try {
+    const response = await fetch("/control/api/recovery-history", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    latestRecoveryHistory = await response.json();
+    if (latestStatus?.retry) renderRecoveryErrors(latestStatus.retry);
+    if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
+  } catch (error) {
+    latestRecoveryHistory = null;
+  } finally {
+    recoveryHistoryRequestActive = false;
+  }
 }
 
 function renderRecoveryErrors(retry) {
-  const recentErrors = Array.isArray(retry.recent_errors)
-    ? retry.recent_errors.slice(0, 5)
-    : [];
-  const hasDetails = recentErrors.length > 0;
+  const historySummary = retry.history && typeof retry.history === "object"
+    ? retry.history
+    : null;
+  if (
+    latestRecoveryHistory
+    && !sameRecoveryHistorySnapshot(latestRecoveryHistory, historySummary)
+  ) {
+    latestRecoveryHistory = null;
+  }
+  const history = latestRecoveryHistory || historySummary;
+  const historyItems = Array.isArray(history?.items)
+    ? history.items
+    : Array.isArray(retry.recent_errors) ? retry.recent_errors : [];
+  const totalCount = Number.isFinite(Number(history?.total_count))
+    ? Number(history.total_count)
+    : historyItems.length;
+  const windowHours = Number(history?.window_hours) || 24;
+  const hasDetails = historyItems.length > 0;
   recovery.classList.toggle("has-details", hasDetails);
   recoveryDetailsButton.hidden = !hasDetails;
   if (!hasDetails) hideRecoveryDetails({ force: true });
+  recoveryHistoryMeta.textContent = history?.truncated
+    ? `近 ${windowHours} 小时 · 显示最新 ${historyItems.length}/${totalCount} 条`
+    : `近 ${windowHours} 小时 · ${totalCount} 条`;
   recoveryErrorList.replaceChildren();
-  for (const error of recentErrors) {
+  for (const error of historyItems) {
     const providerName = latestStatus?.providers?.find(
       (provider) => provider.provider_id === error.provider_id,
     )?.name;
@@ -152,6 +214,7 @@ function renderRecoveryErrors(retry) {
       formatRetryTime(error.recorded_at),
       providerName,
       `第 ${error.attempt} 次请求`,
+      recoveryOutcomeLabel(error),
     ].filter(Boolean).join(" · ");
     const summary = document.createElement("span");
     summary.className = "recovery-error-summary";
@@ -199,8 +262,10 @@ function formatRetryKind(kind) {
   if (value.startsWith("http_")) return `HTTP ${value.slice(5)}`;
   return {
     rate_limited: "HTTP 429",
+    model_capacity: "模型容量已满",
     connection: "连接上游失败",
     stream_start: "响应开始前断流",
+    stream_interrupted: "输出后响应流中断",
     upstream_error: "上游请求失败",
   }[value] || "上游临时错误";
 }
@@ -992,6 +1057,15 @@ function renderStatus(status) {
     : `${last >= 200 && last < 400 ? "成功" : "失败"} · HTTP ${last}`;
 
   const retry = status.retry || {};
+  const recoveryHistory = retry.history && typeof retry.history === "object"
+    ? retry.history
+    : null;
+  const recoveryHistoryItems = Array.isArray(recoveryHistory?.items)
+    ? recoveryHistory.items
+    : Array.isArray(retry.recent_errors) ? retry.recent_errors : [];
+  const recoveryHistoryCount = Number.isFinite(Number(recoveryHistory?.total_count))
+    ? Number(recoveryHistory.total_count)
+    : recoveryHistoryItems.length;
   const activeRecoveries = retry.active || [];
   const activeRecovery = activeRecoveries[0];
   const openCircuit = retry.circuit_open?.[0];
@@ -1007,9 +1081,9 @@ function renderStatus(status) {
   } else if (openCircuit) {
     recoveryTitle.textContent = "当前供应商短暂熔断";
     recoveryDetail.textContent = `约 ${Math.ceil(openCircuit.retry_after_seconds)} 秒后恢复接收新请求。`;
-  } else if (retry.total_retries > 0) {
-    recoveryTitle.textContent = `自动恢复已就绪 · 已拦截 ${retry.total_retries} 次`;
-    const latestError = retry.recent_errors?.[0];
+  } else if (recoveryHistoryCount > 0) {
+    recoveryTitle.textContent = `自动恢复已就绪 · 近 24 小时 ${recoveryHistoryCount} 条`;
+    const latestError = recoveryHistoryItems[0];
     recoveryDetail.textContent = latestError
       ? `最近一次 · ${formatRecoverySummary(latestError)}`
       : "只在内容输出前重试，不会重放已经开始的响应。";

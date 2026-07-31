@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="/control/static/styles.css?v=12">
+  <link rel="stylesheet" href="/control/static/styles.css?v=13">
 </head>
 <body>
   <main class="stage">
@@ -129,7 +129,7 @@
           <div id="recovery" class="recovery" aria-live="polite">
             <div class="recovery-heading">
               <strong id="recovery-title">自动恢复已就绪</strong>
-              <button id="recovery-details-button" class="recovery-details-button" type="button" aria-label="查看最近拦截错误" aria-controls="recovery-popover" aria-expanded="false" hidden>i</button>
+              <button id="recovery-details-button" class="recovery-details-button" type="button" aria-label="查看最近 24 小时恢复记录" aria-controls="recovery-popover" aria-expanded="false" hidden>i</button>
             </div>
             <span id="recovery-detail">临时故障会在输出开始前自动重试。</span>
           </div>
@@ -266,13 +266,13 @@
   </main>
 
   <div id="recovery-popover" class="recovery-popover" role="tooltip">
-    <div class="recovery-popover-heading"><strong>最近拦截错误</strong><span>最多 5 条</span></div>
+    <div class="recovery-popover-heading"><strong>恢复记录</strong><span id="recovery-history-meta">最近 24 小时</span></div>
     <ol id="recovery-error-list"></ol>
   </div>
 
   <div id="provider-health-popover" class="provider-health-popover" role="dialog" aria-modal="false" aria-label="服务器检测详情"></div>
   <div id="history-detail-popover" class="history-detail-popover" role="tooltip"></div>
 
-  <script src="/control/static/app.js?v=12" defer></script>
+  <script src="/control/static/app.js?v=13" defer></script>
 </body>
 </html>

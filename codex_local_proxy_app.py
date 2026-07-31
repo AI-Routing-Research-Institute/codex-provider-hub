@@ -31,6 +31,7 @@ from codex_local_proxy import (
     HealthStatusUrlStore,
     LocalProxyServer,
     ProviderRouter,
+    RecoveryHistoryStore,
     RetryPolicy,
     RetryPolicyStore,
     UsageStore,
@@ -293,7 +294,9 @@ def run_application(
     health_status_url_store = HealthStatusUrlStore(
         settings.get("health_status_url")
     )
-    usage_store = UsageStore(usage_database_path())
+    local_database_path = usage_database_path()
+    usage_store = UsageStore(local_database_path)
+    recovery_history_store = RecoveryHistoryStore(local_database_path)
 
     def update_settings(**changes: Any) -> None:
         with settings_lock:
@@ -415,6 +418,7 @@ def run_application(
         on_retry_policy_changed=remember_retry_policy,
         on_shutdown_requested=stop_tray if tray else None,
         usage_store=usage_store,
+        recovery_history_store=recovery_history_store,
         health_status_url_store=health_status_url_store,
         runtime_settings_snapshot=runtime_settings_snapshot,
         on_runtime_settings_changed=apply_runtime_settings,

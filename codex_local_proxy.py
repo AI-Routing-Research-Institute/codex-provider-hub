@@ -41,6 +41,9 @@ RETRY_ERROR_BODY_BYTES = 4 * 1024
 RETRY_ERROR_HISTORY_LIMIT = 5
 RETRY_ERROR_MESSAGE_CHARS = 220
 RETRY_ERROR_READ_TIMEOUT_SECONDS = 0.25
+RECOVERY_HISTORY_HOURS = 24
+RECOVERY_HISTORY_API_LIMIT = 500
+RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 SSE_RETRY_PREFLIGHT_BYTES = 256 * 1024
 USAGE_RESPONSE_BUFFER_BYTES = 8 * 1024 * 1024
 USAGE_WINDOWS = {"today", "24h", "7d", "30d", "all"}
@@ -223,6 +226,162 @@ class UsageStore:
                 str(row["provider_id"]): _usage_summary_row(row) for row in rows
             },
         }
+
+
+class RecoveryHistoryStore:
+    """Persist sanitized recovery events without request or response content."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._last_cleanup_at = 0.0
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+
+    def _initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, closing(self._connect()) as connection, connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS recovery_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at REAL NOT NULL,
+                    request_id INTEGER NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    max_attempts INTEGER NOT NULL,
+                    delay_seconds REAL,
+                    kind TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    outcome TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS recovery_events_recorded_at
+                    ON recovery_events(recorded_at);
+                CREATE INDEX IF NOT EXISTS recovery_events_provider_time
+                    ON recovery_events(provider_id, recorded_at);
+                """
+            )
+            self._delete_expired(connection, time.time())
+
+    def record(
+        self,
+        *,
+        request_id: int,
+        provider_id: str,
+        attempt: int,
+        max_attempts: int,
+        delay_seconds: float | None,
+        kind: str,
+        summary: str,
+        stage: str,
+        outcome: str,
+        recorded_at: float | None = None,
+    ) -> None:
+        timestamp = time.time() if recorded_at is None else float(recorded_at)
+        values = (
+            timestamp,
+            max(0, int(request_id)),
+            str(provider_id),
+            max(1, int(attempt)),
+            int(max_attempts),
+            None if delay_seconds is None else max(0.0, float(delay_seconds)),
+            str(kind),
+            _sanitize_retry_summary(summary),
+            str(stage),
+            str(outcome),
+        )
+        with self._lock, closing(self._connect()) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO recovery_events (
+                    recorded_at, request_id, provider_id, attempt, max_attempts,
+                    delay_seconds, kind, summary, stage, outcome
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            self._cleanup_if_due(connection, timestamp)
+
+    def history(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = RECOVERY_HISTORY_API_LIMIT,
+    ) -> dict[str, Any]:
+        timestamp = time.time() if now is None else float(now)
+        cutoff = timestamp - RECOVERY_HISTORY_HOURS * 3600
+        bounded_limit = max(1, min(int(limit), RECOVERY_HISTORY_API_LIMIT))
+        with self._lock, closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            if self._cleanup_due(timestamp):
+                with connection:
+                    self._delete_expired(connection, timestamp)
+            total_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM recovery_events WHERE recorded_at >= ?",
+                    (cutoff,),
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                """
+                SELECT recorded_at, request_id, provider_id, attempt, max_attempts,
+                       delay_seconds, kind, summary, stage, outcome
+                FROM recovery_events
+                WHERE recorded_at >= ?
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT ?
+                """,
+                (cutoff, bounded_limit),
+            ).fetchall()
+        return {
+            "window_hours": RECOVERY_HISTORY_HOURS,
+            "total_count": total_count,
+            "truncated": total_count > len(rows),
+            "items": [
+                {
+                    "request_id": int(row["request_id"]),
+                    "provider_id": str(row["provider_id"]),
+                    "attempt": int(row["attempt"]),
+                    "max_attempts": int(row["max_attempts"]),
+                    "delay_seconds": (
+                        None
+                        if row["delay_seconds"] is None
+                        else round(float(row["delay_seconds"]), 1)
+                    ),
+                    "kind": str(row["kind"]),
+                    "summary": _sanitize_retry_summary(str(row["summary"])),
+                    "stage": str(row["stage"]),
+                    "outcome": str(row["outcome"]),
+                    "recorded_at": round(float(row["recorded_at"]) * 1000),
+                }
+                for row in rows
+            ],
+        }
+
+    def _cleanup_due(self, now: float) -> bool:
+        return (
+            now < self._last_cleanup_at
+            or now - self._last_cleanup_at
+            >= RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS
+        )
+
+    def _cleanup_if_due(self, connection: sqlite3.Connection, now: float) -> None:
+        if self._cleanup_due(now):
+            self._delete_expired(connection, now)
+
+    def _delete_expired(self, connection: sqlite3.Connection, now: float) -> None:
+        cutoff = now - RECOVERY_HISTORY_HOURS * 3600
+        connection.execute(
+            "DELETE FROM recovery_events WHERE recorded_at < ?",
+            (cutoff,),
+        )
+        self._last_cleanup_at = now
 
 
 def _usage_summary_row(row: sqlite3.Row | None) -> dict[str, int]:
@@ -1089,6 +1248,7 @@ def create_proxy_app(
     retry_policy_store: RetryPolicyStore | None = None,
     on_retry_policy_changed: Callable[[RetryPolicy], None] | None = None,
     usage_store: UsageStore | None = None,
+    recovery_history_store: RecoveryHistoryStore | None = None,
     health_status_url: str | None = None,
     health_status_url_store: HealthStatusUrlStore | None = None,
     runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None,
@@ -1163,11 +1323,18 @@ def create_proxy_app(
         with preferences_lock:
             hidden = set(active_hidden_provider_ids)
         usage = usage_store.summary(window) if usage_store is not None else _empty_usage_summary(window)
+        recovery_history = None
+        if recovery_history_store is not None:
+            try:
+                recovery_history = recovery_history_store.history(limit=1)
+            except (OSError, sqlite3.Error):
+                recovery_history = None
         return _public_control_status(
             router,
             active_retry_policy_store.get(),
             hidden_provider_ids=hidden,
             usage_summary=usage,
+            recovery_history=recovery_history,
             health_status_url=active_health_status_url_store.get(),
         )
 
@@ -1181,6 +1348,20 @@ def create_proxy_app(
         if window not in USAGE_WINDOWS:
             return JSONResponse(status_code=422, content={"detail": "Token 统计时间范围无效"})
         return public_status(window)
+
+    @app.get("/control/api/recovery-history", include_in_schema=False)
+    async def control_recovery_history():
+        if recovery_history_store is None:
+            history = public_status()["retry"]["history"]
+        else:
+            try:
+                history = recovery_history_store.history()
+            except (OSError, sqlite3.Error):
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "无法读取本地恢复记录"},
+                )
+        return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
 
     @app.post("/control/api/retry-policy", include_in_schema=False)
     async def control_retry_policy(request: Request):
@@ -1368,6 +1549,7 @@ def create_proxy_app(
             retry_policy=active_retry_policy_store.get(),
             retry_sleep=retry_sleep,
             usage_store=usage_store,
+            recovery_history_store=recovery_history_store,
         )
 
     return app
@@ -1383,12 +1565,34 @@ def _public_control_status(
     *,
     hidden_provider_ids: Iterable[str] = (),
     usage_summary: dict[str, Any] | None = None,
+    recovery_history: dict[str, Any] | None = None,
     health_status_url: str | None = None,
 ) -> dict[str, Any]:
     status = router.status()
     policy = retry_policy or RetryPolicy()
     current_id = status.current_provider_id
     hidden = set(hidden_provider_ids)
+    recent_errors = [
+        {
+            "request_id": error.request_id,
+            "provider_id": error.provider_id,
+            "attempt": error.attempt,
+            "max_attempts": policy.max_attempts,
+            "delay_seconds": None,
+            "kind": error.kind,
+            "summary": error.summary,
+            "stage": "before_output",
+            "outcome": "retrying",
+            "recorded_at": round(error.recorded_at * 1000),
+        }
+        for error in status.recent_retry_errors
+    ]
+    history = recovery_history or {
+        "window_hours": RECOVERY_HISTORY_HOURS,
+        "total_count": len(recent_errors),
+        "truncated": False,
+        "items": recent_errors,
+    }
     return {
         "service": "codex-local-proxy",
         "current_provider_id": current_id,
@@ -1417,17 +1621,8 @@ def _public_control_status(
                 }
                 for request_id, progress in status.retrying_by_request.items()
             ],
-            "recent_errors": [
-                {
-                    "request_id": error.request_id,
-                    "provider_id": error.provider_id,
-                    "attempt": error.attempt,
-                    "kind": error.kind,
-                    "summary": error.summary,
-                    "recorded_at": round(error.recorded_at * 1000),
-                }
-                for error in status.recent_retry_errors
-            ],
+            "recent_errors": recent_errors,
+            "history": history,
             "circuit_open": [
                 {
                     "provider_id": provider_id,
@@ -1461,6 +1656,37 @@ def _empty_usage_summary(window: str) -> dict[str, Any]:
     }
 
 
+def _record_recovery_event(
+    store: RecoveryHistoryStore | None,
+    *,
+    snapshot: RouteSnapshot,
+    provider_id: str,
+    attempt: int,
+    max_attempts: int,
+    delay_seconds: float | None,
+    kind: str,
+    summary: str | None,
+    stage: str,
+    outcome: str,
+) -> None:
+    if store is None:
+        return
+    try:
+        store.record(
+            request_id=snapshot.request_id,
+            provider_id=provider_id,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            delay_seconds=delay_seconds,
+            kind=kind,
+            summary=summary or _retry_kind_summary(kind),
+            stage=stage,
+            outcome=outcome,
+        )
+    except (OSError, sqlite3.Error):
+        pass
+
+
 async def _forward_request(
     router: ProviderRouter,
     client: httpx.AsyncClient,
@@ -1470,6 +1696,7 @@ async def _forward_request(
     retry_policy: RetryPolicy,
     retry_sleep: Callable[[float], Awaitable[None]],
     usage_store: UsageStore | None = None,
+    recovery_history_store: RecoveryHistoryStore | None = None,
 ):
     try:
         snapshot = router.begin_request()
@@ -1590,17 +1817,37 @@ async def _forward_request(
             final_error = "upstream_unavailable"
             retry_summary = _exception_retry_summary(retry_kind, exc)
 
+        request_disconnected = (
+            await request.is_disconnected() if retry_kind is not None else False
+        )
         can_retry = (
             retry_kind is not None
             and retry_policy.allows_attempt(attempt + 1)
-            and not await request.is_disconnected()
+            and not request_disconnected
         )
-        if can_retry and retry_summary is None and upstream_response is not None:
+        if retry_kind is not None and retry_summary is None and upstream_response is not None:
             retry_summary = await _response_retry_summary(upstream_response)
         if upstream_response is not None:
             await upstream_response.aclose()
             upstream_response = None
         if not can_retry:
+            if retry_kind is not None:
+                _record_recovery_event(
+                    recovery_history_store,
+                    snapshot=snapshot,
+                    provider_id=snapshot.provider.provider_id,
+                    attempt=attempt,
+                    max_attempts=retry_policy.max_attempts,
+                    delay_seconds=None,
+                    kind=retry_kind,
+                    summary=retry_summary,
+                    stage="before_output",
+                    outcome=(
+                        "client_disconnected"
+                        if request_disconnected
+                        else "exhausted"
+                    ),
+                )
             break
         failed_provider_id = snapshot.provider.provider_id
         snapshot, rerouted = router.route_retry_to_current(snapshot)
@@ -1614,6 +1861,18 @@ async def _forward_request(
             kind=retry_kind,
             error_summary=retry_summary,
             error_provider_id=failed_provider_id,
+        )
+        _record_recovery_event(
+            recovery_history_store,
+            snapshot=snapshot,
+            provider_id=failed_provider_id,
+            attempt=attempt,
+            max_attempts=retry_policy.max_attempts,
+            delay_seconds=retry_delay,
+            kind=retry_kind,
+            summary=retry_summary,
+            stage="before_output",
+            outcome="retrying",
         )
         await retry_sleep(retry_delay)
         attempt += 1
@@ -1635,20 +1894,56 @@ async def _forward_request(
     }
 
     usage_capture = UsageCapture(request_body, upstream_path) if usage_store is not None else None
+    failure_capture = (
+        SSEFailureCapture()
+        if recovery_history_store is not None
+        and retry_policy.enabled
+        and _is_event_stream(upstream_response)
+        else None
+    )
 
     async def response_body() -> AsyncIterator[bytes]:
+        stream_failure: tuple[str, str] | None = None
         try:
             if first_chunk is not None:
                 if usage_capture is not None:
                     usage_capture.feed(first_chunk)
+                if failure_capture is not None:
+                    failure_capture.feed(first_chunk)
                 yield first_chunk
             assert stream is not None
             async for chunk in stream:
                 if usage_capture is not None:
                     usage_capture.feed(chunk)
+                if failure_capture is not None:
+                    failure_capture.feed(chunk)
                 yield chunk
+        except httpx.HTTPError as exc:
+            stream_failure = (
+                "stream_interrupted",
+                _exception_retry_summary("stream_interrupted", exc),
+            )
+            raise
         finally:
             try:
+                if failure_capture is not None:
+                    embedded_failure = failure_capture.finalize()
+                    if embedded_failure is not None:
+                        stream_failure = embedded_failure
+                if stream_failure is not None:
+                    kind, summary = stream_failure
+                    _record_recovery_event(
+                        recovery_history_store,
+                        snapshot=snapshot,
+                        provider_id=snapshot.provider.provider_id,
+                        attempt=attempt,
+                        max_attempts=retry_policy.max_attempts,
+                        delay_seconds=None,
+                        kind=kind,
+                        summary=summary,
+                        stage="after_output",
+                        outcome="passed_through",
+                    )
                 if usage_capture is not None and usage_store is not None:
                     usage = usage_capture.finalize(upstream_response.status_code)
                     if usage is not None:
@@ -1705,15 +2000,24 @@ async def _inspect_sse_before_output(
         try:
             buffered.extend(await anext(stream))
         except StopAsyncIteration:
+            action, retry_kind, retry_summary = _sse_preflight_decision(
+                bytes(buffered),
+                end_of_stream=True,
+            )
+            if action == "retry":
+                return None, retry_kind, retry_summary
             return bytes(buffered) or None, None, None
 
 
 def _sse_preflight_decision(
     buffered: bytes,
+    *,
+    end_of_stream: bool = False,
 ) -> tuple[str, str | None, str | None]:
     normalized = buffered.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     events = normalized.split(b"\n\n")
-    for event in events[:-1]:
+    complete_events = events if end_of_stream else events[:-1]
+    for event in complete_events:
         event_name, payload = _sse_event_payload(event)
         if payload is None:
             continue
@@ -1728,6 +2032,78 @@ def _sse_preflight_decision(
         if _sse_event_commits_response(root, event_name):
             return "commit", None, None
     return "wait", None, None
+
+
+class SSEFailureCapture:
+    """Capture one retryable failure after a streamed response is committed."""
+
+    def __init__(self) -> None:
+        self._line_buffer = bytearray()
+        self._event_lines: list[bytes] = []
+        self._event_size = 0
+        self._discard_event = False
+        self._failure: tuple[str, str] | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        if self._failure is not None or not chunk:
+            return
+        self._line_buffer.extend(chunk)
+        while True:
+            newline = self._line_buffer.find(b"\n")
+            if newline < 0:
+                break
+            line = bytes(self._line_buffer[:newline]).removesuffix(b"\r")
+            del self._line_buffer[: newline + 1]
+            self._feed_line(line)
+            if self._failure is not None:
+                return
+        if len(self._line_buffer) > SSE_RETRY_PREFLIGHT_BYTES:
+            self._line_buffer.clear()
+            self._event_lines.clear()
+            self._event_size = 0
+            self._discard_event = True
+
+    def finalize(self) -> tuple[str, str] | None:
+        if self._failure is not None:
+            return self._failure
+        if self._line_buffer:
+            self._feed_line(bytes(self._line_buffer).removesuffix(b"\r"))
+            self._line_buffer.clear()
+        if self._event_lines and not self._discard_event:
+            self._inspect_event(b"\n".join(self._event_lines))
+        self._reset_event()
+        return self._failure
+
+    def _feed_line(self, line: bytes) -> None:
+        if not line:
+            if self._event_lines and not self._discard_event:
+                self._inspect_event(b"\n".join(self._event_lines))
+            self._reset_event()
+            return
+        if self._discard_event:
+            return
+        self._event_size += len(line) + 1
+        if self._event_size > SSE_RETRY_PREFLIGHT_BYTES:
+            self._event_lines.clear()
+            self._discard_event = True
+            return
+        self._event_lines.append(line)
+
+    def _inspect_event(self, event: bytes) -> None:
+        event_name, payload = _sse_event_payload(event)
+        if payload is None or payload == b"[DONE]":
+            return
+        root = _decode_json(payload)
+        if not isinstance(root, dict):
+            return
+        kind, summary = _embedded_retry_failure(root, event_name)
+        if kind is not None:
+            self._failure = (kind, summary or _retry_kind_summary(kind))
+
+    def _reset_event(self) -> None:
+        self._event_lines.clear()
+        self._event_size = 0
+        self._discard_event = False
 
 
 def _sse_event_payload(event: bytes) -> tuple[str, bytes | None]:
@@ -1788,6 +2164,20 @@ def _embedded_retry_failure(
         rate_message = message if message != "上游临时错误" else "请求频率受限"
         return "rate_limited", _sanitize_retry_summary(f"HTTP 429：{rate_message}")
 
+    capacity_codes = {
+        "model_at_capacity",
+        "model_capacity",
+        "model_capacity_error",
+    }
+    capacity_message = re.search(
+        r"(?i)\b(?:selected|requested|this) model is (?:currently )?at capacity\b",
+        combined,
+    )
+    if (error_codes & capacity_codes) or capacity_message is not None:
+        return "model_capacity", _sanitize_retry_summary(
+            f"模型容量已满：{message}"
+        )
+
     permanent_codes = {
         "authentication_error",
         "billing_error",
@@ -1820,15 +2210,17 @@ def _embedded_retry_failure(
 
 def _sse_event_commits_response(root: dict[str, Any], event_name: str) -> bool:
     event_type = root.get("type") if isinstance(root.get("type"), str) else event_name
-    prelude_events = {
-        "response.created",
-        "response.in_progress",
-        "response.queued",
-        "response.output_item.added",
-        "response.content_part.added",
-        "response.reasoning_summary_part.added",
+    visible_output_events = {
+        "response.output_text.delta",
+        "response.refusal.delta",
     }
-    return event_type not in prelude_events
+    terminal_events = {
+        "error",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+    }
+    return event_type in visible_output_events or event_type in terminal_events
 
 
 def _retry_kind_summary(kind: str) -> str:
@@ -1836,8 +2228,10 @@ def _retry_kind_summary(kind: str) -> str:
         return f"HTTP {kind.removeprefix('http_')} 上游临时错误"
     return {
         "rate_limited": "HTTP 429 请求频率受限",
+        "model_capacity": "模型容量已满",
         "connection": "连接上游失败",
         "stream_start": "响应开始前连接中断",
+        "stream_interrupted": "输出后响应流中断",
         "upstream_error": "上游请求失败",
     }.get(kind, "上游临时错误")
 
@@ -2010,6 +2404,7 @@ class LocalProxyServer:
         on_retry_policy_changed: Callable[[RetryPolicy], None] | None = None,
         on_shutdown_requested: Callable[[], None] | None = None,
         usage_store: UsageStore | None = None,
+        recovery_history_store: RecoveryHistoryStore | None = None,
         health_status_url: str | None = None,
         health_status_url_store: HealthStatusUrlStore | None = None,
         runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None,
@@ -2040,6 +2435,7 @@ class LocalProxyServer:
             retry_policy_store=retry_policy_store,
             on_retry_policy_changed=on_retry_policy_changed,
             usage_store=usage_store,
+            recovery_history_store=recovery_history_store,
             health_status_url=health_status_url,
             health_status_url_store=health_status_url_store,
             runtime_settings_snapshot=runtime_settings_snapshot,
