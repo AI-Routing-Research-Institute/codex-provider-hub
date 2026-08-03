@@ -43,7 +43,7 @@ from codex_local_proxy import (
 )
 
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 SETTINGS_VERSION = 5
 APP_DATA_DIRECTORY_NAME = ".codex-local-proxy"
 

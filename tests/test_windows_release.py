@@ -48,8 +48,8 @@ class WindowsReleaseTests(unittest.TestCase):
         self.assertIn("python -m unittest discover", workflow)
         self.assertIn("create_local_proxy_smoke_db.py", workflow)
         self.assertIn("gh release create", workflow)
-        self.assertIn('APP_VERSION = "0.1.0"', (ROOT / "codex_local_proxy_app.py").read_text(encoding="utf-8"))
-        self.assertIn('$Version = "0.1.0"', build_script)
+        self.assertIn('APP_VERSION = "0.1.1"', (ROOT / "codex_local_proxy_app.py").read_text(encoding="utf-8"))
+        self.assertIn('$Version = "0.1.1"', build_script)
 
 
 if __name__ == "__main__":
