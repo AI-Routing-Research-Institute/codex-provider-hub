@@ -25,6 +25,11 @@ ResultCallback = Callable[[str, str, HealthProbeResult], None]
 Jitter = Callable[[float], float]
 IntervalSampler = Callable[[float, float], float]
 
+# 文件系统记录的 mtime 与 datetime.now() 存在精度差异（尤其 Windows 上目录刚创建时
+# mtime 可能略晚于紧随其后取到的 now），比较陈旧度时保留一个小容差，避免把刚创建的
+# 目录误判为“比 cutoff 更新”而跳过清理。
+_CLEANUP_TIME_TOLERANCE_SECONDS = 1.0
+
 
 class StatusWorker:
     def __init__(
@@ -220,7 +225,9 @@ def cleanup_stale_run_directories(
         try:
             if candidate.resolve().parent != root_resolved:
                 continue
-            if candidate.stat().st_mtime >= cutoff:
+            # 仅当目录更新时间明确晚于 cutoff（超出容差）时才保留；默认 max_age=0 时
+            # 刚创建的目录因 mtime 与 now 的精度差异落在容差内，视为陈旧予以清理。
+            if candidate.stat().st_mtime - cutoff > _CLEANUP_TIME_TOLERANCE_SECONDS:
                 continue
             shutil.rmtree(candidate)
             removed += 1
