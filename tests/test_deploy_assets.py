@@ -138,6 +138,7 @@ class DeployAssetTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", script)
         self.assertIn("--source", script)
         self.assertIn("--codex-version", script)
+        self.assertIn("--claude-version", script)
         self.assertIn("--web-port", script)
         self.assertIn("--public-ip", script)
         self.assertNotIn("--control-ip", script)
@@ -150,6 +151,12 @@ class DeployAssetTests(unittest.TestCase):
         self.assertIn("LEGACY_DATABASE=$DATA_ROOT/status.sqlite3", script)
         self.assertIn("SQLite backup migration required", script)
         self.assertIn('chmod 0755 "$APP_ROOT/app"', script)
+        self.assertIn('"$APP_ROOT/claude-runtime"', script)
+        self.assertIn("@anthropic-ai/claude-code@$CLAUDE_VERSION", script)
+        self.assertIn(
+            'npm install --prefix "$APP_ROOT/claude-runtime"',
+            script,
+        )
         self.assertIn('-m 0700 "$PRIVATE_ROOT" "$PRIVATE_ROOT/tmp"', script)
         self.assertIn('-g "$APP_WEB_USER" -m 2750 "$PUBLIC_ROOT"', script)
         self.assertIn("CONTROL_GROUP=codex-provider-control", script)

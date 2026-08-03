@@ -15,12 +15,13 @@ LEGACY_DATABASE=$DATA_ROOT/status.sqlite3
 PRIVATE_DATABASE=$PRIVATE_ROOT/status.sqlite3
 SOURCE_DIR=
 CODEX_VERSION=0.144.5
+CLAUDE_VERSION=2.1.220
 WEB_PORT=18765
 PUBLIC_IP=
 
 usage() {
     printf '%s\n' \
-        "Usage: $0 --source PATH --public-ip ADDRESS [--codex-version VERSION] [--web-port PORT]"
+        "Usage: $0 --source PATH --public-ip ADDRESS [--codex-version VERSION] [--claude-version VERSION] [--web-port PORT]"
 }
 
 while (($#)); do
@@ -31,6 +32,10 @@ while (($#)); do
             ;;
         --codex-version)
             CODEX_VERSION=${2:-}
+            shift 2
+            ;;
+        --claude-version)
+            CLAUDE_VERSION=${2:-}
             shift 2
             ;;
         --web-port)
@@ -73,6 +78,10 @@ if [[ ! $CODEX_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     printf '%s\n' "--codex-version must use numeric semantic versioning." >&2
     exit 2
 fi
+if [[ ! $CLAUDE_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf '%s\n' "--claude-version must use numeric semantic versioning." >&2
+    exit 2
+fi
 for command_name in python3 npm rsync sed systemctl getent groupadd usermod; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         printf 'Required command is missing: %s\n' "$command_name" >&2
@@ -95,7 +104,8 @@ fi
 usermod -a -G "$CONTROL_GROUP" "$APP_USER"
 usermod -a -G "$CONTROL_GROUP" "$APP_WEB_USER"
 
-install -d -o root -g root -m 0755 "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/runtime"
+install -d -o root -g root -m 0755 \
+    "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/runtime" "$APP_ROOT/claude-runtime"
 install -d -o root -g root -m 0755 "$CONFIG_ROOT"
 install -d -o root -g root -m 0700 "$CONFIG_ROOT/secrets"
 install -d -o root -g root -m 0755 "$DATA_ROOT"
@@ -140,6 +150,16 @@ if [[ -x $CODEX_BIN ]]; then
 fi
 if [[ $INSTALLED_CODEX_VERSION != *"$CODEX_VERSION"* ]]; then
     npm install --prefix "$APP_ROOT/runtime" "@openai/codex@$CODEX_VERSION"
+fi
+
+CLAUDE_BIN=$APP_ROOT/claude-runtime/node_modules/.bin/claude
+INSTALLED_CLAUDE_VERSION=
+if [[ -x $CLAUDE_BIN ]]; then
+    INSTALLED_CLAUDE_VERSION=$($CLAUDE_BIN --version 2>/dev/null || true)
+fi
+if [[ $INSTALLED_CLAUDE_VERSION != *"$CLAUDE_VERSION"* ]]; then
+    npm install --prefix "$APP_ROOT/claude-runtime" \
+        "@anthropic-ai/claude-code@$CLAUDE_VERSION"
 fi
 
 if [[ ! -e $CONFIG_ROOT/providers.toml ]]; then

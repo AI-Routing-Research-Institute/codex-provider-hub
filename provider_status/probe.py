@@ -15,7 +15,11 @@ from typing import Any
 import httpx
 
 from probe_codex_cc_switch import build_env
-from provider_status.config import ProviderConfig
+from provider_status.config import (
+    PROBE_CLIENT_CLAUDE,
+    PROBE_CLIENT_CODEX,
+    ProviderConfig,
+)
 from provider_status.store import sanitize_error_summary
 from provider_status.tui_probe import (
     CodexTuiClient,
@@ -60,6 +64,36 @@ class DirectDiagnosticResult:
 ClientFactory = Callable[..., CodexTuiClient]
 Clock = Callable[[], float]
 DiagnosticRunner = Callable[..., DirectDiagnosticResult]
+
+
+class ProviderHealthProbe:
+    def __init__(
+        self,
+        codex_probe: Any,
+        claude_probe: Any | None = None,
+    ) -> None:
+        self._codex_probe = codex_probe
+        self._claude_probe = claude_probe
+
+    def run(
+        self,
+        provider: ProviderConfig,
+        model: str,
+        api_key: str,
+    ) -> HealthProbeResult:
+        client = provider.probe_client(model)
+        if client == PROBE_CLIENT_CODEX:
+            return self._codex_probe.run(provider, model, api_key)
+        if client == PROBE_CLIENT_CLAUDE and self._claude_probe is not None:
+            return self._claude_probe.run(provider, model, api_key)
+        return HealthProbeResult(
+            success=False,
+            latency_ms=0,
+            error_code="unknown_error",
+            error_summary="configured probe client is unavailable",
+            failure_stage="probe_setup",
+            diagnostic_source="probe_router",
+        )
 
 
 class CodexHealthProbe:
@@ -499,4 +533,5 @@ __all__ = [
     "DirectDiagnosticResult",
     "HEALTH_PROMPT",
     "HealthProbeResult",
+    "ProviderHealthProbe",
 ]

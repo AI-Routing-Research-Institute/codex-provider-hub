@@ -14,8 +14,13 @@ from threading import Event
 from typing import Any
 
 from provider_status.config import ServiceConfig, load_config, read_credential
+from provider_status.claude_probe import ClaudeHealthProbe
 from provider_status.control import DEFAULT_CONTROL_DATABASE, ManualProbeControlStore
-from provider_status.probe import CodexHealthProbe, HealthProbeResult
+from provider_status.probe import (
+    CodexHealthProbe,
+    HealthProbeResult,
+    ProviderHealthProbe,
+)
 from provider_status.store import ProbeRecord, StatusStore
 
 
@@ -291,7 +296,13 @@ def main(argv: list[str] | None = None) -> int:
     control_store = ManualProbeControlStore(Path(args.control_database))
     control_store.initialize()
     control_store.recover_interrupted_jobs(now)
-    probe = CodexHealthProbe(config.codex_bin, config.temp_root)
+    codex_probe = CodexHealthProbe(config.codex_bin, config.temp_root)
+    claude_probe = (
+        ClaudeHealthProbe(config.claude_bin, config.temp_root)
+        if config.claude_bin is not None
+        else None
+    )
+    probe = ProviderHealthProbe(codex_probe, claude_probe)
     worker = StatusWorker(
         config,
         store,

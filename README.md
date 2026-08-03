@@ -90,6 +90,7 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 ### 健康监测
 
 - 按供应商和模型独立探测，支持健康与异常状态下的不同调度间隔。
+- 同一供应商可以按模型选择隔离的 Codex CLI 或 Claude CLI 探测流程；未指定时默认使用 Codex CLI。
 - 提供手动优先探测、状态历史、诊断分类和公开只读数据库。
 - Worker 与 Web 服务分离，包含 systemd 和 Nginx 部署模板。
 
@@ -168,6 +169,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 cp config/providers.example.toml config/providers.toml
 ```
 
+`model_clients` 可以把指定模型映射为 `claude`，其余模型默认使用 `codex`。启用 Claude 模型时还需要配置服务级 `claude_bin` 和供应商级 `claude_base_url`；两种客户端都使用临时隔离目录，不复用本机登录状态。
+
 单次运行 Worker：
 
 ```bash
@@ -198,7 +201,7 @@ cp config/providers.example.toml config/providers.toml
 ├── local_proxy_static/        本地中转控制台
 ├── probe_codex_cc_switch.py   CC Switch 供应商探测 CLI
 ├── probe_codex_gui.py         桌面探测界面
-├── provider_status/           健康监测 Worker、存储和状态页
+├── provider_status/           健康监测 Worker、Codex/Claude 探测、存储和状态页
 ├── config/                    公开供应商配置示例
 ├── deploy/                    systemd 与 Nginx 部署模板
 ├── scripts/                   Windows 快捷方式安装脚本

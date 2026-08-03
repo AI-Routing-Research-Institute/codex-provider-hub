@@ -34,13 +34,16 @@ _AUTH_HTTP_401_RE = re.compile(r"\bHTTP\s+401\b", re.IGNORECASE)
 _PUBLIC_FAILURE_STAGES = frozenset(
     {
         "codex_tui",
+        "claude_cli",
         "response_validation",
         "network",
         "provider_response",
         "codex_stream",
     }
 )
-_PUBLIC_DIAGNOSTIC_SOURCES = frozenset({"codex_tui", "direct_responses"})
+_PUBLIC_DIAGNOSTIC_SOURCES = frozenset(
+    {"codex_tui", "claude_cli", "direct_responses", "direct_messages"}
+)
 _ERROR_SUMMARIES = {
     "auth_failed": "专用 Key 无效、已过期或没有访问权限。",
     "client_blocked": (

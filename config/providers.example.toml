@@ -3,6 +3,7 @@ database_path = "/var/lib/codex-provider-probe/private/status.sqlite3"
 public_database_path = "/var/lib/codex-provider-probe/public/status.sqlite3"
 temp_root = "/var/lib/codex-provider-probe/private/tmp"
 codex_bin = "/opt/codex-provider-probe/runtime/node_modules/.bin/codex"
+claude_bin = "/opt/codex-provider-probe/claude-runtime/node_modules/.bin/claude"
 
 [[providers]]
 id = "provider-primary"
@@ -22,10 +23,12 @@ timeout_seconds = 90
 id = "provider-alpha"
 name = "Provider Alpha"
 base_url = "https://alpha.example.com/v1"
+claude_base_url = "https://alpha.example.com"
 credential_name = "provider_alpha_api_key"
 probe_mode = "automatic"
-models = ["gpt-5.6-sol", "gpt-5.5"]
-display_models = ["gpt-5.6-sol", "gpt-5.5"]
+models = ["gpt-5.6-sol", "claude-opus-5"]
+display_models = ["gpt-5.6-sol", "claude-opus-5"]
+model_clients = { "claude-opus-5" = "claude" }
 healthy_interval_seconds = 600
 healthy_interval_max_seconds = 1200
 unhealthy_interval_seconds = 120

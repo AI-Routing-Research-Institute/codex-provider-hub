@@ -19,6 +19,9 @@ Resolver = Callable[..., Iterable[Any]]
 PROBE_MODE_AUTOMATIC = "automatic"
 PROBE_MODE_MANUAL_ONLY = "manual_only"
 _PROBE_MODES = frozenset({PROBE_MODE_AUTOMATIC, PROBE_MODE_MANUAL_ONLY})
+PROBE_CLIENT_CODEX = "codex"
+PROBE_CLIENT_CLAUDE = "claude"
+_PROBE_CLIENTS = frozenset({PROBE_CLIENT_CODEX, PROBE_CLIENT_CLAUDE})
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,11 @@ class ProviderConfig:
     unhealthy_interval_max_seconds: float | None = None
     display_models: tuple[str, ...] | None = None
     probe_mode: str = PROBE_MODE_AUTOMATIC
+    model_clients: tuple[tuple[str, str], ...] = ()
+    claude_base_url: str | None = None
+
+    def probe_client(self, model: str) -> str:
+        return dict(self.model_clients).get(model, PROBE_CLIENT_CODEX)
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,7 @@ class ServiceConfig:
     public_database_path: Path
     temp_root: Path
     codex_bin: Path
+    claude_bin: Path | None = None
 
 
 def read_credential(name: str, env: Mapping[str, str]) -> str:
@@ -116,6 +125,23 @@ def load_config(
             provider_id,
         )
         models = _models(raw_provider, provider_id)
+        model_clients = _model_clients(raw_provider, provider_id, models)
+        claude_base_url = _optional_string(raw_provider, "claude_base_url")
+        if claude_base_url is not None:
+            _validate_public_https_endpoint(
+                claude_base_url,
+                provider_id,
+                active_resolver,
+                field_name="claude_base_url",
+            )
+        if (
+            any(client == PROBE_CLIENT_CLAUDE for _, client in model_clients)
+            and claude_base_url is None
+        ):
+            raise ValueError(
+                f"provider {provider_id!r} claude_base_url is required for "
+                "Claude models"
+            )
 
         providers.append(
             ProviderConfig(
@@ -160,6 +186,8 @@ def load_config(
                     models,
                 ),
                 probe_mode=_probe_mode(raw_provider, provider_id),
+                model_clients=model_clients,
+                claude_base_url=claude_base_url,
             )
         )
 
@@ -170,12 +198,21 @@ def load_config(
     if database_path.resolve() == public_database_path.resolve():
         raise ValueError("private and public database paths must differ")
 
+    claude_bin_value = _optional_string(service, "claude_bin")
+    if claude_bin_value is None and any(
+        provider.probe_client(model) == PROBE_CLIENT_CLAUDE
+        for provider in providers
+        for model in provider.models
+    ):
+        raise ValueError("service claude_bin is required for Claude models")
+
     return ServiceConfig(
         providers=tuple(providers),
         database_path=database_path,
         public_database_path=public_database_path,
         temp_root=Path(_required_string(service, "temp_root", "service")),
         codex_bin=Path(_required_string(service, "codex_bin", "service")),
+        claude_bin=Path(claude_bin_value) if claude_bin_value is not None else None,
     )
 
 
@@ -202,6 +239,15 @@ def _required_string(
     return value.strip()
 
 
+def _optional_string(values: Mapping[str, Any], key: str) -> str | None:
+    if key not in values:
+        return None
+    value = values.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
+    return value.strip()
+
+
 def _models(raw_provider: Mapping[str, Any], provider_id: str) -> tuple[str, ...]:
     raw_models = raw_provider.get("models")
     if not isinstance(raw_models, list) or not raw_models:
@@ -218,6 +264,39 @@ def _models(raw_provider: Mapping[str, Any], provider_id: str) -> tuple[str, ...
         seen.add(model)
         models.append(model)
     return tuple(models)
+
+
+def _model_clients(
+    raw_provider: Mapping[str, Any],
+    provider_id: str,
+    models: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    raw_clients = raw_provider.get("model_clients")
+    if raw_clients is None:
+        return ()
+    if not isinstance(raw_clients, dict):
+        raise ValueError(f"provider {provider_id!r} model_clients must be a table")
+
+    unknown_models = [model for model in raw_clients if model not in models]
+    if unknown_models:
+        raise ValueError(
+            f"provider {provider_id!r} model_clients contains unconfigured models: "
+            f"{', '.join(str(model) for model in unknown_models)}"
+        )
+
+    clients: list[tuple[str, str]] = []
+    for model in models:
+        if model not in raw_clients:
+            continue
+        client = raw_clients[model]
+        if not isinstance(client, str) or client not in _PROBE_CLIENTS:
+            allowed = ", ".join(sorted(_PROBE_CLIENTS))
+            raise ValueError(
+                f"provider {provider_id!r} model_clients[{model!r}] must be "
+                f"one of: {allowed}"
+            )
+        clients.append((model, client))
+    return tuple(clients)
 
 
 def _display_models(
@@ -327,9 +406,11 @@ def _validate_public_https_endpoint(
     base_url: str,
     provider_id: str,
     resolver: Resolver,
+    *,
+    field_name: str = "base_url",
 ) -> None:
     error_prefix = (
-        f"provider {provider_id!r} base_url must be a public HTTPS endpoint"
+        f"provider {provider_id!r} {field_name} must be a public HTTPS endpoint"
     )
     try:
         parsed = urlsplit(base_url)

@@ -43,6 +43,8 @@ def provider_block(
     unhealthy_interval_max_seconds: int | None = None,
     timeout_seconds: int = 90,
     probe_mode: str | None = None,
+    model_clients: dict[str, str] | None = None,
+    claude_base_url: str | None = None,
 ) -> str:
     encoded_models = ", ".join(f'"{model}"' for model in models)
     encoded_display_models = (
@@ -63,16 +65,29 @@ def provider_block(
         else f"unhealthy_interval_max_seconds = {unhealthy_interval_max_seconds}\n"
     )
     probe_mode_line = "" if probe_mode is None else f'probe_mode = "{probe_mode}"\n'
+    model_clients_line = (
+        ""
+        if model_clients is None
+        else "model_clients = { "
+        + ", ".join(
+            f'"{model}" = "{client}"' for model, client in model_clients.items()
+        )
+        + " }\n"
+    )
+    claude_base_url_line = (
+        "" if claude_base_url is None else f'claude_base_url = "{claude_base_url}"\n'
+    )
     return f"""
 [[providers]]
 id = "{provider_id}"
 name = "Provider Alpha"
 base_url = "{base_url}"
-credential_name = "provider-alpha-api-key"
+{claude_base_url_line}credential_name = "provider-alpha-api-key"
 {probe_mode_line}models = [{encoded_models}]
 {encoded_display_models}healthy_interval_seconds = {healthy_interval_seconds}
 {healthy_max}unhealthy_interval_seconds = {unhealthy_interval_seconds}
 {unhealthy_max}timeout_seconds = {timeout_seconds}
+{model_clients_line}
 """
 
 
@@ -83,6 +98,7 @@ database_path = "var/private/provider-status.sqlite3"
 public_database_path = "var/public/provider-status.sqlite3"
 temp_root = "var/private/provider-status-tmp"
 codex_bin = "C:/Users/tester/AppData/Roaming/npm/codex.cmd"
+claude_bin = "C:/Users/tester/AppData/Roaming/npm/claude.cmd"
 """ + "".join(provider_blocks)
 
 
@@ -109,6 +125,10 @@ class StatusConfigTests(unittest.TestCase):
             config.codex_bin,
             Path("C:/Users/tester/AppData/Roaming/npm/codex.cmd"),
         )
+        self.assertEqual(
+            config.claude_bin,
+            Path("C:/Users/tester/AppData/Roaming/npm/claude.cmd"),
+        )
         self.assertEqual(len(config.providers), 1)
         provider = config.providers[0]
         self.assertEqual(provider.provider_id, "provider-alpha")
@@ -116,6 +136,71 @@ class StatusConfigTests(unittest.TestCase):
         self.assertEqual(provider.models, ("gpt-5.6-sol", "gpt-5.5"))
         self.assertEqual(provider.display_models, provider.models)
         self.assertEqual(provider.probe_mode, "automatic")
+        self.assertEqual(provider.model_clients, ())
+        self.assertEqual(provider.probe_client("gpt-5.6-sol"), "codex")
+        self.assertIsNone(provider.claude_base_url)
+
+    def test_accepts_model_level_claude_client(self) -> None:
+        config = self.load_text(
+            service_config(
+                provider_block(
+                    models=("gpt-5.6-sol", "claude-opus-5"),
+                    model_clients={"claude-opus-5": "claude"},
+                    claude_base_url="https://alpha.example.com",
+                )
+            )
+        )
+
+        provider = config.providers[0]
+        self.assertEqual(
+            provider.model_clients,
+            (("claude-opus-5", "claude"),),
+        )
+        self.assertEqual(provider.probe_client("gpt-5.6-sol"), "codex")
+        self.assertEqual(provider.probe_client("claude-opus-5"), "claude")
+        self.assertEqual(provider.claude_base_url, "https://alpha.example.com")
+
+    def test_rejects_invalid_claude_probe_configuration(self) -> None:
+        cases = (
+            (
+                provider_block(
+                    model_clients={"unknown-model": "claude"},
+                    claude_base_url="https://alpha.example.com",
+                ),
+                "unconfigured models",
+            ),
+            (
+                provider_block(model_clients={"gpt-5.5": "browser"}),
+                "model_clients",
+            ),
+            (
+                provider_block(model_clients={"gpt-5.5": "claude"}),
+                "claude_base_url",
+            ),
+            (
+                provider_block(
+                    model_clients={"gpt-5.5": "claude"},
+                    claude_base_url="http://alpha.example.com",
+                ),
+                "claude_base_url",
+            ),
+        )
+        for block, error in cases:
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.load_text(service_config(block))
+
+        missing_binary = service_config(
+            provider_block(
+                model_clients={"gpt-5.5": "claude"},
+                claude_base_url="https://alpha.example.com",
+            )
+        ).replace(
+            'claude_bin = "C:/Users/tester/AppData/Roaming/npm/claude.cmd"\n',
+            "",
+        )
+        with self.assertRaisesRegex(ValueError, "claude_bin"):
+            self.load_text(missing_binary)
 
     def test_accepts_manual_only_probe_mode_and_rejects_unknown_mode(self) -> None:
         provider = self.load_text(
@@ -360,6 +445,12 @@ class StatusConfigTests(unittest.TestCase):
             Path("/opt/codex-provider-probe/runtime/node_modules/.bin/codex"),
         )
         self.assertEqual(
+            config.claude_bin,
+            Path(
+                "/opt/codex-provider-probe/claude-runtime/node_modules/.bin/claude"
+            ),
+        )
+        self.assertEqual(
             config.database_path,
             Path("/var/lib/codex-provider-probe/private/status.sqlite3"),
         )
@@ -392,8 +483,15 @@ class StatusConfigTests(unittest.TestCase):
         self.assertEqual(ly_free.name, "Provider Alpha")
         self.assertEqual(ly_free.base_url, "https://alpha.example.com/v1")
         self.assertEqual(ly_free.credential_name, "provider_alpha_api_key")
-        self.assertEqual(ly_free.models, ("gpt-5.6-sol", "gpt-5.5"))
+        self.assertEqual(ly_free.models, ("gpt-5.6-sol", "claude-opus-5"))
         self.assertEqual(ly_free.display_models, ly_free.models)
+        self.assertEqual(
+            ly_free.model_clients,
+            (("claude-opus-5", "claude"),),
+        )
+        self.assertEqual(ly_free.probe_client("gpt-5.6-sol"), "codex")
+        self.assertEqual(ly_free.probe_client("claude-opus-5"), "claude")
+        self.assertEqual(ly_free.claude_base_url, "https://alpha.example.com")
         self.assertEqual(ly_free.healthy_interval_seconds, 600)
         self.assertEqual(ly_free.healthy_interval_max_seconds, 1200)
         self.assertEqual(ly_free.unhealthy_interval_seconds, 120)
