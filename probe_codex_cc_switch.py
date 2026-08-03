@@ -519,6 +519,10 @@ def slugify(value: str) -> str:
 
 
 def load_codex_common_config(db_path: Path) -> str:
+    # 数据库文件不存在时（例如全新环境尚未安装 cc-switch）视为没有公共配置，
+    # 返回空字符串而不是抛出 sqlite 错误，避免 GUI smoke 检查等流程崩溃。
+    if not Path(db_path).exists():
+        return ""
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -543,6 +547,10 @@ def load_codex_providers(db_path: Path) -> list[ProviderRecord]:
     ORDER BY p.sort_index IS NULL, p.sort_index, p.created_at, p.name
     """
     providers: list[ProviderRecord] = []
+    # 数据库文件不存在时（例如全新环境尚未安装 cc-switch）视为没有任何供应商，
+    # 返回空列表而不是抛出 sqlite 错误，避免 GUI smoke 检查等流程崩溃。
+    if not Path(db_path).exists():
+        return providers
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(query).fetchall()
