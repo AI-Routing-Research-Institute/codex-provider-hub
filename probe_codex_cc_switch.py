@@ -696,6 +696,8 @@ def format_toml_value(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
         return "[" + ", ".join(format_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f'{format_key(k)} = {format_toml_value(v)}' for k, v in value.items()) + " }"
     raise TypeError(f"Unsupported TOML value type: {type(value)!r}")
 
 
