@@ -13,6 +13,7 @@ from claude_local_proxy import (
     load_claude_proxy_providers,
 )
 from codex_local_proxy import ProviderRouter, RetryPolicy, UsageStore, create_proxy_app
+from codex_local_proxy import RecoveryHistoryStore
 from provider_proxy_protocol import ClaudeMessagesProtocol
 
 
@@ -71,7 +72,7 @@ class ClaudeCCSourceTests(unittest.TestCase):
             connection,
             provider_id="api-key",
             name="API Key Provider",
-            current=1,
+            current=0,
             settings={
                 "env": {
                     "ANTHROPIC_BASE_URL": "https://claude.example.test/",
@@ -99,7 +100,7 @@ class ClaudeCCSourceTests(unittest.TestCase):
             connection,
             provider_id="chat-only",
             name="Chat Only",
-            current=0,
+            current=1,
             settings={
                 "env": {
                     "ANTHROPIC_BASE_URL": "https://chat.example.test",
@@ -143,6 +144,7 @@ class ClaudeCCSourceTests(unittest.TestCase):
         self.assertEqual(providers[1].credential_kind, "auth_token")
         self.assertTrue(providers[1].compatible)
         self.assertFalse(providers[2].compatible)
+        self.assertFalse(providers[2].is_cc_switch_current)
         self.assertNotIn("fixture-api-key", repr(providers[0]))
         self.assertNotIn("fixture-auth-token", repr(providers[1]))
 
@@ -272,6 +274,126 @@ class ClaudeProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0].headers["authorization"], "Bearer fixture-upstream-secret")
         self.assertNotIn("x-api-key", seen[0].headers)
 
+    async def test_messages_are_sent_to_anthropic_v1_path(self) -> None:
+        seen: list[httpx.Request] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"type": "message", "content": []})
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(seen[0].url.path, "/v1/messages")
+
+    def test_existing_v1_base_url_is_not_duplicated(self) -> None:
+        selected = ClaudeProxyProvider(
+            provider_id="versioned",
+            name="Versioned",
+            base_url="https://versioned.example.test/v1",
+            is_cc_switch_current=True,
+            api_key="fixture-secret",
+        )
+
+        url = ClaudeMessagesProtocol().upstream_url(selected, "messages")
+
+        self.assertEqual(url, "https://versioned.example.test/v1/messages")
+
+    async def test_missing_usage_is_estimated_for_successful_message(self) -> None:
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "type": "message",
+                    "model": "claude-test",
+                    "content": [{"type": "text", "text": "hello back"}],
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            usage_store = UsageStore(Path(temp_dir) / "usage.sqlite3")
+            upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = create_proxy_app(
+                ProviderRouter((claude_provider(),)),
+                client=upstream_client,
+                protocol_adapter=ClaudeMessagesProtocol(),
+                usage_store=usage_store,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            )
+            try:
+                await client.post(
+                    "/v1/messages",
+                    json={
+                        "model": "claude-test",
+                        "system": "be concise",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                summary = usage_store.summary("all")["total"]
+            finally:
+                await client.aclose()
+                await upstream_client.aclose()
+
+        self.assertGreater(summary["input_tokens"], 0)
+        self.assertGreater(summary["output_tokens"], 0)
+        self.assertEqual(summary["estimated_requests"], 1)
+
+    async def test_anthropic_error_after_content_is_recorded_without_replay(self) -> None:
+        attempts = 0
+        body = (
+            b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+            b'"delta":{"type":"text_delta","text":"partial"}}\n\n'
+            b'event: error\ndata: {"type":"error","error":'
+            b'{"type":"overloaded_error","message":"busy"}}\n\n'
+        )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_store = RecoveryHistoryStore(Path(temp_dir) / "usage.sqlite3")
+            upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = create_proxy_app(
+                ProviderRouter((claude_provider(),)),
+                client=upstream_client,
+                protocol_adapter=ClaudeMessagesProtocol(),
+                recovery_history_store=history_store,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            )
+            try:
+                response = await client.post("/v1/messages", json={"model": "claude-test"})
+                history = history_store.history()
+            finally:
+                await client.aclose()
+                await upstream_client.aclose()
+
+        self.assertEqual(attempts, 1)
+        self.assertIn("partial", response.text)
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["stage"], "after_output")
+
 
 class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_identifies_claude_service_and_provider_compatibility(self) -> None:
@@ -319,13 +441,45 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             messages = await client.post("/v1/messages", json={"model": "claude-test"})
+            count_tokens = await client.post(
+                "/v1/messages/count_tokens", json={"model": "claude-test"}
+            )
             responses = await client.post("/v1/responses", json={"model": "gpt-test"})
         finally:
             await client.aclose()
             await upstream_client.aclose()
 
         self.assertEqual(messages.status_code, 200)
+        self.assertEqual(count_tokens.status_code, 200)
         self.assertEqual(responses.status_code, 404)
+
+    async def test_control_assets_and_claude_config_endpoint(self) -> None:
+        app = create_claude_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            config_fragment=lambda: json.dumps(
+                {
+                    "powershell": '$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17891"\n',
+                    "bash": 'export ANTHROPIC_BASE_URL="http://127.0.0.1:17891"\n',
+                }
+            ),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            page = await client.get("/control/")
+            script = await client.get("/control/static/app.js")
+            config = await client.get("/control/api/claude-config")
+            old_config = await client.get("/control/api/codex-config")
+        finally:
+            await client.aclose()
+
+        self.assertIn("Claude Code 本地中转", page.text)
+        self.assertIn("127.0.0.1:17891", page.text)
+        self.assertIn("http://127.0.0.1:17890/control/", page.text)
+        self.assertIn("/control/api/claude-config", script.text)
+        self.assertEqual(config.status_code, 200)
+        self.assertEqual(old_config.status_code, 404)
 
 
 if __name__ == "__main__":

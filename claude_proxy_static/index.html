@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Codex 本地中转</title>
+  <title>Claude Code 本地中转</title>
   <script>
     (() => {
-      const key = "codex-local-proxy-theme";
+      const key = "claude-local-proxy-theme";
       let preference = "system";
       try {
         const saved = localStorage.getItem(key);
@@ -22,17 +22,17 @@
 </head>
 <body>
   <main class="stage">
-    <section class="app-window" aria-label="Codex 本地中转控制台">
+    <section class="app-window" aria-label="Claude Code 本地中转控制台">
       <header class="titlebar">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true">CX</div>
+          <div class="brand-mark" aria-hidden="true">CC</div>
           <div class="brand-copy">
-            <h1>Codex 本地中转</h1>
-            <p>从 CC Switch 读取供应商，切换后无需重启 Codex</p>
+            <h1>Claude Code 本地中转</h1>
+            <p>从 CC Switch 读取供应商，切换后无需重启 Claude Code</p>
           </div>
         </div>
         <div class="title-actions">
-          <a class="secondary-button console-link" href="http://127.0.0.1:17891/control/">Claude Code 控制台</a>
+          <a class="secondary-button console-link" href="http://127.0.0.1:17890/control/">Codex 控制台</a>
           <div class="theme-control">
             <button id="theme-button" class="theme-button" type="button" title="选择主题" aria-label="选择主题" aria-haspopup="menu" aria-expanded="false">
               <span id="theme-icon" aria-hidden="true">◐</span>
@@ -51,7 +51,7 @@
       </header>
 
       <div class="connection-strip">
-        <div class="connection-value"><span>Codex 固定连接</span><code id="proxy-url">http://127.0.0.1:17890/v1</code></div>
+        <div class="connection-value"><span>Claude Code 固定连接</span><code id="proxy-url">http://127.0.0.1:17891</code></div>
         <div class="status-group"><span class="dot"></span><span>本机可用</span></div>
         <div class="connection-value database"><span>数据来源</span><code id="database-path">~/.cc-switch/cc-switch.db</code></div>
       </div>
@@ -124,7 +124,7 @@
             <div class="metric"><span>活动请求</span><strong id="active-requests">0</strong></div>
             <div class="metric"><span>上次请求</span><strong id="last-request">尚无请求</strong></div>
             <div class="metric"><span>认证信息</span><strong id="auth-state">—</strong></div>
-            <div class="metric"><span>请求协议</span><strong id="wire-api">Responses · SSE</strong></div>
+            <div class="metric"><span>请求协议</span><strong id="wire-api">Messages · SSE</strong></div>
             <div class="metric"><span>自动恢复</span><strong id="retry-state">已启用</strong></div>
           </div>
           <div id="recovery" class="recovery" aria-live="polite">
@@ -216,7 +216,7 @@
         </div>
         <form id="runtime-form" class="settings-form">
           <label class="setting-row">
-            <span><strong>本地端口</strong><small>只监听 127.0.0.1；修改后需要重启并重新复制 Codex 配置</small></span>
+            <span><strong>本地端口</strong><small>只监听 127.0.0.1；修改后需要重启并重新复制 Claude Code 配置</small></span>
             <input id="runtime-port" type="number" min="1024" max="65535" step="1" inputmode="numeric" required>
           </label>
           <div class="setting-row">
@@ -236,16 +236,16 @@
           <div class="setting-row setting-readonly-row">
             <span><strong>本地数据目录</strong><small>固定保存 settings.json 与 usage.sqlite3，不保存供应商 Key</small></span>
             <div class="setting-path-value">
-              <code id="runtime-data-directory">~/.codex-local-proxy/</code>
+              <code id="runtime-data-directory">~/.claude-local-proxy/</code>
               <button id="copy-data-directory" class="secondary-button setting-action-button" type="button">复制路径</button>
             </div>
           </div>
           <div class="setting-row setting-readonly-row">
-            <span><strong>Codex 配置文件</strong><small>“复制 Codex 配置”生成的片段需要合并到此文件</small></span>
-            <code id="runtime-codex-config">~/.codex/config.toml</code>
+            <span><strong>Claude Code 配置位置</strong><small>配置片段用于启动 Claude Code</small></span>
+            <code id="runtime-codex-config">PowerShell / Bash 环境变量</code>
           </div>
           <div id="runtime-restart-notice" class="setting-notice" hidden>
-            端口将在退出并重新启动本地中转后生效；届时需要重新复制 Codex 配置。
+            端口将在退出并重新启动本地中转后生效；届时需要重新复制 Claude Code 配置。
           </div>
           <div class="settings-actions">
             <span id="runtime-settings-summary">正在读取运行设置</span>
@@ -259,7 +259,7 @@
       <footer class="footer">
         <span id="footer-message">Key 不会显示，也不会写入页面或日志</span>
         <div class="footer-actions">
-          <button id="copy-config" class="text-button" type="button">复制 Codex 配置</button>
+          <button id="copy-config" class="text-button" type="button">复制 Claude 配置</button>
           <button id="shutdown-button" class="power-button" type="button" title="退出本地中转">退出中转</button>
         </div>
       </footer>
@@ -277,3 +277,4 @@
   <script src="/control/static/app.js?v=13" defer></script>
 </body>
 </html>
+

@@ -1,16 +1,34 @@
 # Codex 本地中转
 
-本地中转默认监听 `127.0.0.1:17890`，从 `~/.cc-switch/cc-switch.db` 只读加载 Codex API 供应商。控制台地址：
+统一程序同时运行两个本地中转，从 `~/.cc-switch/cc-switch.db` 只读加载各自供应商：
 
 ```text
 http://127.0.0.1:17890/control/
 ```
 
+```text
+Claude Code: http://127.0.0.1:17891/control/
+```
+
 ## Windows 便携版
 
-从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，默认打开控制台并常驻 Windows 通知区域，不需要安装项目虚拟环境。
+从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，默认同时打开两个控制台并通过一个图标常驻 Windows 通知区域，不需要安装项目虚拟环境。
 
-便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。程序不会把 CC Switch 数据库、Key、本地设置、用量数据或恢复记录写入 EXE；设置、用量和脱敏后的恢复记录保存在 `~/.codex-local-proxy/`。
+便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。Codex 数据保存在 `~/.codex-local-proxy/`，Claude Code 数据保存在 `~/.claude-local-proxy/`，两套选择、统计和恢复记录互不混用。
+
+## Claude Code 接入
+
+在 Claude Code 控制台复制 PowerShell 配置，或在当前终端执行：
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17891"
+$env:ANTHROPIC_API_KEY = "local-claude-proxy"
+claude
+```
+
+Claude 服务读取 CC Switch 的 `app_type = "claude"` 供应商，支持 `ANTHROPIC_API_KEY` 和 `ANTHROPIC_AUTH_TOKEN`。它原样转发 Anthropic Messages 请求，并在可见输出开始前处理网络错误、HTTP `408/429/500/502/503/504/529` 和 Anthropic SSE 临时错误。输出开始后不会重放请求。
+
+`meta.apiFormat = "openai_chat"` 的条目会在页面显示为协议不兼容。第一版不进行 OpenAI Chat Completions 到 Anthropic Messages 的转换。
 
 从旧版本首次启动时，程序会把 `%LOCALAPPDATA%\CodexLocalProxy` 中的 `settings.json` 和 `usage.sqlite3` 安全迁移到新目录，并保留旧文件作为备份。
 

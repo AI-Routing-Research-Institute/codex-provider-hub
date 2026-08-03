@@ -77,13 +77,16 @@ def create_claude_proxy_app(router: ProviderRouter, **kwargs: Any):
         protocol_adapter=ClaudeMessagesProtocol(),
         service_name="claude-local-proxy",
         control_asset_dir=asset_dir,
-        allowed_proxy_paths=frozenset({"messages"}),
-        provider_selectable=lambda provider: bool(getattr(provider, "compatible", False)),
+        allowed_proxy_paths=frozenset({"messages", "messages/count_tokens"}),
+        provider_selectable=lambda provider: bool(
+            getattr(provider, "compatible", False) and provider.has_credentials
+        ),
         provider_public_fields=lambda provider: {
             "compatible": bool(getattr(provider, "compatible", False)),
             "api_format": str(getattr(provider, "api_format", "anthropic")),
             "default_models": dict(getattr(provider, "default_models", {})),
         },
+        config_endpoint_name="claude-config",
         **kwargs,
     )
 
@@ -131,7 +134,7 @@ def _claude_provider_from_row(
         provider_id=str(row["id"]),
         name=str(row["name"]),
         base_url=normalized_url,
-        is_cc_switch_current=bool(row["is_current"]),
+        is_cc_switch_current=bool(row["is_current"]) and api_format == "anthropic" and bool(api_key),
         wire_api="anthropic_messages",
         api_key=api_key,
         credential_kind=(

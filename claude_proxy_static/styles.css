@@ -400,6 +400,8 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .provider-row:hover { border-color: var(--line-strong); background: var(--row-hover); }
 .provider-row:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 .provider-row.current { border-color: var(--current-border); background: var(--green-soft); }
+.provider-row.incompatible-provider { opacity: .62; }
+.provider-row.incompatible-provider .provider-copy { cursor: not-allowed; }
 .provider-row.current::before { content: ""; position: absolute; top: 9px; bottom: 9px; left: 0; width: 3px; border-radius: 0 3px 3px 0; background: var(--green); }
 .provider-row.managing { cursor: default; }
 .provider-row.hidden-provider { border-style: dashed; opacity: .68; }

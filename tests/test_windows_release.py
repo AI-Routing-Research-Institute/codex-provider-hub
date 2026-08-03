@@ -30,6 +30,7 @@ class WindowsReleaseTests(unittest.TestCase):
         )
 
         self.assertIn('ROOT / "local_proxy_static"', spec)
+        self.assertIn('ROOT / "claude_proxy_static"', spec)
         self.assertIn('collect_submodules("tiktoken_ext")', spec)
         self.assertIn('"pystray._win32"', spec)
         self.assertIn('name="CodexLocalProxy-win-x64"', spec)

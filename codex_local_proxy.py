@@ -1262,6 +1262,7 @@ def create_proxy_app(
     allowed_proxy_paths: frozenset[str] | None = None,
     provider_selectable: Callable[[ProxyProvider], bool] | None = None,
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None,
+    config_endpoint_name: str = "codex-config",
 ) -> FastAPI:
     active_retry_policy_store = retry_policy_store or RetryPolicyStore(retry_policy)
     preferences_lock = threading.RLock()
@@ -1536,7 +1537,7 @@ def create_proxy_app(
             return JSONResponse(status_code=503, content={"detail": "无法读取 CC Switch 数据库"})
         return public_status_for_request(request)
 
-    @app.get("/control/api/codex-config", include_in_schema=False)
+    @app.get(f"/control/api/{config_endpoint_name}", include_in_schema=False)
     async def control_config():
         if config_fragment is None:
             return JSONResponse(status_code=503, content={"detail": "配置生成功能不可用"})
@@ -1560,6 +1561,16 @@ def create_proxy_app(
     async def proxy_v1(upstream_path: str, request: Request):
         if allowed_proxy_paths is not None and upstream_path.strip("/") not in allowed_proxy_paths:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        current_provider = router.current_provider()
+        if (
+            current_provider is not None
+            and provider_selectable is not None
+            and not provider_selectable(current_provider)
+        ):
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"message": "当前供应商与请求协议不兼容"}},
+            )
         return await _forward_request(
             router,
             upstream_client,
@@ -1778,7 +1789,12 @@ async def _forward_request(
             final_error = "proxy_loop"
             break
 
-        url = _upstream_url(provider, upstream_path)
+        url = (
+            protocol_adapter.upstream_url(provider, upstream_path)
+            if protocol_adapter is not None
+            and hasattr(protocol_adapter, "upstream_url")
+            else _upstream_url(provider, upstream_path)
+        )
         headers = (
             protocol_adapter.request_headers(request.headers, provider)
             if protocol_adapter is not None
@@ -1959,13 +1975,18 @@ async def _forward_request(
             if protocol_adapter is not None
             else UsageCapture(request_body, upstream_path)
         )
-    failure_capture = (
-        SSEFailureCapture()
-        if recovery_history_store is not None
+    failure_capture = None
+    if (
+        recovery_history_store is not None
         and retry_policy.enabled
         and _is_event_stream(upstream_response)
-        else None
-    )
+    ):
+        failure_capture = (
+            protocol_adapter.failure_capture()
+            if protocol_adapter is not None
+            and hasattr(protocol_adapter, "failure_capture")
+            else SSEFailureCapture()
+        )
 
     async def response_body() -> AsyncIterator[bytes]:
         stream_failure: tuple[str, str] | None = None
@@ -2581,6 +2602,7 @@ class LocalProxyServer:
         runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None,
         on_runtime_settings_changed: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         validate_runtime_database: Callable[[str], dict[str, Any]] | None = None,
+        app_factory: Callable[..., FastAPI] = create_proxy_app,
     ) -> None:
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("本地中转只允许监听回环地址")
@@ -2593,7 +2615,7 @@ class LocalProxyServer:
             if on_shutdown_requested is not None:
                 on_shutdown_requested()
 
-        self.app = create_proxy_app(
+        self.app = app_factory(
             router,
             reload_providers=reload_providers,
             on_provider_selected=on_provider_selected,

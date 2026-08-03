@@ -23,6 +23,11 @@ class ClaudeMessagesProtocol:
     name = "anthropic_messages"
     retryable_status_codes = frozenset({408, 429, 500, 502, 503, 504, 529})
 
+    def upstream_url(self, provider: Any, upstream_path: str) -> str:
+        base_url = provider.base_url.rstrip("/")
+        prefix = base_url if base_url.casefold().endswith("/v1") else f"{base_url}/v1"
+        return f"{prefix}/{upstream_path.lstrip('/')}"
+
     def request_headers(
         self,
         incoming: Mapping[str, str],
@@ -100,6 +105,9 @@ class ClaudeMessagesProtocol:
     def usage_capture(self, request_body: bytes, upstream_path: str) -> "ClaudeUsageCapture":
         return ClaudeUsageCapture(request_body, upstream_path)
 
+    def failure_capture(self) -> "ClaudeFailureCapture":
+        return ClaudeFailureCapture()
+
 
 class ClaudeUsageCapture:
     def __init__(self, request_body: bytes, upstream_path: str) -> None:
@@ -132,9 +140,27 @@ class ClaudeUsageCapture:
                 value = _decode_json(payload) if payload else None
                 if isinstance(value, dict):
                     self._observe(value)
-        if not self._saw_usage or not 200 <= status_code < 300:
+        if not 200 <= status_code < 300:
             return None
         from codex_local_proxy import TokenUsage
+
+        if not self._saw_usage:
+            from codex_local_proxy import _estimate_text_tokens
+
+            request = _decode_json(self.request_body)
+            input_text = "\n".join(_anthropic_text_segments(request))
+            response = _decode_json(bytes(self._buffer))
+            output_text = "\n".join(_anthropic_text_segments(response, response_only=True))
+            input_tokens, input_method = _estimate_text_tokens(input_text, self.model)
+            output_tokens, output_method = _estimate_text_tokens(output_text, self.model)
+            method = input_method if input_method == output_method else f"{input_method}+{output_method}"
+            return TokenUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                source="estimated",
+                estimate_method=method,
+            )
 
         return TokenUsage(
             input_tokens=self._input_tokens,
@@ -161,6 +187,32 @@ class ClaudeUsageCapture:
         )
 
 
+class ClaudeFailureCapture:
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer.extend(chunk)
+
+    def finalize(self) -> tuple[str, str] | None:
+        normalized = bytes(self._buffer).replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        for event in normalized.split(b"\n\n"):
+            event_name, payload = _sse_event_payload(event)
+            root = _decode_json(payload) if payload else None
+            if not isinstance(root, dict) or str(root.get("type") or event_name) != "error":
+                continue
+            error = root.get("error") if isinstance(root.get("error"), dict) else {}
+            error_type = str(error.get("type") or "")
+            if error_type in {
+                "overloaded_error",
+                "api_error",
+                "rate_limit_error",
+                "internal_server_error",
+            }:
+                kind = "rate_limited" if error_type == "rate_limit_error" else "upstream_error"
+                return kind, str(error.get("message") or "上游临时错误")
+        return None
+
 def _decode_json(value: bytes) -> Any | None:
     try:
         return json.loads(value)
@@ -183,3 +235,40 @@ def _token_int(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
     return max(0, int(value))
+
+
+def _anthropic_text_segments(value: Any, *, response_only: bool = False) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    segments: list[str] = []
+    if not response_only:
+        system = value.get("system")
+        if isinstance(system, str):
+            segments.append(system)
+        elif isinstance(system, list):
+            _append_anthropic_content(segments, system)
+        messages = value.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict):
+                    _append_anthropic_content(segments, message.get("content"))
+    _append_anthropic_content(segments, value.get("content"))
+    return segments
+
+
+def _append_anthropic_content(segments: list[str], content: Any) -> None:
+    if isinstance(content, str):
+        if content.strip():
+            segments.append(content.strip())
+        return
+    if not isinstance(content, list):
+        return
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        for key in ("text", "thinking", "input", "content"):
+            value = part.get(key)
+            if isinstance(value, str) and value.strip():
+                segments.append(value.strip())
+            elif isinstance(value, (dict, list)):
+                segments.append(json.dumps(value, ensure_ascii=False, separators=(",", ":")))

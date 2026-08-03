@@ -2,7 +2,7 @@
 
 <div align="center">
 
-为 Codex 提供供应商探测、健康监测、本地中转、即时切换、自动恢复和 Token 统计。
+为 Codex 和 Claude Code 提供供应商探测、健康监测、本地中转、即时切换、自动恢复和 Token 统计。
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square)
@@ -26,11 +26,11 @@
 
 ## 它做什么
 
-Codex Provider Hub 面向同时使用多个 Codex API 供应商的个人自部署场景。它把供应商切换从 Codex 配置中抽离出来，让 Codex 始终连接本机中转地址，再由本地控制台决定请求实际发送到哪个上游。
+Codex Provider Hub 面向同时使用多个 Codex API 和 Claude Code 供应商的个人自部署场景。安装包启动一个后台程序，同时提供两个独立网页：Codex 使用 `127.0.0.1:17890`，Claude Code 使用 `127.0.0.1:17891`。
 
 项目包含三组可以独立使用的能力：
 
-- 本地中转：从 CC Switch 数据库只读加载供应商，提供 Windows 托盘程序、Web 控制台、即时切换、失败重试和 Token 统计。
+- 本地中转：从 CC Switch 数据库只读加载 Codex 与 Claude 供应商，提供一个 Windows 托盘程序、两个 Web 控制台、即时切换、失败重试和 Token 统计。
 - 健康监测：定时探测供应商和模型可用性，通过独立状态页展示当前状态、历史结果和请求诊断。
 - 探测工具：提供命令行、GUI 和 TUI 适配工具，用隔离的 Codex 运行目录验证供应商能力。
 
@@ -66,6 +66,7 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 ### 本地中转与控制台
 
 - 默认监听 `127.0.0.1:17890`，Codex 只需配置一次。
+- Claude Code 独立监听 `127.0.0.1:17891`，使用独立供应商选择、重试状态和 Token 数据。
 - 从 `~/.cc-switch/cc-switch.db` 只读加载 Codex API 供应商。
 - 支持供应商即时切换、隐藏、拖动排序和搜索。
 - 支持 Windows 通知区域常驻、重复启动检测和桌面快捷方式。
@@ -98,12 +99,12 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 
 ### Windows 便携版（推荐）
 
-Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载便携版，无需安装 Python 或项目依赖：
+Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，但程序会同时启动 Codex 与 Claude Code 两个控制台：
 
 - [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
 
-下载后直接双击 EXE，程序会打开本地控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`；本地设置、Token 聚合数据和脱敏后的恢复记录保存在 `~/.codex-local-proxy/`。从旧版本首次启动时会迁移原有设置和用量数据，并保留旧文件作为备份。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
+下载后直接双击 EXE，程序会同时打开 Codex 和 Claude Code 控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。Codex 数据保存在 `~/.codex-local-proxy/`，Claude Code 数据保存在 `~/.claude-local-proxy/`。
 
 ### 从源码运行
 
@@ -136,6 +137,22 @@ python3 -m venv .venv
 ```text
 http://127.0.0.1:17890/control/
 ```
+
+Claude Code 控制台：
+
+```text
+http://127.0.0.1:17891/control/
+```
+
+Claude Code PowerShell 配置：
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17891"
+$env:ANTHROPIC_API_KEY = "local-claude-proxy"
+claude
+```
+
+本地 Key 只是占位值，中转会删除客户端认证头并注入当前 Claude 供应商的真实认证。Claude 中转支持 Anthropic `/v1/messages`、SSE、HTTP `408/429/500/502/503/504/529` 重试和输出前切换供应商。CC Switch 中标记为 `openai_chat` 的 Claude 供应商第一版会显示为协议不兼容，不能选择。
 
 Windows 用户可以安装桌面快捷方式：
 
