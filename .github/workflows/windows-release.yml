@@ -27,6 +27,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
+      # Git tag is the single source of truth for the release version. Rewrite
+      # APP_VERSION in the checked-out source so source and tag can never drift,
+      # which is what previously caused builds to fail on a version mismatch.
+      - name: Sync source version to release tag
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release tag must be 'v<major>.<minor>.<patch>': $env:RELEASE_TAG"
+          }
+          $appPath = 'codex_local_proxy_app.py'
+          $content = Get-Content -LiteralPath $appPath -Raw
+          $updated = $content -replace '(?m)^APP_VERSION = ".*?"', "APP_VERSION = `"$version`""
+          if ($updated -eq $content) {
+            throw "Could not inject version $version into APP_VERSION"
+          }
+          Set-Content -LiteralPath $appPath -Value $updated -NoNewline -Encoding utf8
+          Write-Host "APP_VERSION synced to $version from tag $env:RELEASE_TAG"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

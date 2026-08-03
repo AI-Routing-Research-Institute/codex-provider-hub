@@ -48,8 +48,12 @@ class WindowsReleaseTests(unittest.TestCase):
         self.assertIn("python -m unittest discover", workflow)
         self.assertIn("create_local_proxy_smoke_db.py", workflow)
         self.assertIn("gh release create", workflow)
-        self.assertIn('APP_VERSION = "0.1.1"', (ROOT / "codex_local_proxy_app.py").read_text(encoding="utf-8"))
-        self.assertIn('$Version = "0.1.1"', build_script)
+        # The git tag is the single source of truth; the workflow must inject
+        # the tag-derived version into APP_VERSION instead of trusting the
+        # source constant. Hard-coded versions are intentionally NOT asserted,
+        # since they drift with every release and previously caused build failures.
+        self.assertIn("Sync source version to release tag", workflow)
+        self.assertNotIn("does not match build version", build_script)
 
 
 if __name__ == "__main__":

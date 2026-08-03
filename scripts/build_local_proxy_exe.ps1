@@ -18,13 +18,10 @@ if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
     $python = $pythonCommand.Source
 }
 
-$sourceVersion = & $python -c "from codex_local_proxy_app import APP_VERSION; print(APP_VERSION)"
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to read the application version"
-}
-if ($sourceVersion.Trim() -ne $Version) {
-    throw "Source version $($sourceVersion.Trim()) does not match build version $Version"
-}
+# The release version is dictated by the caller (CI derives it from the git
+# tag, the single source of truth). The APP_VERSION constant in source is only
+# a development-time default and may lag behind published releases, so do not
+# compare the two.
 
 $buildPath = Join-Path $projectPath ".build\local-proxy"
 $workPath = Join-Path $buildPath "work"
