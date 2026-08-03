@@ -277,6 +277,10 @@ def run_application(
             webbrowser.open(existing)
             webbrowser.open(existing_claude)
         return 0
+    if existing is not None or existing_claude is not None:
+        raise RuntimeError(
+            "检测到旧版或不完整的本地中转实例，请先从托盘退出旧版本地中转后重新启动。"
+        )
 
     settings = load_settings()
     settings_lock = threading.RLock()

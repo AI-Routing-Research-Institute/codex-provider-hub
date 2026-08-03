@@ -246,6 +246,22 @@ class CodexConfigTests(unittest.TestCase):
 
         self.assertEqual(url, "http://127.0.0.1:17891/control/")
 
+    def test_partial_legacy_instance_requires_restart_before_dual_service_start(self) -> None:
+        with (
+            mock.patch.object(
+                codex_local_proxy_app,
+                "existing_proxy_url",
+                side_effect=["http://127.0.0.1:17890/control/", None],
+            ),
+            self.assertRaisesRegex(RuntimeError, "退出旧版本地中转"),
+        ):
+            codex_local_proxy_app.run_application(
+                database=Path("cc-switch.db"),
+                port=17890,
+                open_browser=False,
+                tray=False,
+            )
+
     def test_shortcut_targets_browser_app_launcher(self) -> None:
         script = (
             Path(__file__).resolve().parents[1]
