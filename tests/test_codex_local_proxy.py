@@ -862,6 +862,161 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
             status["retry"]["recent_errors"][0]["summary"],
         )
 
+    async def test_retries_nginx_html_404_before_returning_response(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    404,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    content=(
+                        b"<html><head><title>404 Not Found</title></head>"
+                        b"<body><h1>404 Not Found</h1><hr>"
+                        b"<center>nginx</center></body></html>"
+                    ),
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "recovery.sqlite3"
+        )
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+        history = history_store.history()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().last_retry_kind, "http_404")
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["provider_id"], "selected")
+        self.assertEqual(history["items"][0]["kind"], "http_404")
+        self.assertEqual(history["items"][0]["stage"], "before_output")
+        self.assertEqual(history["items"][0]["outcome"], "retrying")
+        self.assertIn("HTTP 404", history["items"][0]["summary"])
+        self.assertNotIn("<html", history["items"][0]["summary"])
+
+    async def test_json_business_404_is_not_retried(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "code": "model_not_found",
+                        "message": "requested model does not exist",
+                    }
+                },
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "recovery.sqlite3"
+        )
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_sleep=no_wait,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "model_not_found")
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+        self.assertEqual(history_store.history()["total_count"], 0)
+
+    async def test_sniffed_nginx_404_exhausts_without_html_leak(self) -> None:
+        attempts = 0
+
+        class ChunkedNginx404(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"<html><head><title>"
+                yield b"404 Not Found</title></head><body>"
+                yield (
+                    b"<center><h1>404 Not Found</h1></center>"
+                    b"<hr><center>nginx</center></body></html>"
+                )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(404, stream=ChunkedNginx404())
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "recovery.sqlite3"
+        )
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+        history = history_store.history()
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(attempts, 2)
+        self.assertNotIn(b"nginx", response.content)
+        self.assertNotIn(b"<html", response.content)
+        self.assertEqual(history["total_count"], 2)
+        self.assertEqual(
+            {item["kind"] for item in history["items"]},
+            {"http_404"},
+        )
+        self.assertEqual(history["items"][0]["outcome"], "exhausted")
+
     async def test_retry_status_redacts_sensitive_upstream_message(self) -> None:
         attempts = 0
 

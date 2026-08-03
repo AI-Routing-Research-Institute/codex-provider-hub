@@ -41,6 +41,7 @@ RETRY_ERROR_BODY_BYTES = 4 * 1024
 RETRY_ERROR_HISTORY_LIMIT = 5
 RETRY_ERROR_MESSAGE_CHARS = 220
 RETRY_ERROR_READ_TIMEOUT_SECONDS = 0.25
+HTML_ERROR_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 RECOVERY_HISTORY_HOURS = 24
 RECOVERY_HISTORY_API_LIMIT = 500
 RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
@@ -1801,6 +1802,22 @@ async def _forward_request(
                         )
                         if retry_kind is not None:
                             final_error = retry_kind
+                if (
+                    retry_kind is None
+                    and first_chunk is not None
+                    and upstream_response.status_code == 404
+                    and retry_policy.enabled
+                ):
+                    assert stream is not None
+                    first_chunk, retry_kind, retry_summary = (
+                        await _inspect_html_404_before_output(
+                            upstream_response,
+                            first_chunk,
+                            stream,
+                        )
+                    )
+                    if retry_kind is not None:
+                        final_error = retry_kind
                 if retry_kind is None:
                     break
             else:
@@ -1973,11 +1990,114 @@ async def _forward_request(
 
 
 def _retry_kind(response: httpx.Response) -> str | None:
+    if _is_html_404_response(response):
+        return "http_404"
     if response.status_code in RETRYABLE_STATUS_CODES:
         return f"http_{response.status_code}"
     if response.status_code == 429:
         return "rate_limited"
     return None
+
+
+def _is_html_404_response(response: httpx.Response) -> bool:
+    if response.status_code != 404:
+        return False
+    content_type = response.headers.get("content-type", "")
+    media_type = content_type.partition(";")[0].strip().casefold()
+    return media_type in HTML_ERROR_CONTENT_TYPES
+
+
+async def _inspect_html_404_before_output(
+    response: httpx.Response,
+    first_chunk: bytes,
+    stream: AsyncIterator[bytes],
+) -> tuple[bytes | None, str | None, str | None]:
+    buffered = bytearray(first_chunk)
+    while True:
+        retry_kind, retry_summary = _sniff_html_404_retry(
+            response,
+            bytes(buffered),
+        )
+        if retry_kind is not None:
+            return None, retry_kind, retry_summary
+        if (
+            len(buffered) >= RETRY_ERROR_BODY_BYTES
+            or not _could_be_nginx_html_prefix(response, bytes(buffered))
+        ):
+            return bytes(buffered), None, None
+        try:
+            chunk = await asyncio.wait_for(
+                anext(stream),
+                timeout=RETRY_ERROR_READ_TIMEOUT_SECONDS,
+            )
+        except StopAsyncIteration:
+            return bytes(buffered), None, None
+        except TimeoutError:
+            return (
+                None,
+                "stream_start",
+                "HTTP 404 response body stalled before output",
+            )
+        except httpx.HTTPError as exc:
+            return (
+                None,
+                "stream_start",
+                _exception_retry_summary("stream_start", exc),
+            )
+        buffered.extend(chunk)
+
+
+def _sniff_html_404_retry(
+    response: httpx.Response,
+    body_prefix: bytes,
+) -> tuple[str | None, str | None]:
+    if response.status_code != 404 or not body_prefix:
+        return None, None
+    text = _decode_response_prefix(response, body_prefix)
+    normalized = text.casefold()
+    looks_like_nginx_404 = (
+        ("<html" in normalized or "<!doctype html" in normalized)
+        and ("404 not found" in normalized or "<h1>404" in normalized)
+        and "nginx" in normalized
+    )
+    if not looks_like_nginx_404:
+        return None, None
+    detail = _extract_retry_error_message(text)
+    summary = _sanitize_retry_summary(
+        f"HTTP 404: {detail or 'Nginx upstream route not found'}"
+    )
+    return "http_404", summary
+
+
+def _could_be_nginx_html_prefix(
+    response: httpx.Response,
+    body_prefix: bytes,
+) -> bool:
+    stripped = _decode_response_prefix(response, body_prefix).lstrip(
+        "\ufeff \t\r\n"
+    ).casefold()
+    markers = ("<html", "<!doctype html")
+    return not stripped or any(
+        stripped.startswith(marker) or marker.startswith(stripped)
+        for marker in markers
+    )
+
+
+def _decode_response_prefix(
+    response: httpx.Response,
+    body_prefix: bytes,
+) -> str:
+    encoding = response.encoding or "utf-8"
+    try:
+        return body_prefix[:RETRY_ERROR_BODY_BYTES].decode(
+            encoding,
+            errors="replace",
+        )
+    except LookupError:
+        return body_prefix[:RETRY_ERROR_BODY_BYTES].decode(
+            "utf-8",
+            errors="replace",
+        )
 
 
 def _is_event_stream(response: httpx.Response) -> bool:
