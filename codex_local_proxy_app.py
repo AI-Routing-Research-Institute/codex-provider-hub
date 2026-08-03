@@ -521,9 +521,22 @@ def create_app_icon() -> Any:
     image = Image.new("RGBA", (64, 64), "#146c73")
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((2, 2, 62, 62), radius=12, fill="#146c73")
-    try:
-        font = ImageFont.truetype("segoeuib.ttf", 26)
-    except OSError:
+    # "segoeuib.ttf" only resolves on Windows; pick a platform-appropriate
+    # bold font so the tray/bundle icon keeps crisp glyphs on every OS.
+    font_candidates = (
+        ["segoeuib.ttf", "segoeui.ttf"]
+        if sys.platform == "win32"
+        else ["/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+              "/System/Library/Fonts/Helvetica.ttc"]
+    )
+    font = None
+    for candidate in font_candidates:
+        try:
+            font = ImageFont.truetype(candidate, 26)
+            break
+        except OSError:
+            continue
+    if font is None:
         font = ImageFont.load_default()
     box = draw.textbbox((0, 0), "CX", font=font, stroke_width=1)
     x = (64 - (box[2] - box[0])) / 2
@@ -535,7 +548,19 @@ def create_app_icon() -> Any:
 def write_app_icon(path: Path) -> None:
     target = path.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
-    create_app_icon().save(target, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+    suffix = target.suffix.lower()
+    # The .ico container is Windows-specific; macOS app bundles use .icns.
+    # Decide the output format from the file extension when it is explicit,
+    # otherwise fall back to the running platform's native container.
+    if suffix == ".icns":
+        image_format = "ICNS"
+    elif suffix == ".ico":
+        image_format = "ICO"
+    elif sys.platform == "darwin":
+        image_format = "ICNS"
+    else:
+        image_format = "ICO"
+    create_app_icon().save(target, format=image_format, sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
 
 
 def main(argv: list[str] | None = None) -> int:

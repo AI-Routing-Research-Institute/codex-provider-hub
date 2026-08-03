@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-4b5563?style=flat-square)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-4b5563?style=flat-square)
 ![README](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-c43d3d?style=flat-square)
 [![Release](https://img.shields.io/github/v/release/loongkkk/codex-provider-hub?style=flat-square)](https://github.com/loongkkk/codex-provider-hub/releases/latest)
 
@@ -104,6 +104,23 @@ Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
 
 下载后直接双击 EXE，程序会打开本地控制台并常驻 Windows 通知区域。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`；本地设置、Token 聚合数据和脱敏后的恢复记录保存在 `~/.codex-local-proxy/`。从旧版本首次启动时会迁移原有设置和用量数据，并保留旧文件作为备份。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
+
+### macOS 便携版
+
+Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载 `.zip` 便携版，无需安装 Python 或项目依赖：
+
+- [下载 `CodexLocalProxy-macos-arm64.zip`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip)
+- [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip.sha256)
+
+使用步骤：
+
+1. 下载并解压 `.zip`，得到 `CodexLocalProxy-macos-arm64.app`。
+2. 将其拖入「应用程序」文件夹（可选）。
+3. **首次打开**：右键点击 `.app` → 选择「打开」→ 在弹出的「无法验证开发者」对话框中点击「打开」。由于当前版本未经 Apple 代码签名与公证，双击会被 Gatekeeper 拦截，必须通过右键打开一次；之后即可正常双击启动。
+   - 命令行等价方式：`xattr -dr com.apple.quarantine /路径/到/CodexLocalProxy-macos-arm64.app`
+4. 程序会打开本地控制台并常驻 macOS 菜单栏。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`；本地设置、Token 聚合数据和脱敏后的恢复记录保存在 `~/.codex-local-proxy/`。
+
+> 说明：当前仅提供 ARM64 包，覆盖 Apple Silicon 机型；Intel Mac 暂不支持便携版，可从源码运行。
 
 ### 从源码运行
 
