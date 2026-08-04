@@ -22,6 +22,10 @@ class WindowsReleaseTests(unittest.TestCase):
         self.assertTrue(result["current_provider_configured"])
         self.assertEqual(result["credential_count"], 0)
         self.assertEqual(result["control_asset_count"], 3)
+        self.assertEqual(result["claude_provider_count"], 1)
+        self.assertEqual(result["claude_compatible_provider_count"], 1)
+        self.assertEqual(result["claude_control_asset_count"], 3)
+        self.assertTrue(result["tray_backend_available"])
         self.assertEqual(result["icon_size"], [64, 64])
 
     def test_pyinstaller_spec_includes_runtime_assets_and_dynamic_modules(self) -> None:

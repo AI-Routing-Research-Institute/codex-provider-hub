@@ -221,12 +221,28 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         raise FileNotFoundError(
             "本地中转页面资源缺失：" + "、".join(missing_assets)
         )
+    from claude_local_proxy import CLAUDE_CONTROL_ASSET_DIR, load_claude_proxy_providers
+
+    missing_claude_assets = [
+        name for name in asset_names if not (CLAUDE_CONTROL_ASSET_DIR / name).is_file()
+    ]
+    if missing_claude_assets:
+        raise FileNotFoundError(
+            "Claude 本地中转页面资源缺失：" + "、".join(missing_claude_assets)
+        )
+    tray_backend_available = True
+    if os.name == "nt":
+        import pystray
+        from pystray import _win32
+
+        tray_backend_available = pystray is not None and _win32 is not None
     icon = create_app_icon()
     providers = filter_self_referencing_providers(
         load_proxy_providers(database), DEFAULT_PORT
     )
     router = ProviderRouter(providers)
     current = router.current_provider()
+    claude_providers = load_claude_proxy_providers(database)
     return {
         "app_version": APP_VERSION,
         "provider_count": len(providers),
@@ -235,6 +251,13 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         "listen_address": f"{DEFAULT_HOST}:{DEFAULT_PORT}",
         "control_path": "/control/",
         "control_asset_count": len(asset_names),
+        "claude_provider_count": len(claude_providers),
+        "claude_compatible_provider_count": sum(
+            provider.compatible and provider.has_credentials
+            for provider in claude_providers
+        ),
+        "claude_control_asset_count": len(asset_names),
+        "tray_backend_available": tray_backend_available,
         "icon_size": list(icon.size),
     }
 
