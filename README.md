@@ -108,7 +108,7 @@ Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-
 
 ### macOS 便携版
 
-Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载 `.zip` 便携版，无需安装 Python 或项目依赖：
+Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载 `.zip` 便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，但程序会同时启动 Codex 与 Claude Code 两个控制台：
 
 - [下载 `CodexLocalProxy-macos-arm64.zip`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip)
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip.sha256)
@@ -119,7 +119,7 @@ Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://g
 2. 将其拖入「应用程序」文件夹（可选）。
 3. **首次打开**：右键点击 `.app` → 选择「打开」→ 在弹出的「无法验证开发者」对话框中点击「打开」。由于当前版本未经 Apple 代码签名与公证，双击会被 Gatekeeper 拦截，必须通过右键打开一次；之后即可正常双击启动。
    - 命令行等价方式：`xattr -dr com.apple.quarantine /路径/到/CodexLocalProxy-macos-arm64.app`
-4. 程序会打开本地控制台并常驻 macOS 菜单栏。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`；本地设置、Token 聚合数据和脱敏后的恢复记录保存在 `~/.codex-local-proxy/`。
+4. 程序会同时打开 Codex 和 Claude Code 控制台并常驻 macOS 菜单栏。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。Codex 数据保存在 `~/.codex-local-proxy/`，Claude Code 数据保存在 `~/.claude-local-proxy/`。
 
 > 说明：当前仅提供 ARM64 包，覆盖 Apple Silicon 机型；Intel Mac 暂不支持便携版，可从源码运行。
 

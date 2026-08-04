@@ -19,7 +19,7 @@
 
 ## Codex 本地中转 macOS 便携版
 
-下载 `CodexLocalProxy-macos-arm64.zip` 后解压得到 `CodexLocalProxy-macos-arm64.app`，拖入「应用程序」文件夹（可选）即可使用。程序会打开本地控制台并常驻 macOS 菜单栏。仅支持 Apple Silicon（M 系列芯片）机型。
+下载 `CodexLocalProxy-macos-arm64.zip` 后解压得到 `CodexLocalProxy-macos-arm64.app`，拖入「应用程序」文件夹（可选）即可使用。程序会同时打开 Codex 和 Claude Code 控制台并常驻 macOS 菜单栏。仅支持 Apple Silicon（M 系列芯片）机型。
 
 使用要求：
 
@@ -36,5 +36,5 @@
 安全说明：
 
 - App 不包含供应商数据库、API Key、本机设置、检测地址或用量数据
-- 设置和用量保存在 `~/.codex-local-proxy`
+- Codex 设置和用量保存在 `~/.codex-local-proxy`，Claude Code 保存在 `~/.claude-local-proxy`
 - 可使用随附的 `.sha256` 文件验证下载完整性
