@@ -26,6 +26,11 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertTrue(result["current_provider_configured"])
         self.assertEqual(result["credential_count"], 0)
         self.assertEqual(result["control_asset_count"], 3)
+        self.assertEqual(result["claude_provider_count"], 1)
+        self.assertEqual(result["claude_compatible_provider_count"], 1)
+        self.assertEqual(result["claude_control_asset_count"], 3)
+        self.assertTrue(result["tray_backend_available"])
+        self.assertTrue(result["claude_curl_transport_available"])
         self.assertEqual(result["icon_size"], [64, 64])
 
     def test_macos_spec_uses_appkit_backend_and_app_bundle(self) -> None:
@@ -34,6 +39,7 @@ class MacOSReleaseTests(unittest.TestCase):
         )
 
         self.assertIn('ROOT / "local_proxy_static"', spec)
+        self.assertIn('ROOT / "claude_proxy_static"', spec)
         self.assertIn('collect_submodules("tiktoken_ext")', spec)
         self.assertIn('"pystray._appkit"', spec)
         self.assertIn("target_arch=\"arm64\"", spec)

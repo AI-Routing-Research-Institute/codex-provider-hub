@@ -28,6 +28,7 @@ hidden_imports = [
 ]
 data_files = [
     (str(ROOT / "local_proxy_static"), "local_proxy_static"),
+    (str(ROOT / "claude_proxy_static"), "claude_proxy_static"),
     *collect_data_files("tiktoken"),
 ]
 
