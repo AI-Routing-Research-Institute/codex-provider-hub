@@ -53,6 +53,30 @@ def create_database(path: Path) -> None:
         connection.execute(
             "INSERT INTO settings (key, value) VALUES ('common_config_codex', '')"
         )
+        claude_config = {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://fixture.example.invalid",
+                "ANTHROPIC_API_KEY": "release-smoke-placeholder",
+                "ANTHROPIC_MODEL": "claude-smoke-model",
+            }
+        }
+        connection.execute(
+            """
+            INSERT INTO providers (
+                id, app_type, name, settings_config, meta,
+                is_current, sort_index, created_at
+            ) VALUES (?, 'claude', ?, ?, ?, 1, 0, 0)
+            """,
+            (
+                "release-smoke-claude",
+                "Claude Release Smoke Test",
+                json.dumps(claude_config),
+                json.dumps({"apiFormat": "anthropic", "apiKeyField": "ANTHROPIC_API_KEY"}),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES ('common_config_claude', '{}')"
+        )
         connection.commit()
 
 
