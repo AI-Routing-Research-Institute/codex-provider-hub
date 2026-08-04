@@ -1842,6 +1842,20 @@ async def _forward_request(
                         retry_summary = _exception_retry_summary(retry_kind, exc)
                 if (
                     retry_kind is None
+                    and first_chunk is None
+                    and retry_policy.enabled
+                    and protocol_adapter is not None
+                    and hasattr(protocol_adapter, "empty_response_decision")
+                ):
+                    action, retry_kind, retry_summary = (
+                        protocol_adapter.empty_response_decision(upstream_response)
+                    )
+                    if action != "retry":
+                        retry_kind = None
+                    else:
+                        final_error = retry_kind or "malformed_response"
+                if (
+                    retry_kind is None
                     and first_chunk is not None
                     and _is_event_stream(upstream_response)
                     and retry_policy.enabled
@@ -2425,6 +2439,7 @@ def _retry_kind_summary(kind: str) -> str:
         "stream_start": "响应开始前连接中断",
         "stream_interrupted": "输出后响应流中断",
         "upstream_error": "上游请求失败",
+        "malformed_response": "HTTP 200 上游响应为空或格式错误",
     }.get(kind, "上游临时错误")
 
 

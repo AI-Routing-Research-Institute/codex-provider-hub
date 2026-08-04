@@ -155,6 +155,254 @@ class ClaudeCCSourceTests(unittest.TestCase):
 
 
 class ClaudeProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_success_response_is_retried_before_reaching_claude_code(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                body = b""
+            else:
+                body = (
+                    b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+                    b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body,
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertIn("text_delta", response.text)
+
+    async def test_non_anthropic_success_stream_is_retried_before_output(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                body = (
+                    b'data: {"choices":[{"delta":{"content":"wrong protocol"}}]}\n\n'
+                    b'data: [DONE]\n\n'
+                )
+            else:
+                body = (
+                    b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+                    b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body,
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertNotIn("wrong protocol", response.text)
+        self.assertIn("text_delta", response.text)
+
+    async def test_anthropic_stream_without_content_is_retried_before_output(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                body = (
+                    b'event: message_start\ndata: {"type":"message_start",'
+                    b'"message":{"usage":{"input_tokens":10}}}\n\n'
+                    b'event: content_block_start\ndata: {"type":"content_block_start",'
+                    b'"content_block":{"type":"text","text":""}}\n\n'
+                    b'event: content_block_stop\ndata: {"type":"content_block_stop"}\n\n'
+                    b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+                )
+            else:
+                body = (
+                    b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+                    b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body,
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertNotIn("message_stop", response.text)
+        self.assertIn("text_delta", response.text)
+
+    async def test_zero_argument_tool_use_stream_is_not_treated_as_empty(self) -> None:
+        attempts = 0
+        body = (
+            b'event: message_start\ndata: {"type":"message_start","message":{}}\n\n'
+            b'event: content_block_start\ndata: {"type":"content_block_start",'
+            b'"content_block":{"type":"tool_use","id":"tool-1",'
+            b'"name":"status","input":{}}}\n\n'
+            b'event: content_block_stop\ndata: {"type":"content_block_stop"}\n\n'
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body,
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 1)
+        self.assertIn('"type":"tool_use"', response.text)
+
+    async def test_malformed_success_stream_returns_gateway_error_after_retries(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b"",
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("自动重试后仍未恢复", response.text)
+
+    async def test_empty_json_success_response_is_retried(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    content=b"",
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+                    b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                ),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertIn("text_delta", response.text)
+
     async def test_stream_usage_is_recorded_from_anthropic_events(self) -> None:
         stream_body = (
             b'event: message_start\ndata: {"type":"message_start","message":{"usage":'

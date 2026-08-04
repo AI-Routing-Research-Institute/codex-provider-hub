@@ -59,6 +59,18 @@ class ClaudeMessagesProtocol:
             return f"http_{response.status_code}"
         return None
 
+    def empty_response_decision(
+        self,
+        response: httpx.Response,
+    ) -> tuple[str, str | None, str | None]:
+        if 200 <= response.status_code < 300:
+            return (
+                "retry",
+                "malformed_response",
+                "HTTP 200：上游返回了空响应",
+            )
+        return "commit", None, None
+
     def sse_preflight_decision(
         self,
         buffered: bytes,
@@ -74,7 +86,13 @@ class ClaudeMessagesProtocol:
                 continue
             root = _decode_json(payload)
             if not isinstance(root, dict):
-                return "commit", None, None
+                continue
+            if "choices" in root:
+                return (
+                    "retry",
+                    "malformed_response",
+                    "HTTP 200：上游返回了 OpenAI SSE，而不是 Anthropic 消息流",
+                )
             event_type = str(root.get("type") or event_name)
             if event_type == "error":
                 error = root.get("error") if isinstance(root.get("error"), dict) else {}
@@ -89,6 +107,25 @@ class ClaudeMessagesProtocol:
                     kind = "rate_limited" if error_type == "rate_limit_error" else "upstream_error"
                     return "retry", kind, message
                 return "commit", None, None
+            if event_type == "content_block_start":
+                content_block = (
+                    root.get("content_block")
+                    if isinstance(root.get("content_block"), dict)
+                    else {}
+                )
+                block_type = content_block.get("type")
+                if block_type in {
+                    "tool_use",
+                    "server_tool_use",
+                    "web_search_tool_result",
+                }:
+                    return "commit", None, None
+                if block_type == "text" and content_block.get("text"):
+                    return "commit", None, None
+                if block_type == "thinking" and content_block.get("thinking"):
+                    return "commit", None, None
+                if block_type == "redacted_thinking" and content_block.get("data"):
+                    return "commit", None, None
             if event_type == "content_block_delta":
                 delta = root.get("delta") if isinstance(root.get("delta"), dict) else {}
                 if delta.get("type") in {
@@ -98,8 +135,18 @@ class ClaudeMessagesProtocol:
                     "signature_delta",
                 }:
                     return "commit", None, None
-            if event_type in {"message_stop"}:
-                return "commit", None, None
+            if event_type == "message_stop":
+                return (
+                    "retry",
+                    "malformed_response",
+                    "HTTP 200：上游在没有生成内容时结束了 Anthropic 消息流",
+                )
+        if end_of_stream:
+            return (
+                "retry",
+                "malformed_response",
+                "HTTP 200：上游返回了空响应或非 Anthropic 消息流",
+            )
         return "wait", None, None
 
     def usage_capture(self, request_body: bytes, upstream_path: str) -> "ClaudeUsageCapture":
