@@ -1740,7 +1740,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
         self.assertIn("styles.css?v=13", page.text)
-        self.assertIn("app.js?v=13", page.text)
+        self.assertIn("app.js?v=15", page.text)
         self.assertIn('id="recovery-history-meta"', page.text)
         self.assertIn("selectProvider", script.text)
         self.assertIn("setProviderHidden", script.text)
