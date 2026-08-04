@@ -26,6 +26,7 @@ class WindowsReleaseTests(unittest.TestCase):
         self.assertEqual(result["claude_compatible_provider_count"], 1)
         self.assertEqual(result["claude_control_asset_count"], 3)
         self.assertTrue(result["tray_backend_available"])
+        self.assertTrue(result["claude_curl_transport_available"])
         self.assertEqual(result["icon_size"], [64, 64])
 
     def test_pyinstaller_spec_includes_runtime_assets_and_dynamic_modules(self) -> None:
@@ -59,6 +60,11 @@ class WindowsReleaseTests(unittest.TestCase):
         # since they drift with every release and previously caused build failures.
         self.assertIn("Sync source version to release tag", workflow)
         self.assertNotIn("does not match build version", build_script)
+
+    def test_release_dependencies_include_claude_curl_transport(self) -> None:
+        requirements = (ROOT / "requirements-status.txt").read_text(encoding="utf-8")
+
+        self.assertIn("curl_cffi", requirements)
 
 
 if __name__ == "__main__":

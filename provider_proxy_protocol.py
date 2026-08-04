@@ -53,6 +53,13 @@ class ClaudeMessagesProtocol:
         return headers
 
     def retry_kind(self, response: httpx.Response) -> str | None:
+        content_type = response.headers.get("content-type", "")
+        media_type = content_type.partition(";")[0].strip().casefold()
+        if 200 <= response.status_code < 300 and media_type in {
+            "text/html",
+            "application/xhtml+xml",
+        }:
+            return "malformed_response"
         if response.status_code == 429:
             return "rate_limited"
         if response.status_code in self.retryable_status_codes:

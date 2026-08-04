@@ -236,6 +236,11 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         from pystray import _win32
 
         tray_backend_available = pystray is not None and _win32 is not None
+    from curl_cffi import Curl
+
+    curl = Curl()
+    curl.close()
+    claude_curl_transport_available = True
     icon = create_app_icon()
     providers = filter_self_referencing_providers(
         load_proxy_providers(database), DEFAULT_PORT
@@ -258,6 +263,7 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         ),
         "claude_control_asset_count": len(asset_names),
         "tray_backend_available": tray_backend_available,
+        "claude_curl_transport_available": claude_curl_transport_available,
         "icon_size": list(icon.size),
     }
 

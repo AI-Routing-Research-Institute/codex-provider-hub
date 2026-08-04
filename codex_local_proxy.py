@@ -1236,7 +1236,8 @@ def _string_mapping(value: Any, field_name: str) -> dict[str, str]:
 def create_proxy_app(
     router: ProviderRouter,
     *,
-    client: httpx.AsyncClient | None = None,
+    client: Any | None = None,
+    client_factory: Callable[[], Any] | None = None,
     protocol_adapter: Any | None = None,
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None,
     on_provider_selected: Callable[[str], None] | None = None,
@@ -1272,10 +1273,21 @@ def create_proxy_app(
     active_provider_order = [
         provider_id for provider_id in provider_order if isinstance(provider_id, str)
     ]
-    upstream_client = client or httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=30.0, read=None, write=120.0, pool=30.0),
-        follow_redirects=False,
-    )
+    upstream_client = client
+    if upstream_client is None:
+        upstream_client = (
+            client_factory()
+            if client_factory is not None
+            else httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=30.0,
+                    read=None,
+                    write=120.0,
+                    pool=30.0,
+                ),
+                follow_redirects=False,
+            )
+        )
     owns_client = client is None
     active_health_status_url_store = health_status_url_store or HealthStatusUrlStore(
         health_status_url

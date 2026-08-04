@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from claude_curl_transport import ClaudeCurlClient
 from codex_local_proxy import (
     CONTROL_ASSET_DIR,
     DEFAULT_DATABASE,
@@ -72,6 +73,8 @@ def load_claude_proxy_providers(
 
 def create_claude_proxy_app(router: ProviderRouter, **kwargs: Any):
     asset_dir = CLAUDE_CONTROL_ASSET_DIR if CLAUDE_CONTROL_ASSET_DIR.is_dir() else CONTROL_ASSET_DIR
+    if "client" not in kwargs and "client_factory" not in kwargs:
+        kwargs["client_factory"] = ClaudeCurlClient
     return create_proxy_app(
         router,
         protocol_adapter=ClaudeMessagesProtocol(),

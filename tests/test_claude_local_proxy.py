@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
@@ -155,6 +156,49 @@ class ClaudeCCSourceTests(unittest.TestCase):
 
 
 class ClaudeProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_html_gateway_response_is_retried(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    content=b"<html><title>Gateway</title></html>",
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+                    b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                ),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertNotIn("Gateway", response.text)
+        self.assertIn("text_delta", response.text)
+
     async def test_empty_success_response_is_retried_before_reaching_claude_code(self) -> None:
         attempts = 0
 
@@ -644,6 +688,25 @@ class ClaudeProtocolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
+    def test_production_app_uses_curl_client_factory(self) -> None:
+        curl_client = object()
+        with patch("claude_local_proxy.ClaudeCurlClient", return_value=curl_client) as factory:
+            app = create_claude_proxy_app(ProviderRouter((claude_provider(),)))
+
+        factory.assert_called_once_with()
+        self.assertIsNotNone(app)
+
+    def test_injected_client_does_not_create_curl_client(self) -> None:
+        injected = object()
+        with patch("claude_local_proxy.ClaudeCurlClient") as factory:
+            app = create_claude_proxy_app(
+                ProviderRouter((claude_provider(),)),
+                client=injected,
+            )
+
+        factory.assert_not_called()
+        self.assertIsNotNone(app)
+
     async def test_status_identifies_claude_service_and_provider_compatibility(self) -> None:
         compatible = claude_provider("compatible")
         incompatible = ClaudeProxyProvider(
