@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="/control/static/styles.css?v=13">
+  <link rel="stylesheet" href="/control/static/styles.css?v=16">
 </head>
 <body>
   <main class="stage">
@@ -272,8 +272,17 @@
   </div>
 
   <div id="provider-health-popover" class="provider-health-popover" role="dialog" aria-modal="false" aria-label="服务器检测详情"></div>
+  <div id="usage-history-popover" class="usage-history-popover" role="dialog" aria-modal="false" aria-label="成功请求记录">
+    <div class="usage-history-heading">
+      <div><strong id="usage-history-title">成功请求</strong><span id="usage-history-meta"></span></div>
+      <button id="usage-history-close" class="usage-history-close" type="button" title="关闭成功请求记录" aria-label="关闭成功请求记录">×</button>
+    </div>
+    <div id="usage-history-summary" class="usage-history-summary"></div>
+    <ol id="usage-history-list" class="usage-history-list"></ol>
+    <button id="usage-history-more" class="usage-history-more" type="button" hidden>加载更早记录</button>
+  </div>
   <div id="history-detail-popover" class="history-detail-popover" role="tooltip"></div>
 
-  <script src="/control/static/app.js?v=15" defer></script>
+  <script src="/control/static/app.js?v=18" defer></script>
 </body>
 </html>

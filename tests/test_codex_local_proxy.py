@@ -241,6 +241,132 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(summary["total"]["total_tokens"], 15)
         self.assertEqual(summary["total"]["request_count"], 1)
         self.assertEqual(set(summary["by_provider"]), {"inside"})
+        self.assertEqual(
+            summary["by_provider"]["inside"]["last_success_at"],
+            round((now - 7 * 24 * 3600 + 1) * 1000),
+        )
+
+    def test_success_history_filters_failures_and_paginates(self) -> None:
+        now = 2_000_000.0
+        records = (
+            (now - 3, 200, TokenUsage(10, 2, 12, 4, 1, source="upstream")),
+            (now - 2, 503, TokenUsage(20, 3, 23, source="upstream")),
+            (
+                now - 1,
+                200,
+                TokenUsage(
+                    30,
+                    4,
+                    34,
+                    source="estimated",
+                    estimate_method="fixture-estimator",
+                ),
+            ),
+        )
+        for recorded_at, status_code, usage in records:
+            self.store.record(
+                provider_id="provider-a",
+                model="gpt-5.6-sol",
+                usage=usage,
+                status_code=status_code,
+                recorded_at=recorded_at,
+            )
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(90, 9, 99),
+            status_code=200,
+            successful=False,
+            recorded_at=now - 0.5,
+        )
+        self.store.record(
+            provider_id="provider-b",
+            model="other-model",
+            usage=TokenUsage(100, 20, 120),
+            status_code=200,
+            recorded_at=now,
+        )
+
+        first = self.store.history(
+            provider_id="provider-a",
+            window="all",
+            limit=1,
+            now=now,
+        )
+        second = self.store.history(
+            provider_id="provider-a",
+            window="all",
+            cursor=first["next_cursor"],
+            limit=1,
+            now=now,
+        )
+
+        self.assertEqual(first["total_count"], 2)
+        self.assertEqual(first["total"]["total_tokens"], 46)
+        self.assertEqual(first["items"][0]["total_tokens"], 34)
+        self.assertEqual(first["items"][0]["usage_source"], "estimated")
+        self.assertEqual(first["items"][0]["estimate_method"], "fixture-estimator")
+        self.assertIsNotNone(first["next_cursor"])
+        self.assertEqual(second["items"][0]["total_tokens"], 12)
+        self.assertIsNone(second["next_cursor"])
+        self.assertTrue(
+            all(item["status_code"] == 200 for item in first["items"] + second["items"])
+        )
+        with self.assertRaisesRegex(ValueError, "游标"):
+            self.store.history(
+                provider_id="provider-a",
+                window="all",
+                cursor="invalid",
+                now=now,
+            )
+
+    def test_existing_usage_database_adds_success_marker(self) -> None:
+        old_path = Path(self.temp_context.name) / "old-usage.sqlite3"
+        now = time.time()
+        with closing(sqlite3.connect(old_path)) as connection, connection:
+            connection.executescript(
+                """
+                CREATE TABLE request_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at REAL NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL,
+                    cached_tokens INTEGER NOT NULL,
+                    reasoning_tokens INTEGER NOT NULL,
+                    usage_source TEXT NOT NULL,
+                    estimate_method TEXT,
+                    status_code INTEGER NOT NULL
+                );
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO request_usage (
+                    recorded_at, provider_id, model, input_tokens, output_tokens,
+                    total_tokens, cached_tokens, reasoning_tokens, usage_source,
+                    estimate_method, status_code
+                ) VALUES (?, 'provider-a', 'gpt-5.6-sol', 10, 2, 12, 0, 0,
+                          'upstream', NULL, 200)
+                """,
+                (now,),
+            )
+
+        migrated = UsageStore(old_path)
+        history = migrated.history(provider_id="provider-a", window="all", now=now)
+
+        self.assertEqual(history["total_count"], 1)
+        with closing(sqlite3.connect(old_path)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(request_usage)")
+            }
+            succeeded = connection.execute(
+                "SELECT succeeded FROM request_usage"
+            ).fetchone()[0]
+        self.assertIn("succeeded", columns)
+        self.assertEqual(succeeded, 1)
 
     def test_usage_database_never_stores_request_or_response_content(self) -> None:
         self.store.record(
@@ -294,6 +420,7 @@ class RecoveryHistoryTests(unittest.TestCase):
             stage="before_output",
             outcome="retrying",
             recorded_at=now - 2,
+            request_started_at=now - 120,
         )
         self.store.record(
             request_id=3,
@@ -319,6 +446,11 @@ class RecoveryHistoryTests(unittest.TestCase):
             ["provider-b", "provider-a"],
         )
         self.assertEqual(history["items"][0]["stage"], "after_output")
+        self.assertIsNone(history["items"][0]["request_started_at"])
+        self.assertEqual(
+            history["items"][1]["request_started_at"],
+            round((now - 120) * 1000),
+        )
         self.assertIn("[已隐藏]", history["items"][1]["summary"])
         self.assertNotIn("fixture-private-token", str(history))
 
@@ -330,9 +462,92 @@ class RecoveryHistoryTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM recovery_events"
             ).fetchone()[0]
         self.assertEqual(stored_count, 2)
+        self.assertIn("request_started_at", columns)
         self.assertNotIn("request_body", columns)
         self.assertNotIn("response_body", columns)
         self.assertNotIn("api_key", columns)
+
+    def test_existing_database_is_migrated_without_inventing_start_times(self) -> None:
+        old_path = Path(self.temp_context.name) / "old-recovery.sqlite3"
+        now = time.time()
+        with closing(sqlite3.connect(old_path)) as connection, connection:
+            connection.executescript(
+                """
+                CREATE TABLE recovery_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at REAL NOT NULL,
+                    request_id INTEGER NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    max_attempts INTEGER NOT NULL,
+                    delay_seconds REAL,
+                    kind TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    outcome TEXT NOT NULL
+                );
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO recovery_events (
+                    recorded_at, request_id, provider_id, attempt, max_attempts,
+                    delay_seconds, kind, summary, stage, outcome
+                ) VALUES (?, 1, 'provider-a', 1, 4, 1, 'connection',
+                          'temporary failure', 'before_output', 'retrying')
+                """,
+                (now,),
+            )
+
+        migrated = RecoveryHistoryStore(old_path)
+        history = migrated.history(now=now + 1)
+
+        self.assertEqual(history["total_count"], 1)
+        self.assertIsNone(history["items"][0]["request_started_at"])
+        with closing(sqlite3.connect(old_path)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(recovery_events)")
+            }
+        self.assertIn("request_started_at", columns)
+
+    def test_history_uses_cursor_pagination(self) -> None:
+        now = time.time()
+        for request_id in range(1, 4):
+            self.store.record(
+                request_id=request_id,
+                provider_id="provider-a",
+                attempt=request_id,
+                max_attempts=4,
+                delay_seconds=1,
+                kind="connection",
+                summary=f"failure {request_id}",
+                stage="before_output",
+                outcome="retrying",
+                recorded_at=now - (3 - request_id),
+            )
+
+        first = self.store.history(now=now, limit=2)
+        second = self.store.history(
+            now=now,
+            limit=2,
+            cursor=first["next_cursor"],
+        )
+
+        self.assertEqual(first["total_count"], 3)
+        self.assertEqual(
+            [item["request_id"] for item in first["items"]],
+            [3, 2],
+        )
+        self.assertTrue(first["truncated"])
+        self.assertIsNotNone(first["next_cursor"])
+        self.assertEqual(
+            [item["request_id"] for item in second["items"]],
+            [1],
+        )
+        self.assertFalse(second["truncated"])
+        self.assertIsNone(second["next_cursor"])
+        with self.assertRaisesRegex(ValueError, "游标"):
+            self.store.history(now=now, cursor="invalid")
 
 
 class CCSourceTests(unittest.TestCase):
@@ -526,6 +741,63 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             status["usage"]["by_provider"]["selected"]["input_tokens"], 12
         )
+        self.assertIsNotNone(
+            status["usage"]["by_provider"]["selected"]["last_success_at"]
+        )
+
+    async def test_usage_history_endpoint_returns_only_selected_provider(self) -> None:
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        usage_store.record(
+            provider_id="selected",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(12, 3, 15, cached_tokens=8),
+            status_code=200,
+        )
+        usage_store.record(
+            provider_id="other",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(20, 5, 25),
+            status_code=200,
+        )
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True), provider("other"))),
+            client=upstream_client,
+            usage_store=usage_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.get(
+            "/control/api/usage-history",
+            params={"provider_id": "selected", "usage_window": "all"},
+        )
+        missing = await client.get(
+            "/control/api/usage-history",
+            params={"provider_id": "missing", "usage_window": "all"},
+        )
+        invalid_cursor = await client.get(
+            "/control/api/usage-history",
+            params={
+                "provider_id": "selected",
+                "usage_window": "all",
+                "cursor": "invalid",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.json()["total_count"], 1)
+        self.assertEqual(response.json()["items"][0]["total_tokens"], 15)
+        self.assertEqual(response.json()["items"][0]["cached_tokens"], 8)
+        self.assertEqual(response.json()["total"]["total_tokens"], 15)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(invalid_cursor.status_code, 422)
 
     async def test_status_summarizes_history_and_detail_endpoint_returns_all(self) -> None:
         temp_context = tempfile.TemporaryDirectory()
@@ -560,14 +832,28 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(upstream_client.aclose)
 
         status = (await client.get("/control/api/status")).json()
-        detail = (await client.get("/control/api/recovery-history")).json()
+        detail_response = await client.get(
+            "/control/api/recovery-history",
+            params={"limit": 2},
+        )
+        detail = detail_response.json()
+        older = (
+            await client.get(
+                "/control/api/recovery-history",
+                params={"limit": 2, "cursor": detail["next_cursor"]},
+            )
+        ).json()
 
         self.assertEqual(status["retry"]["history"]["total_count"], 3)
         self.assertEqual(len(status["retry"]["history"]["items"]), 1)
         self.assertTrue(status["retry"]["history"]["truncated"])
         self.assertEqual(detail["total_count"], 3)
-        self.assertEqual(len(detail["items"]), 3)
-        self.assertFalse(detail["truncated"])
+        self.assertEqual(len(detail["items"]), 2)
+        self.assertTrue(detail["truncated"])
+        self.assertIsNotNone(detail["next_cursor"])
+        self.assertEqual(len(older["items"]), 1)
+        self.assertFalse(older["truncated"])
+        self.assertIsNone(older["next_cursor"])
 
     async def test_provider_visibility_and_order_control_api(self) -> None:
         hidden_changes: list[tuple[str, ...]] = []
@@ -929,6 +1215,21 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleeps, [1.0, 2.0])
         self.assertEqual(status["retry"]["total_retries"], 2)
         self.assertEqual(status["retry"]["active"], [])
+        self.assertTrue(
+            all(
+                item["request_started_at"] <= item["recorded_at"]
+                for item in status["retry"]["recent_errors"]
+            )
+        )
+        self.assertEqual(
+            len(
+                {
+                    item["request_started_at"]
+                    for item in status["retry"]["recent_errors"]
+                }
+            ),
+            1,
+        )
         self.assertEqual(
             [item["attempt"] for item in status["retry"]["recent_errors"]],
             [2, 1],
@@ -991,6 +1292,10 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history["items"][0]["kind"], "http_404")
         self.assertEqual(history["items"][0]["stage"], "before_output")
         self.assertEqual(history["items"][0]["outcome"], "retrying")
+        self.assertLessEqual(
+            history["items"][0]["request_started_at"],
+            history["items"][0]["recorded_at"],
+        )
         self.assertIn("HTTP 404", history["items"][0]["summary"])
         self.assertNotIn("<html", history["items"][0]["summary"])
 
@@ -1426,13 +1731,14 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         router = ProviderRouter((provider("selected", current=True),))
         temp_context = tempfile.TemporaryDirectory()
         self.addCleanup(temp_context.cleanup)
-        history_store = RecoveryHistoryStore(
-            Path(temp_context.name) / "usage.sqlite3"
-        )
+        usage_path = Path(temp_context.name) / "usage.sqlite3"
+        history_store = RecoveryHistoryStore(usage_path)
+        usage_store = UsageStore(usage_path)
         app = create_proxy_app(
             router,
             client=upstream_client,
             recovery_history_store=history_store,
+            usage_store=usage_store,
         )
         client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
@@ -1451,6 +1757,11 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history["items"][0]["kind"], "model_capacity")
         self.assertEqual(history["items"][0]["stage"], "after_output")
         self.assertEqual(history["items"][0]["outcome"], "passed_through")
+        usage_summary = usage_store.summary("all")
+        usage_history = usage_store.history(provider_id="selected", window="all")
+        self.assertEqual(usage_summary["total"]["request_count"], 1)
+        self.assertIsNone(usage_summary["by_provider"]["selected"]["last_success_at"])
+        self.assertEqual(usage_history["total_count"], 0)
 
     async def test_embedded_upstream_failure_before_output_is_retried(self) -> None:
         attempts = 0
@@ -1815,8 +2126,9 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("~/.codex-local-proxy/", page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=13", page.text)
-        self.assertIn("app.js?v=15", page.text)
+        self.assertIn("styles.css?v=16", page.text)
+        self.assertIn("app.js?v=18", page.text)
+        self.assertIn('id="usage-history-popover"', page.text)
         self.assertIn('id="recovery-history-meta"', page.text)
         self.assertIn("selectProvider", script.text)
         self.assertIn("setProviderHidden", script.text)
@@ -1826,6 +2138,9 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('suffix: "M"', script.text)
         self.assertIn('suffix: "B"', script.text)
         self.assertIn("provider-token-cell", script.text)
+        self.assertIn("openUsageHistoryPopover", script.text)
+        self.assertIn("/control/api/usage-history", script.text)
+        self.assertIn("成功请求记录", script.text)
         self.assertIn("healthStatusUrl", script.text)
         self.assertNotIn("HEALTH_STATUS_URL", script.text)
         self.assertIn("normalizeProviderEndpoint", script.text)
@@ -1852,6 +2167,9 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(".recovery-popover ol::-webkit-scrollbar", styles.text)
         self.assertIn(".usage-summary", styles.text)
         self.assertIn(".provider-token-cell", styles.text)
+        self.assertIn(".usage-history-popover", styles.text)
+        self.assertIn("--provider-grid-columns", styles.text)
+        self.assertIn("scrollbar-gutter: stable", styles.text)
         self.assertIn(".provider-health-cell", styles.text)
         self.assertIn(".provider-health-detail", styles.text)
         self.assertIn(".provider-health-popover", styles.text)
