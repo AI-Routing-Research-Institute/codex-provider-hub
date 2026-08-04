@@ -27,6 +27,11 @@ from codex_local_proxy import (
     load_proxy_providers,
     order_proxy_providers,
 )
+from provider_proxy_protocol import ClaudeMessagesProtocol
+
+
+async def _empty_wait() -> None:
+    return None
 
 
 def provider(
@@ -405,6 +410,77 @@ api-version = "2026-07-01"
 
 
 class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_protocol_adapter_replaces_claude_placeholder_auth(self) -> None:
+        seen: list[httpx.Request] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(
+                200,
+                json={"type": "message", "usage": {"input_tokens": 1, "output_tokens": 1}},
+            )
+
+        selected = provider("selected", current=True)
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((selected,)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post(
+                "/v1/messages",
+                headers={
+                    "x-api-key": "local-placeholder",
+                    "anthropic-version": "2023-06-01",
+                },
+                json={"model": "claude-test", "messages": []},
+            )
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen[0].url.path, "/v1/messages")
+        self.assertEqual(seen[0].headers["x-api-key"], "test-upstream-credential")
+        self.assertNotIn("authorization", seen[0].headers)
+
+    async def test_claude_protocol_retries_http_529(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(529, json={"error": {"type": "overloaded_error"}})
+            return httpx.Response(200, json={"type": "message", "content": []})
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(delay_seconds=0.1),
+            retry_sleep=lambda _: _empty_wait(),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post(
+                "/v1/messages",
+                json={"model": "claude-test", "messages": []},
+            )
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+
     async def test_stream_usage_is_persisted_for_final_provider(self) -> None:
         class UsageStream(httpx.AsyncByteStream):
             async def __aiter__(self):

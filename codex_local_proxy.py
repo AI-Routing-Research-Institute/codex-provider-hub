@@ -1236,7 +1236,9 @@ def _string_mapping(value: Any, field_name: str) -> dict[str, str]:
 def create_proxy_app(
     router: ProviderRouter,
     *,
-    client: httpx.AsyncClient | None = None,
+    client: Any | None = None,
+    client_factory: Callable[[], Any] | None = None,
+    protocol_adapter: Any | None = None,
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None,
     on_provider_selected: Callable[[str], None] | None = None,
     hidden_provider_ids: Iterable[str] = (),
@@ -1256,6 +1258,12 @@ def create_proxy_app(
     on_runtime_settings_changed: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     validate_runtime_database: Callable[[str], dict[str, Any]] | None = None,
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    service_name: str = "codex-local-proxy",
+    control_asset_dir: Path = CONTROL_ASSET_DIR,
+    allowed_proxy_paths: frozenset[str] | None = None,
+    provider_selectable: Callable[[ProxyProvider], bool] | None = None,
+    provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None,
+    config_endpoint_name: str = "codex-config",
 ) -> FastAPI:
     active_retry_policy_store = retry_policy_store or RetryPolicyStore(retry_policy)
     preferences_lock = threading.RLock()
@@ -1265,10 +1273,21 @@ def create_proxy_app(
     active_provider_order = [
         provider_id for provider_id in provider_order if isinstance(provider_id, str)
     ]
-    upstream_client = client or httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=30.0, read=None, write=120.0, pool=30.0),
-        follow_redirects=False,
-    )
+    upstream_client = client
+    if upstream_client is None:
+        upstream_client = (
+            client_factory()
+            if client_factory is not None
+            else httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=30.0,
+                    read=None,
+                    write=120.0,
+                    pool=30.0,
+                ),
+                follow_redirects=False,
+            )
+        )
     owns_client = client is None
     active_health_status_url_store = health_status_url_store or HealthStatusUrlStore(
         health_status_url
@@ -1298,7 +1317,7 @@ def create_proxy_app(
         current = router.current_provider()
         status = router.status()
         return {
-            "service": "codex-local-proxy",
+            "service": service_name,
             "status": "ok" if current is not None else "not_configured",
             "current_provider": current.name if current else None,
             "active_requests": sum(status.active_by_provider.values()),
@@ -1310,13 +1329,13 @@ def create_proxy_app(
 
     @app.get("/control/", include_in_schema=False)
     async def control_page() -> FileResponse:
-        return FileResponse(CONTROL_ASSET_DIR / "index.html")
+        return FileResponse(control_asset_dir / "index.html")
 
     @app.get("/control/static/{asset_name}", include_in_schema=False)
     async def control_asset(asset_name: str):
         if asset_name not in {"app.js", "styles.css"}:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        response = FileResponse(CONTROL_ASSET_DIR / asset_name)
+        response = FileResponse(control_asset_dir / asset_name)
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -1337,6 +1356,8 @@ def create_proxy_app(
             usage_summary=usage,
             recovery_history=recovery_history,
             health_status_url=active_health_status_url_store.get(),
+            service_name=service_name,
+            provider_public_fields=provider_public_fields,
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
@@ -1432,6 +1453,14 @@ def create_proxy_app(
     async def control_select(provider_id: str, request: Request):
         if not _valid_control_request(request):
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        candidate = next(
+            (provider for provider in router.providers() if provider.provider_id == provider_id),
+            None,
+        )
+        if candidate is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到该供应商"})
+        if provider_selectable is not None and not provider_selectable(candidate):
+            return JSONResponse(status_code=409, content={"detail": "该供应商与当前协议不兼容"})
         try:
             selected = router.select(provider_id)
         except KeyError:
@@ -1520,7 +1549,7 @@ def create_proxy_app(
             return JSONResponse(status_code=503, content={"detail": "无法读取 CC Switch 数据库"})
         return public_status_for_request(request)
 
-    @app.get("/control/api/codex-config", include_in_schema=False)
+    @app.get(f"/control/api/{config_endpoint_name}", include_in_schema=False)
     async def control_config():
         if config_fragment is None:
             return JSONResponse(status_code=503, content={"detail": "配置生成功能不可用"})
@@ -1542,6 +1571,18 @@ def create_proxy_app(
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     )
     async def proxy_v1(upstream_path: str, request: Request):
+        if allowed_proxy_paths is not None and upstream_path.strip("/") not in allowed_proxy_paths:
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        current_provider = router.current_provider()
+        if (
+            current_provider is not None
+            and provider_selectable is not None
+            and not provider_selectable(current_provider)
+        ):
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"message": "当前供应商与请求协议不兼容"}},
+            )
         return await _forward_request(
             router,
             upstream_client,
@@ -1551,6 +1592,7 @@ def create_proxy_app(
             retry_sleep=retry_sleep,
             usage_store=usage_store,
             recovery_history_store=recovery_history_store,
+            protocol_adapter=protocol_adapter,
         )
 
     return app
@@ -1568,6 +1610,8 @@ def _public_control_status(
     usage_summary: dict[str, Any] | None = None,
     recovery_history: dict[str, Any] | None = None,
     health_status_url: str | None = None,
+    service_name: str = "codex-local-proxy",
+    provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     status = router.status()
     policy = retry_policy or RetryPolicy()
@@ -1595,7 +1639,7 @@ def _public_control_status(
         "items": recent_errors,
     }
     return {
-        "service": "codex-local-proxy",
+        "service": service_name,
         "current_provider_id": current_id,
         "active_requests": sum(status.active_by_provider.values()),
         "active_by_provider": status.active_by_provider,
@@ -1642,6 +1686,11 @@ def _public_control_status(
                 "wire_api": provider.wire_api,
                 "active_requests": status.active_by_provider.get(provider.provider_id, 0),
                 "hidden": provider.provider_id in hidden,
+                **(
+                    dict(provider_public_fields(provider))
+                    if provider_public_fields is not None
+                    else {}
+                ),
             }
             for provider in router.providers()
         ],
@@ -1698,6 +1747,7 @@ async def _forward_request(
     retry_sleep: Callable[[float], Awaitable[None]],
     usage_store: UsageStore | None = None,
     recovery_history_store: RecoveryHistoryStore | None = None,
+    protocol_adapter: Any | None = None,
 ):
     try:
         snapshot = router.begin_request()
@@ -1751,8 +1801,17 @@ async def _forward_request(
             final_error = "proxy_loop"
             break
 
-        url = _upstream_url(provider, upstream_path)
-        headers = _upstream_request_headers(request.headers, provider)
+        url = (
+            protocol_adapter.upstream_url(provider, upstream_path)
+            if protocol_adapter is not None
+            and hasattr(protocol_adapter, "upstream_url")
+            else _upstream_url(provider, upstream_path)
+        )
+        headers = (
+            protocol_adapter.request_headers(request.headers, provider)
+            if protocol_adapter is not None
+            else _upstream_request_headers(request.headers, provider)
+        )
         query_items = list(request.query_params.multi_items())
         existing_keys = {key for key, _ in query_items}
         query_items.extend(
@@ -1772,11 +1831,13 @@ async def _forward_request(
                 content=request_body,
             )
             upstream_response = await client.send(upstream_request, stream=True)
-            retry_kind = (
-                _retry_kind(upstream_response)
-                if retry_policy.enabled
-                else None
-            )
+            retry_kind = None
+            if retry_policy.enabled:
+                retry_kind = (
+                    protocol_adapter.retry_kind(upstream_response)
+                    if protocol_adapter is not None
+                    else _retry_kind(upstream_response)
+                )
             if retry_kind is None:
                 if upstream_response.is_stream_consumed:
                     first_chunk = upstream_response.content or None
@@ -1791,17 +1852,40 @@ async def _forward_request(
                         retry_kind = "stream_start"
                         final_error = "stream_start_failed"
                         retry_summary = _exception_retry_summary(retry_kind, exc)
-                    if (
-                        retry_kind is None
-                        and first_chunk is not None
-                        and _is_event_stream(upstream_response)
-                        and retry_policy.enabled
-                    ):
-                        first_chunk, retry_kind, retry_summary = (
-                            await _inspect_sse_before_output(first_chunk, stream)
+                if (
+                    retry_kind is None
+                    and first_chunk is None
+                    and retry_policy.enabled
+                    and protocol_adapter is not None
+                    and hasattr(protocol_adapter, "empty_response_decision")
+                ):
+                    action, retry_kind, retry_summary = (
+                        protocol_adapter.empty_response_decision(upstream_response)
+                    )
+                    if action != "retry":
+                        retry_kind = None
+                    else:
+                        final_error = retry_kind or "malformed_response"
+                if (
+                    retry_kind is None
+                    and first_chunk is not None
+                    and _is_event_stream(upstream_response)
+                    and retry_policy.enabled
+                ):
+                    assert stream is not None
+                    first_chunk, retry_kind, retry_summary = (
+                        await _inspect_sse_before_output(
+                            first_chunk,
+                            stream,
+                            decision=(
+                                protocol_adapter.sse_preflight_decision
+                                if protocol_adapter is not None
+                                else _sse_preflight_decision
+                            ),
                         )
-                        if retry_kind is not None:
-                            final_error = retry_kind
+                    )
+                    if retry_kind is not None:
+                        final_error = retry_kind
                 if (
                     retry_kind is None
                     and first_chunk is not None
@@ -1910,14 +1994,25 @@ async def _forward_request(
         if key.casefold() not in RESPONSE_HEADERS_TO_DROP
     }
 
-    usage_capture = UsageCapture(request_body, upstream_path) if usage_store is not None else None
-    failure_capture = (
-        SSEFailureCapture()
-        if recovery_history_store is not None
+    usage_capture = None
+    if usage_store is not None:
+        usage_capture = (
+            protocol_adapter.usage_capture(request_body, upstream_path)
+            if protocol_adapter is not None
+            else UsageCapture(request_body, upstream_path)
+        )
+    failure_capture = None
+    if (
+        recovery_history_store is not None
         and retry_policy.enabled
         and _is_event_stream(upstream_response)
-        else None
-    )
+    ):
+        failure_capture = (
+            protocol_adapter.failure_capture()
+            if protocol_adapter is not None
+            and hasattr(protocol_adapter, "failure_capture")
+            else SSEFailureCapture()
+        )
 
     async def response_body() -> AsyncIterator[bytes]:
         stream_failure: tuple[str, str] | None = None
@@ -2109,10 +2204,13 @@ def _is_event_stream(response: httpx.Response) -> bool:
 async def _inspect_sse_before_output(
     first_chunk: bytes,
     stream: AsyncIterator[bytes],
+    *,
+    decision: Callable[..., tuple[str, str | None, str | None]] = None,
 ) -> tuple[bytes | None, str | None, str | None]:
+    decide = decision or _sse_preflight_decision
     buffered = bytearray(first_chunk)
     while True:
-        action, retry_kind, retry_summary = _sse_preflight_decision(bytes(buffered))
+        action, retry_kind, retry_summary = decide(bytes(buffered))
         if action == "retry":
             return None, retry_kind, retry_summary
         if action == "commit" or len(buffered) >= SSE_RETRY_PREFLIGHT_BYTES:
@@ -2120,7 +2218,7 @@ async def _inspect_sse_before_output(
         try:
             buffered.extend(await anext(stream))
         except StopAsyncIteration:
-            action, retry_kind, retry_summary = _sse_preflight_decision(
+            action, retry_kind, retry_summary = decide(
                 bytes(buffered),
                 end_of_stream=True,
             )
@@ -2353,6 +2451,7 @@ def _retry_kind_summary(kind: str) -> str:
         "stream_start": "响应开始前连接中断",
         "stream_interrupted": "输出后响应流中断",
         "upstream_error": "上游请求失败",
+        "malformed_response": "HTTP 200 上游响应为空或格式错误",
     }.get(kind, "上游临时错误")
 
 
@@ -2530,6 +2629,7 @@ class LocalProxyServer:
         runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None,
         on_runtime_settings_changed: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         validate_runtime_database: Callable[[str], dict[str, Any]] | None = None,
+        app_factory: Callable[..., FastAPI] = create_proxy_app,
     ) -> None:
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("本地中转只允许监听回环地址")
@@ -2542,7 +2642,7 @@ class LocalProxyServer:
             if on_shutdown_requested is not None:
                 on_shutdown_requested()
 
-        self.app = create_proxy_app(
+        self.app = app_factory(
             router,
             reload_providers=reload_providers,
             on_provider_selected=on_provider_selected,

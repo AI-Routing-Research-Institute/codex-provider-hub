@@ -196,14 +196,18 @@ def codex_config_fragment(port: int = DEFAULT_PORT) -> str:
     )
 
 
-def existing_proxy_url(port: int) -> str | None:
+def existing_proxy_url(
+    port: int,
+    *,
+    service_name: str = "codex-local-proxy",
+) -> str | None:
     url = f"http://127.0.0.1:{port}"
     try:
         response = httpx.get(f"{url}/healthz", timeout=1.0)
         payload = response.json()
     except (httpx.HTTPError, ValueError):
         return None
-    if response.status_code == 200 and payload.get("service") == "codex-local-proxy":
+    if response.status_code == 200 and payload.get("service") == service_name:
         return f"{url}/control/"
     return None
 
@@ -217,12 +221,33 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         raise FileNotFoundError(
             "本地中转页面资源缺失：" + "、".join(missing_assets)
         )
+    from claude_local_proxy import CLAUDE_CONTROL_ASSET_DIR, load_claude_proxy_providers
+
+    missing_claude_assets = [
+        name for name in asset_names if not (CLAUDE_CONTROL_ASSET_DIR / name).is_file()
+    ]
+    if missing_claude_assets:
+        raise FileNotFoundError(
+            "Claude 本地中转页面资源缺失：" + "、".join(missing_claude_assets)
+        )
+    tray_backend_available = True
+    if os.name == "nt":
+        import pystray
+        from pystray import _win32
+
+        tray_backend_available = pystray is not None and _win32 is not None
+    from curl_cffi import Curl
+
+    curl = Curl()
+    curl.close()
+    claude_curl_transport_available = True
     icon = create_app_icon()
     providers = filter_self_referencing_providers(
         load_proxy_providers(database), DEFAULT_PORT
     )
     router = ProviderRouter(providers)
     current = router.current_provider()
+    claude_providers = load_claude_proxy_providers(database)
     return {
         "app_version": APP_VERSION,
         "provider_count": len(providers),
@@ -231,6 +256,14 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         "listen_address": f"{DEFAULT_HOST}:{DEFAULT_PORT}",
         "control_path": "/control/",
         "control_asset_count": len(asset_names),
+        "claude_provider_count": len(claude_providers),
+        "claude_compatible_provider_count": sum(
+            provider.compatible and provider.has_credentials
+            for provider in claude_providers
+        ),
+        "claude_control_asset_count": len(asset_names),
+        "tray_backend_available": tray_backend_available,
+        "claude_curl_transport_available": claude_curl_transport_available,
         "icon_size": list(icon.size),
     }
 
@@ -259,11 +292,24 @@ def run_application(
     open_browser: bool = True,
     tray: bool = False,
 ) -> int:
+    from claude_local_proxy_app import load_settings as load_claude_settings
+
+    claude_settings = load_claude_settings()
+    claude_port = int(claude_settings["port"])
     existing = existing_proxy_url(port)
-    if existing is not None:
+    existing_claude = existing_proxy_url(
+        claude_port,
+        service_name="claude-local-proxy",
+    )
+    if existing is not None and existing_claude is not None:
         if open_browser:
             webbrowser.open(existing)
+            webbrowser.open(existing_claude)
         return 0
+    if existing is not None or existing_claude is not None:
+        raise RuntimeError(
+            "检测到旧版或不完整的本地中转实例，请先从托盘退出旧版本地中转后重新启动。"
+        )
 
     settings = load_settings()
     settings_lock = threading.RLock()
@@ -397,8 +443,11 @@ def run_application(
         return runtime_settings_snapshot()
 
     tray_holder: dict[str, Any] = {}
+    hub_servers: list[LocalProxyServer] = []
 
-    def stop_tray() -> None:
+    def stop_hub() -> None:
+        for active_server in tuple(hub_servers):
+            active_server.request_stop()
         icon = tray_holder.get("icon")
         if icon is not None:
             icon.stop()
@@ -416,7 +465,7 @@ def run_application(
         config_fragment=lambda: codex_config_fragment(port),
         retry_policy_store=retry_policy_store,
         on_retry_policy_changed=remember_retry_policy,
-        on_shutdown_requested=stop_tray if tray else None,
+        on_shutdown_requested=stop_hub,
         usage_store=usage_store,
         recovery_history_store=recovery_history_store,
         health_status_url_store=health_status_url_store,
@@ -424,29 +473,73 @@ def run_application(
         on_runtime_settings_changed=apply_runtime_settings,
         validate_runtime_database=validate_runtime_database,
     )
-    server.start()
-    control_url = f"http://127.0.0.1:{port}/control/"
-    if open_browser:
-        webbrowser.open(control_url)
+    from claude_local_proxy_app import build_claude_server
+
+    claude_database = resolve_user_path(
+        claude_settings.get("database_path") or str(database)
+    )
+    claude_server = build_claude_server(
+        database=claude_database,
+        port=claude_port,
+        on_shutdown_requested=stop_hub,
+    )
+    hub_servers.extend((server, claude_server))
+    return run_hub_servers(
+        server,
+        claude_server,
+        codex_control_url=f"http://127.0.0.1:{port}/control/",
+        claude_control_url=f"http://127.0.0.1:{claude_port}/control/",
+        open_browser=open_browser,
+        tray=tray,
+        tray_holder=tray_holder,
+    )
+
+
+def run_hub_servers(
+    codex_server: LocalProxyServer,
+    claude_server: LocalProxyServer,
+    *,
+    codex_control_url: str,
+    claude_control_url: str,
+    open_browser: bool,
+    tray: bool,
+    tray_holder: dict[str, Any] | None = None,
+) -> int:
+    servers = (codex_server, claude_server)
+    started: list[LocalProxyServer] = []
+    active_tray_holder = tray_holder if tray_holder is not None else {}
     restart_requested = False
     try:
+        for server in servers:
+            server.start()
+            started.append(server)
+        if open_browser:
+            webbrowser.open(codex_control_url)
+            webbrowser.open(claude_control_url)
         if tray:
-            restart_requested = _run_tray(server, control_url, tray_holder)
+            restart_requested = _run_tray(
+                servers,
+                codex_control_url,
+                claude_control_url,
+                active_tray_holder,
+            )
         else:
-            while server.running:
+            while any(server.running for server in servers):
                 time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
-        server.stop()
+        for server in reversed(started):
+            server.stop()
     if restart_requested:
         launch_replacement_process()
     return 0
 
 
 def _run_tray(
-    server: LocalProxyServer,
-    control_url: str,
+    servers: tuple[LocalProxyServer, LocalProxyServer],
+    codex_control_url: str,
+    claude_control_url: str,
     tray_holder: dict[str, Any],
 ) -> bool:
     try:
@@ -457,26 +550,34 @@ def _run_tray(
     image = create_app_icon()
     restart_requested = threading.Event()
 
-    def open_console(icon: Any = None, item: Any = None) -> None:
-        webbrowser.open(control_url)
+    def open_codex_console(icon: Any = None, item: Any = None) -> None:
+        webbrowser.open(codex_control_url)
+
+    def open_claude_console(icon: Any = None, item: Any = None) -> None:
+        webbrowser.open(claude_control_url)
+
+    def stop_servers() -> None:
+        for server in servers:
+            server.request_stop()
 
     def restart_proxy(icon: Any, item: Any = None) -> None:
         if restart_requested.is_set():
             return
         restart_requested.set()
-        server.request_stop()
+        stop_servers()
         icon.stop()
 
     def exit_proxy(icon: Any, item: Any = None) -> None:
-        server.request_stop()
+        stop_servers()
         icon.stop()
 
     icon = pystray.Icon(
         "codex-local-proxy",
         image,
-        "Codex 本地中转",
+        "Codex 与 Claude Code 本地中转",
         menu=pystray.Menu(
-            pystray.MenuItem("打开控制台", open_console, default=True),
+            pystray.MenuItem("打开 Codex 控制台", open_codex_console, default=True),
+            pystray.MenuItem("打开 Claude Code 控制台", open_claude_console),
             pystray.MenuItem("重启本地中转", restart_proxy),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出本地中转", exit_proxy),

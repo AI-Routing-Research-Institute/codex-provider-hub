@@ -184,29 +184,83 @@ class CodexConfigTests(unittest.TestCase):
                 self.stopped = False
 
             def run(self):
-                self.menu.items[1].action(self, self.menu.items[1])
+                self.menu.items[2].action(self, self.menu.items[2])
 
             def stop(self):
                 self.stopped = True
 
         fake_pystray = mock.Mock(Menu=FakeMenu, MenuItem=FakeMenuItem, Icon=FakeIcon)
         fake_pystray.Menu.SEPARATOR = FakeMenu.SEPARATOR
-        server = mock.Mock()
+        codex_server = mock.Mock()
+        claude_server = mock.Mock()
         tray_holder: dict[str, object] = {}
         with (
             mock.patch.dict(sys.modules, {"pystray": fake_pystray}),
             mock.patch.object(codex_local_proxy_app, "create_app_icon", return_value=object()),
         ):
             restart_requested = codex_local_proxy_app._run_tray(
-                server,
+                (codex_server, claude_server),
                 "http://127.0.0.1:17890/control/",
+                "http://127.0.0.1:17891/control/",
                 tray_holder,
             )
 
         self.assertTrue(restart_requested)
         self.assertTrue(tray_holder["icon"].stopped)
-        server.request_stop.assert_called_once_with()
-        self.assertEqual(menu_labels, ["打开控制台", "重启本地中转", "退出本地中转"])
+        codex_server.request_stop.assert_called_once_with()
+        claude_server.request_stop.assert_called_once_with()
+        self.assertEqual(
+            menu_labels,
+            ["打开 Codex 控制台", "打开 Claude Code 控制台", "重启本地中转", "退出本地中转"],
+        )
+
+    def test_run_servers_opens_both_consoles_and_stops_both(self) -> None:
+        codex_server = mock.Mock(running=False)
+        claude_server = mock.Mock(running=False)
+        with mock.patch.object(codex_local_proxy_app.webbrowser, "open") as browser:
+            result = codex_local_proxy_app.run_hub_servers(
+                codex_server,
+                claude_server,
+                codex_control_url="http://127.0.0.1:17890/control/",
+                claude_control_url="http://127.0.0.1:17891/control/",
+                open_browser=True,
+                tray=False,
+            )
+
+        self.assertEqual(result, 0)
+        codex_server.start.assert_called_once_with()
+        claude_server.start.assert_called_once_with()
+        browser.assert_any_call("http://127.0.0.1:17890/control/")
+        browser.assert_any_call("http://127.0.0.1:17891/control/")
+        codex_server.stop.assert_called_once_with()
+        claude_server.stop.assert_called_once_with()
+
+    def test_existing_proxy_url_accepts_expected_service_name(self) -> None:
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"service": "claude-local-proxy"}
+        with mock.patch.object(codex_local_proxy_app.httpx, "get", return_value=response):
+            url = codex_local_proxy_app.existing_proxy_url(
+                17891,
+                service_name="claude-local-proxy",
+            )
+
+        self.assertEqual(url, "http://127.0.0.1:17891/control/")
+
+    def test_partial_legacy_instance_requires_restart_before_dual_service_start(self) -> None:
+        with (
+            mock.patch.object(
+                codex_local_proxy_app,
+                "existing_proxy_url",
+                side_effect=["http://127.0.0.1:17890/control/", None],
+            ),
+            self.assertRaisesRegex(RuntimeError, "退出旧版本地中转"),
+        ):
+            codex_local_proxy_app.run_application(
+                database=Path("cc-switch.db"),
+                port=17890,
+                open_browser=False,
+                tray=False,
+            )
 
     def test_shortcut_targets_browser_app_launcher(self) -> None:
         script = (
