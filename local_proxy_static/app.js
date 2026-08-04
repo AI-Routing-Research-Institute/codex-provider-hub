@@ -22,6 +22,16 @@ let manageProvidersMode = false;
 let draggedProviderId = null;
 let healthDetailButton = null;
 let historyDetailPinned = false;
+let usageHistoryButton = null;
+let usageHistoryProvider = null;
+let usageHistoryItems = [];
+let usageHistoryTotals = null;
+let usageHistoryNextCursor = null;
+let usageHistoryTotalCount = 0;
+let usageHistoryLoading = false;
+let usageHistoryRequestSequence = 0;
+let usageHistoryWindow = "today";
+let usageHistoryError = null;
 
 const providerList = document.querySelector("#provider-list");
 const emptyState = document.querySelector("#empty-state");
@@ -46,10 +56,17 @@ const recoveryPopover = document.querySelector("#recovery-popover");
 const recoveryErrorList = document.querySelector("#recovery-error-list");
 const recoveryHistoryMeta = document.querySelector("#recovery-history-meta");
 const providerHealthPopover = document.querySelector("#provider-health-popover");
+const usageHistoryPopover = document.querySelector("#usage-history-popover");
+const usageHistoryTitle = document.querySelector("#usage-history-title");
+const usageHistoryMeta = document.querySelector("#usage-history-meta");
+const usageHistorySummary = document.querySelector("#usage-history-summary");
+const usageHistoryList = document.querySelector("#usage-history-list");
+const usageHistoryMore = document.querySelector("#usage-history-more");
+const usageHistoryClose = document.querySelector("#usage-history-close");
 const historyDetailPopover = document.querySelector("#history-detail-popover");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 const THEME_STORAGE_KEY = "codex-local-proxy-theme";
-const RECOVERY_HISTORY_DISPLAY_LIMIT = 500;
+const RECOVERY_HISTORY_PAGE_SIZE = 50;
 
 function themePreference() {
   const value = document.documentElement.dataset.themePreference;
@@ -109,12 +126,16 @@ function positionRecoveryPopover() {
 
 function showRecoveryDetails({ pinned = false } = {}) {
   if (!recovery.classList.contains("has-details")) return;
+  closeUsageHistoryPopover();
+  const wasOpen = recoveryPopover.classList.contains("show");
   window.clearTimeout(recoveryHideTimer);
   if (pinned) recoveryDetailsPinned = true;
   recoveryPopover.classList.add("show");
   recoveryDetailsButton.setAttribute("aria-expanded", "true");
   positionRecoveryPopover();
-  readRecoveryHistory();
+  if (!wasOpen) {
+    readRecoveryHistory({ refresh: Boolean(latestRecoveryHistory) });
+  }
 }
 
 function hideRecoveryDetails({ force = false } = {}) {
@@ -154,6 +175,18 @@ function recoveryOutcomeLabel(error) {
   }[error?.outcome] || "已记录";
 }
 
+function recoveryMetaText(error, providerName) {
+  return [
+    `失败 ${formatRetryTime(error.recorded_at)}`,
+    error.request_started_at == null
+      ? null
+      : `开始 ${formatRetryTime(error.request_started_at)}`,
+    providerName,
+    `第 ${error.attempt} 次请求`,
+    recoveryOutcomeLabel(error),
+  ].filter(Boolean).join(" · ");
+}
+
 function sameRecoveryHistorySnapshot(left, right) {
   const leftLatest = Array.isArray(left?.items) ? left.items[0]?.recorded_at : null;
   const rightLatest = Array.isArray(right?.items) ? right.items[0]?.recorded_at : null;
@@ -171,6 +204,51 @@ function recoveryHistoryEntryKey(entry) {
   ].map((value) => String(value ?? "")).join("\u0000");
 }
 
+function mergeRecoveryHistoryPages(current, page) {
+  const currentItems = Array.isArray(current?.items) ? current.items : [];
+  const pageItems = Array.isArray(page?.items) ? page.items : [];
+  const seen = new Set();
+  const items = [];
+  for (const entry of [...currentItems, ...pageItems]) {
+    const key = recoveryHistoryEntryKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(entry);
+  }
+  const totalCount = Number(page?.total_count);
+  return {
+    ...page,
+    total_count: Number.isFinite(totalCount) ? totalCount : items.length,
+    truncated: Boolean(page?.next_cursor) || totalCount > items.length,
+    items,
+  };
+}
+
+function refreshRecoveryHistoryPages(current, page) {
+  if (!current) return page;
+  const pageItems = Array.isArray(page?.items) ? page.items : [];
+  const currentItems = Array.isArray(current?.items) ? current.items : [];
+  const seen = new Set();
+  const items = [];
+  for (const entry of [...pageItems, ...currentItems]) {
+    const key = recoveryHistoryEntryKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(entry);
+  }
+  const totalCount = Number(page?.total_count);
+  const nextCursor = Object.prototype.hasOwnProperty.call(current, "next_cursor")
+    ? current.next_cursor
+    : page?.next_cursor || null;
+  return {
+    ...page,
+    total_count: Number.isFinite(totalCount) ? totalCount : items.length,
+    next_cursor: nextCursor,
+    truncated: Boolean(nextCursor) || totalCount > items.length,
+    items,
+  };
+}
+
 function recoveryHistoryForDisplay(detail, summary) {
   if (!detail) return summary;
   if (!summary || sameRecoveryHistorySnapshot(detail, summary)) return detail;
@@ -183,7 +261,6 @@ function recoveryHistoryForDisplay(detail, summary) {
     if (seen.has(key)) continue;
     seen.add(key);
     items.push(entry);
-    if (items.length >= RECOVERY_HISTORY_DISPLAY_LIMIT) break;
   }
   const summaryTotal = Number(summary.total_count);
   const detailTotal = Number(detail.total_count);
@@ -199,15 +276,26 @@ function recoveryHistoryForDisplay(detail, summary) {
   };
 }
 
-async function readRecoveryHistory() {
+async function readRecoveryHistory({ loadMore = false, refresh = false } = {}) {
   const summary = latestStatus?.retry?.history;
-  if (recoveryHistoryRequestActive || sameRecoveryHistorySnapshot(latestRecoveryHistory, summary)) return;
+  if (recoveryHistoryRequestActive) return;
+  if (loadMore && !latestRecoveryHistory?.next_cursor) return;
+  if (!loadMore && sameRecoveryHistorySnapshot(latestRecoveryHistory, summary)) return;
   recoveryHistoryRequestActive = true;
   try {
-    const response = await fetch("/control/api/recovery-history", { cache: "no-store" });
+    const params = new URLSearchParams({ limit: String(RECOVERY_HISTORY_PAGE_SIZE) });
+    if (loadMore) params.set("cursor", latestRecoveryHistory.next_cursor);
+    const response = await fetch(`/control/api/recovery-history?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    latestRecoveryHistory = await response.json();
-    if (latestStatus?.retry) renderRecoveryErrors(latestStatus.retry);
+    const page = await response.json();
+    latestRecoveryHistory = loadMore
+      ? mergeRecoveryHistoryPages(latestRecoveryHistory, page)
+      : refresh
+        ? refreshRecoveryHistoryPages(latestRecoveryHistory, page)
+        : page;
+    if (latestStatus?.retry) {
+      renderRecoveryErrors(latestStatus.retry, { appended: loadMore });
+    }
     if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
   } catch {
     // Keep the last complete snapshot instead of falling back to the one-item summary.
@@ -216,7 +304,7 @@ async function readRecoveryHistory() {
   }
 }
 
-function renderRecoveryErrors(retry) {
+function renderRecoveryErrors(retry, { appended = false } = {}) {
   const historySummary = retry.history && typeof retry.history === "object"
     ? retry.history
     : null;
@@ -249,24 +337,25 @@ function renderRecoveryErrors(retry) {
     const item = document.createElement("li");
     const meta = document.createElement("span");
     meta.className = "recovery-error-meta";
-    meta.textContent = [
-      formatRetryTime(error.recorded_at),
-      providerName,
-      `第 ${error.attempt} 次请求`,
-      recoveryOutcomeLabel(error),
-    ].filter(Boolean).join(" · ");
+    meta.textContent = recoveryMetaText(error, providerName);
     const summary = document.createElement("span");
     summary.className = "recovery-error-summary";
     summary.textContent = error.summary || "上游临时错误";
     item.append(meta, summary);
     recoveryErrorList.append(item);
   }
-  if (previousScrollTop > 0) {
+  if (appended) {
+    recoveryErrorList.scrollTop = previousScrollTop;
+  } else if (previousScrollTop > 0) {
     recoveryErrorList.scrollTop = previousScrollTop
       + Math.max(0, recoveryErrorList.scrollHeight - previousScrollHeight);
   }
-  if (historyNeedsRefresh && recoveryPopover.classList.contains("show")) {
-    void readRecoveryHistory();
+  if (
+    historyNeedsRefresh
+    && recoveryPopover.classList.contains("show")
+    && !recoveryHistoryRequestActive
+  ) {
+    void readRecoveryHistory({ refresh: true });
   }
 }
 
@@ -387,6 +476,7 @@ async function readRuntimeSettings({ quiet = false } = {}) {
 }
 
 function switchView(viewName) {
+  closeUsageHistoryPopover();
   for (const button of document.querySelectorAll(".view-tab")) {
     const active = button.dataset.view === viewName;
     button.classList.toggle("active", active);
@@ -450,13 +540,213 @@ function formatTokenCount(value) {
   return `${compact}${unit.suffix}`;
 }
 
+function usageWindowLabel(value) {
+  return {
+    today: "今日",
+    "24h": "近 24 小时",
+    "7d": "近 7 天",
+    "30d": "近 30 天",
+    all: "全部",
+  }[value] || "今日";
+}
+
+function positionUsageHistoryPopover() {
+  if (!usageHistoryButton || !usageHistoryPopover.classList.contains("show")) return;
+  const anchor = usageHistoryButton.getBoundingClientRect();
+  const rect = usageHistoryPopover.getBoundingClientRect();
+  const margin = 12;
+  const left = Math.min(
+    window.innerWidth - rect.width - margin,
+    Math.max(margin, anchor.right - rect.width),
+  );
+  const preferredTop = anchor.bottom + 8;
+  const top = preferredTop + rect.height <= window.innerHeight - margin
+    ? preferredTop
+    : Math.max(margin, anchor.top - rect.height - 8);
+  usageHistoryPopover.style.left = `${Math.round(left)}px`;
+  usageHistoryPopover.style.top = `${Math.round(top)}px`;
+}
+
+function usageSourceLabel(item) {
+  return item?.usage_source === "estimated" ? "估算" : "上游";
+}
+
+function renderUsageHistoryPopover() {
+  if (!usageHistoryProvider) return;
+  const usage = usageHistoryTotals || providerUsage(usageHistoryProvider.provider_id);
+  usageHistoryTitle.textContent = `${usageHistoryProvider.name} · 成功请求`;
+  usageHistoryMeta.textContent = `${usageWindowLabel(usageHistoryWindow)} · ${usageHistoryTotalCount} 条`;
+  usageHistorySummary.textContent = [
+    `总计 ${formatTokenCount(usage.total_tokens)} Token`,
+    `输入 ${formatTokenCount(usage.input_tokens)}`,
+    `输出 ${formatTokenCount(usage.output_tokens)}`,
+    Number(usage.cached_tokens || 0) > 0
+      ? `缓存 ${formatTokenCount(usage.cached_tokens)}`
+      : null,
+  ].filter(Boolean).join(" · ");
+
+  const previousScrollTop = usageHistoryList.scrollTop;
+  usageHistoryList.replaceChildren();
+  if (usageHistoryItems.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "usage-history-empty";
+    empty.textContent = usageHistoryError
+      ? usageHistoryError
+      : usageHistoryLoading ? "正在读取成功请求记录…" : "当前时间范围内没有成功请求";
+    usageHistoryList.append(empty);
+  } else {
+    for (const item of usageHistoryItems) {
+      const row = document.createElement("li");
+      row.className = "usage-history-item";
+      const top = document.createElement("div");
+      top.className = "usage-history-item-top";
+      const recordedAt = document.createElement("time");
+      recordedAt.className = "usage-history-time";
+      recordedAt.dateTime = new Date(Number(item.recorded_at)).toISOString();
+      recordedAt.textContent = formatRetryTime(item.recorded_at);
+      const model = document.createElement("strong");
+      model.className = "usage-history-model";
+      model.textContent = item.model || "unknown";
+      model.title = item.model || "unknown";
+      const total = document.createElement("strong");
+      total.className = "usage-history-total";
+      total.textContent = `${formatTokenCount(item.total_tokens)} Token`;
+      top.append(recordedAt, model, total);
+
+      const detail = document.createElement("div");
+      detail.className = "usage-history-detail";
+      for (const text of [
+        `输入 ${formatTokenCount(item.input_tokens)}`,
+        `输出 ${formatTokenCount(item.output_tokens)}`,
+        Number(item.cached_tokens || 0) > 0
+          ? `缓存 ${formatTokenCount(item.cached_tokens)}`
+          : null,
+        Number(item.reasoning_tokens || 0) > 0
+          ? `推理 ${formatTokenCount(item.reasoning_tokens)}`
+          : null,
+      ].filter(Boolean)) {
+        detail.append(Object.assign(document.createElement("span"), { textContent: text }));
+      }
+      const source = document.createElement("span");
+      source.className = `usage-source-badge${item.usage_source === "estimated" ? " estimated" : ""}`;
+      source.textContent = usageSourceLabel(item);
+      if (item.usage_source === "estimated" && item.estimate_method) {
+        source.title = `本地估算 · ${item.estimate_method}`;
+      }
+      detail.append(source);
+      row.append(top, detail);
+      usageHistoryList.append(row);
+    }
+  }
+  if (previousScrollTop > 0) usageHistoryList.scrollTop = previousScrollTop;
+  usageHistoryMore.hidden = usageHistoryItems.length === 0
+    || (!usageHistoryNextCursor && !usageHistoryLoading);
+  usageHistoryMore.disabled = usageHistoryLoading;
+  usageHistoryMore.textContent = usageHistoryLoading ? "正在加载…" : "加载更早记录";
+}
+
+async function readUsageHistory({ reset = false } = {}) {
+  if (!usageHistoryProvider || !usageHistoryPopover.classList.contains("show")) return;
+  if (usageHistoryLoading && !reset) return;
+  if (!reset && !usageHistoryNextCursor) return;
+  const providerId = usageHistoryProvider.provider_id;
+  const selectedWindow = usageHistoryWindow;
+  const cursor = reset ? null : usageHistoryNextCursor;
+  const requestSequence = ++usageHistoryRequestSequence;
+  usageHistoryLoading = true;
+  usageHistoryError = null;
+  if (reset) {
+    usageHistoryItems = [];
+    usageHistoryTotals = null;
+    usageHistoryNextCursor = null;
+    usageHistoryTotalCount = 0;
+  }
+  renderUsageHistoryPopover();
+  try {
+    const params = new URLSearchParams({
+      provider_id: providerId,
+      usage_window: selectedWindow,
+    });
+    if (cursor) params.set("cursor", cursor);
+    const response = await fetch(`/control/api/usage-history?${params}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(await responseDetail(response, "无法读取成功请求记录"));
+    const result = await response.json();
+    if (
+      requestSequence !== usageHistoryRequestSequence
+      || usageHistoryProvider?.provider_id !== providerId
+      || usageHistoryWindow !== selectedWindow
+    ) return;
+    usageHistoryItems = reset
+      ? Array.isArray(result.items) ? result.items : []
+      : [...usageHistoryItems, ...(Array.isArray(result.items) ? result.items : [])];
+    usageHistoryNextCursor = result.next_cursor || null;
+    usageHistoryTotalCount = Number(result.total_count || 0);
+    usageHistoryTotals = result.total && typeof result.total === "object"
+      ? result.total
+      : null;
+  } catch (error) {
+    if (requestSequence === usageHistoryRequestSequence) {
+      usageHistoryError = error?.message || "无法读取成功请求记录";
+    }
+  } finally {
+    if (requestSequence === usageHistoryRequestSequence) {
+      usageHistoryLoading = false;
+      renderUsageHistoryPopover();
+      positionUsageHistoryPopover();
+    }
+  }
+}
+
+function closeUsageHistoryPopover() {
+  if (usageHistoryButton) usageHistoryButton.setAttribute("aria-expanded", "false");
+  usageHistoryButton = null;
+  usageHistoryProvider = null;
+  usageHistoryItems = [];
+  usageHistoryTotals = null;
+  usageHistoryNextCursor = null;
+  usageHistoryTotalCount = 0;
+  usageHistoryLoading = false;
+  usageHistoryError = null;
+  usageHistoryRequestSequence += 1;
+  usageHistoryPopover.classList.remove("show");
+}
+
+function openUsageHistoryPopover(button, provider) {
+  if (
+    usageHistoryProvider?.provider_id === provider.provider_id
+    && usageHistoryPopover.classList.contains("show")
+  ) {
+    closeUsageHistoryPopover();
+    return;
+  }
+  closeProviderHealthPopover();
+  hideRecoveryDetails({ force: true });
+  hideHistoryDetail({ force: true });
+  if (usageHistoryButton) usageHistoryButton.setAttribute("aria-expanded", "false");
+  usageHistoryButton = button;
+  usageHistoryProvider = provider;
+  usageHistoryWindow = usageWindow.value;
+  usageHistoryItems = [];
+  usageHistoryTotals = null;
+  usageHistoryNextCursor = null;
+  usageHistoryTotalCount = 0;
+  usageHistoryError = null;
+  button.setAttribute("aria-expanded", "true");
+  usageHistoryPopover.classList.add("show");
+  renderUsageHistoryPopover();
+  positionUsageHistoryPopover();
+  void readUsageHistory({ reset: true });
+}
+
 function providerUsage(providerId) {
   return latestStatus?.usage?.by_provider?.[providerId] || {
+    request_count: 0,
     input_tokens: 0,
     output_tokens: 0,
     total_tokens: 0,
     cached_tokens: 0,
     estimated_requests: 0,
+    last_success_at: null,
   };
 }
 
@@ -848,6 +1138,7 @@ function positionProviderHealthPopover() {
 }
 
 function openProviderHealthPopover(button, provider, providerHealth) {
+  closeUsageHistoryPopover();
   hideHistoryDetail({ force: true });
   if (healthDetailButton === button && providerHealthPopover.classList.contains("show")) {
     closeProviderHealthPopover();
@@ -932,14 +1223,18 @@ function renderProviderList() {
       provider.has_credentials,
       provider.active_requests,
       provider.hidden,
+      providerUsage(provider.provider_id).request_count,
       providerUsage(provider.provider_id).total_tokens,
       providerUsage(provider.provider_id).estimated_requests,
+      providerUsage(provider.provider_id).last_success_at,
       healthStatusForProvider(provider)?.last_checked,
     ]),
   ]);
   if (signature === renderedListSignature) return;
   renderedListSignature = signature;
   closeProviderHealthPopover();
+  const openUsageProviderId = usageHistoryProvider?.provider_id || null;
+  usageHistoryButton = null;
   const providers = latestStatus.providers.filter((provider) => {
     if (provider.hidden && !manageProvidersMode) return false;
     return `${provider.name} ${provider.endpoint}`.toLocaleLowerCase().includes(query);
@@ -1010,23 +1305,58 @@ function renderProviderList() {
       healthCell.append(toggle);
     }
 
-    const tokenCell = document.createElement("span");
+    const tokenCell = document.createElement(manageProvidersMode ? "span" : "button");
     tokenCell.className = "provider-token-cell";
+    if (!manageProvidersMode) {
+      tokenCell.type = "button";
+      tokenCell.disabled = Number(usage.request_count || 0) === 0;
+      tokenCell.setAttribute("aria-label", `查看 ${provider.name} 的成功请求记录`);
+      tokenCell.setAttribute("aria-controls", "usage-history-popover");
+      tokenCell.setAttribute("aria-expanded", String(openUsageProviderId === provider.provider_id));
+      tokenCell.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openUsageHistoryPopover(tokenCell, provider);
+      });
+      if (openUsageProviderId === provider.provider_id) {
+        usageHistoryButton = tokenCell;
+        usageHistoryProvider = provider;
+      }
+    }
     if (Number(usage.total_tokens || 0) > 0) {
       const tokenValue = document.createElement("strong");
       tokenValue.className = "provider-token-value";
       tokenValue.textContent = formatTokenCount(usage.total_tokens);
       const tokenUnit = document.createElement("span");
       tokenUnit.className = "provider-token-unit";
-      tokenUnit.textContent = "Token";
+      tokenUnit.textContent = usage.last_success_at
+        ? `最近 ${formatRetryTime(usage.last_success_at)}`
+        : "Token";
       tokenCell.append(tokenValue, tokenUnit);
     } else {
       const tokenZero = document.createElement("span");
       tokenZero.className = "provider-token-zero";
       tokenZero.textContent = "—";
       tokenCell.append(tokenZero);
+      if (usage.last_success_at) {
+        const tokenUnit = document.createElement("span");
+        tokenUnit.className = "provider-token-unit";
+        tokenUnit.textContent = `最近 ${formatRetryTime(usage.last_success_at)}`;
+        tokenCell.append(tokenUnit);
+      }
     }
-    if (usage.estimated_requests > 0) tokenCell.title = `含 ${usage.estimated_requests} 个估算请求`;
+    if (!manageProvidersMode && Number(usage.request_count || 0) > 0) {
+      const detailIcon = document.createElement("span");
+      detailIcon.className = "provider-token-detail-icon";
+      detailIcon.textContent = "i";
+      detailIcon.setAttribute("aria-hidden", "true");
+      tokenCell.append(detailIcon);
+    }
+    const tokenNotes = [];
+    if (!manageProvidersMode && Number(usage.request_count || 0) > 0) {
+      tokenNotes.push("点击查看成功请求记录");
+    }
+    if (usage.estimated_requests > 0) tokenNotes.push(`含 ${usage.estimated_requests} 个估算请求`);
+    tokenCell.title = tokenNotes.join(" · ");
 
     const meta = document.createElement("span");
     meta.className = "provider-meta";
@@ -1083,6 +1413,21 @@ function renderProviderList() {
       saveProviderOrder([...providerList.children].map((item) => item.dataset.providerId));
     });
     providerList.append(row);
+  }
+  if (usageHistoryPopover.classList.contains("show")) {
+    if (!usageHistoryButton) {
+      closeUsageHistoryPopover();
+    } else {
+      usageHistoryButton.setAttribute("aria-expanded", "true");
+      positionUsageHistoryPopover();
+      const latestSuccess = Number(
+        providerUsage(usageHistoryProvider.provider_id).last_success_at || 0,
+      );
+      const loadedLatest = Number(usageHistoryItems[0]?.recorded_at || 0);
+      if (!usageHistoryLoading && latestSuccess > loadedLatest) {
+        void readUsageHistory({ reset: true });
+      }
+    }
   }
   emptyState.hidden = providers.length > 0;
   const visibleCount = latestStatus.providers.filter((provider) => !provider.hidden).length;
@@ -1530,6 +1875,7 @@ async function shutdownProxy() {
 
 searchInput.addEventListener("input", renderProviderList);
 usageWindow.addEventListener("change", () => {
+  closeUsageHistoryPopover();
   renderedListSignature = null;
   readStatus();
 });
@@ -1554,6 +1900,19 @@ runtimeForm.addEventListener("submit", saveRuntimeSettings);
 document.querySelector("#validate-database").addEventListener("click", validateRuntimeDatabase);
 document.querySelector("#test-health-url").addEventListener("click", testRuntimeHealthUrl);
 document.querySelector("#copy-data-directory").addEventListener("click", copyDataDirectory);
+usageHistoryClose.addEventListener("click", closeUsageHistoryPopover);
+usageHistoryMore.addEventListener("click", () => void readUsageHistory());
+usageHistoryList.addEventListener("scroll", () => {
+  const remaining = usageHistoryList.scrollHeight
+    - usageHistoryList.scrollTop
+    - usageHistoryList.clientHeight;
+  if (remaining < 48 && usageHistoryNextCursor && !usageHistoryLoading) {
+    void readUsageHistory();
+  }
+});
+providerList.addEventListener("scroll", () => {
+  if (usageHistoryPopover.classList.contains("show")) positionUsageHistoryPopover();
+}, { passive: true });
 recoveryDetailsButton.addEventListener("click", () => {
   if (recoveryDetailsPinned) {
     hideRecoveryDetails({ force: true });
@@ -1567,6 +1926,18 @@ recoveryDetailsButton.addEventListener("focus", () => showRecoveryDetails());
 recoveryDetailsButton.addEventListener("blur", scheduleRecoveryDetailsHide);
 recoveryPopover.addEventListener("mouseenter", () => window.clearTimeout(recoveryHideTimer));
 recoveryPopover.addEventListener("mouseleave", scheduleRecoveryDetailsHide);
+recoveryErrorList.addEventListener("scroll", () => {
+  const remaining = recoveryErrorList.scrollHeight
+    - recoveryErrorList.scrollTop
+    - recoveryErrorList.clientHeight;
+  if (
+    remaining < 48
+    && latestRecoveryHistory?.next_cursor
+    && !recoveryHistoryRequestActive
+  ) {
+    void readRecoveryHistory({ loadMore: true });
+  }
+});
 themeButton.addEventListener("click", () => {
   setThemeMenuOpen(themeMenu.hidden);
 });
@@ -1585,6 +1956,9 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest("#provider-health-popover") && !event.target.closest(".provider-health-toggle")) {
     closeProviderHealthPopover();
   }
+  if (!event.target.closest("#usage-history-popover") && !event.target.closest(".provider-token-cell")) {
+    closeUsageHistoryPopover();
+  }
   if (!event.target.closest("#history-detail-popover") && !event.target.closest(".provider-health-history")) {
     hideHistoryDetail({ force: true });
   }
@@ -1600,6 +1974,10 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape" && historyDetailPopover.classList.contains("show")) {
     hideHistoryDetail({ force: true });
+  } else if (event.key === "Escape" && usageHistoryPopover.classList.contains("show")) {
+    const button = usageHistoryButton;
+    closeUsageHistoryPopover();
+    button?.focus();
   } else if (event.key === "Escape" && providerHealthPopover.classList.contains("show")) {
     const button = healthDetailButton;
     closeProviderHealthPopover();
@@ -1609,6 +1987,7 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("resize", () => {
   if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
   if (providerHealthPopover.classList.contains("show")) positionProviderHealthPopover();
+  if (usageHistoryPopover.classList.contains("show")) positionUsageHistoryPopover();
   hideHistoryDetail({ force: true });
 });
 themeMedia.addEventListener("change", () => {

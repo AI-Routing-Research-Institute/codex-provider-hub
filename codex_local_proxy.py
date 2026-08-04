@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import email.utils
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -45,6 +46,7 @@ HTML_ERROR_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 RECOVERY_HISTORY_HOURS = 24
 RECOVERY_HISTORY_API_LIMIT = 500
 RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
+USAGE_HISTORY_PAGE_LIMIT = 50
 SSE_RETRY_PREFLIGHT_BYTES = 256 * 1024
 USAGE_RESPONSE_BUFFER_BYTES = 8 * 1024 * 1024
 USAGE_WINDOWS = {"today", "24h", "7d", "30d", "all"}
@@ -144,12 +146,26 @@ class UsageStore:
                     reasoning_tokens INTEGER NOT NULL,
                     usage_source TEXT NOT NULL,
                     estimate_method TEXT,
-                    status_code INTEGER NOT NULL
+                    status_code INTEGER NOT NULL,
+                    succeeded INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS request_usage_recorded_at
                     ON request_usage(recorded_at);
                 CREATE INDEX IF NOT EXISTS request_usage_provider_time
                     ON request_usage(provider_id, recorded_at);
+                """
+            )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(request_usage)")
+            }
+            if "succeeded" not in columns:
+                connection.execute("ALTER TABLE request_usage ADD COLUMN succeeded INTEGER")
+            connection.execute(
+                """
+                UPDATE request_usage
+                SET succeeded = CASE WHEN status_code BETWEEN 200 AND 299 THEN 1 ELSE 0 END
+                WHERE succeeded IS NULL
                 """
             )
 
@@ -161,8 +177,10 @@ class UsageStore:
         usage: TokenUsage,
         status_code: int,
         recorded_at: float | None = None,
+        successful: bool | None = None,
     ) -> None:
         timestamp = time.time() if recorded_at is None else float(recorded_at)
+        status = int(status_code)
         values = (
             timestamp,
             provider_id,
@@ -174,7 +192,8 @@ class UsageStore:
             max(0, usage.reasoning_tokens),
             usage.source,
             usage.estimate_method,
-            int(status_code),
+            status,
+            int(200 <= status < 300 if successful is None else bool(successful)),
         )
         with self._lock, closing(self._connect()) as connection, connection:
             connection.execute(
@@ -182,8 +201,8 @@ class UsageStore:
                 INSERT INTO request_usage (
                     recorded_at, provider_id, model, input_tokens, output_tokens,
                     total_tokens, cached_tokens, reasoning_tokens, usage_source,
-                    estimate_method, status_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimate_method, status_code, succeeded
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -204,7 +223,9 @@ class UsageStore:
             COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
             COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
             COALESCE(SUM(CASE WHEN usage_source = 'estimated' THEN 1 ELSE 0 END), 0)
-                AS estimated_requests
+                AS estimated_requests,
+            MAX(CASE WHEN succeeded = 1 THEN recorded_at END)
+                AS last_success_at
         """
         with self._lock, closing(self._connect()) as connection:
             connection.row_factory = sqlite3.Row
@@ -226,6 +247,106 @@ class UsageStore:
             "by_provider": {
                 str(row["provider_id"]): _usage_summary_row(row) for row in rows
             },
+        }
+
+    def history(
+        self,
+        *,
+        provider_id: str,
+        window: str,
+        cursor: str | None = None,
+        limit: int = USAGE_HISTORY_PAGE_LIMIT,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        normalized = window.strip().lower()
+        if normalized not in USAGE_WINDOWS:
+            raise ValueError("不支持的 Token 统计时间范围")
+        timestamp = time.time() if now is None else float(now)
+        cutoff = _usage_window_cutoff(normalized, timestamp)
+        bounded_limit = max(1, min(int(limit), USAGE_HISTORY_PAGE_LIMIT))
+        clauses = ["provider_id = ?", "succeeded = 1"]
+        params: list[Any] = [str(provider_id)]
+        if cutoff is not None:
+            clauses.append("recorded_at >= ?")
+            params.append(cutoff)
+        count_clauses = list(clauses)
+        count_params = list(params)
+        if cursor:
+            try:
+                cursor_time_hex, cursor_id_text = cursor.rsplit("@", 1)
+                cursor_time = float.fromhex(cursor_time_hex)
+                cursor_id = int(cursor_id_text)
+                if not math.isfinite(cursor_time) or cursor_id < 0:
+                    raise ValueError
+            except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+                raise ValueError("成功请求游标无效") from exc
+            clauses.append("(recorded_at < ? OR (recorded_at = ? AND id < ?))")
+            params.extend((cursor_time, cursor_time, cursor_id))
+        where = " AND ".join(clauses)
+        count_where = " AND ".join(count_clauses)
+        with self._lock, closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            total = connection.execute(
+                f"""
+                SELECT COUNT(*) AS request_count,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                       COALESCE(SUM(CASE WHEN usage_source = 'estimated' THEN 1 ELSE 0 END), 0)
+                           AS estimated_requests,
+                       MAX(recorded_at) AS last_success_at
+                FROM request_usage
+                WHERE {count_where}
+                """,
+                count_params,
+            ).fetchone()
+            total_count = int(total["request_count"])
+            rows = connection.execute(
+                f"""
+                SELECT id, recorded_at, model, input_tokens, output_tokens,
+                       total_tokens, cached_tokens, reasoning_tokens,
+                       usage_source, estimate_method, status_code
+                FROM request_usage
+                WHERE {where}
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, bounded_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > bounded_limit
+        visible_rows = rows[:bounded_limit]
+        last_row = visible_rows[-1] if has_more and visible_rows else None
+        return {
+            "window": normalized,
+            "provider_id": str(provider_id),
+            "total_count": total_count,
+            "total": _usage_summary_row(total),
+            "items": [
+                {
+                    "recorded_at": round(float(row["recorded_at"]) * 1000),
+                    "model": str(row["model"]),
+                    "input_tokens": int(row["input_tokens"]),
+                    "output_tokens": int(row["output_tokens"]),
+                    "total_tokens": int(row["total_tokens"]),
+                    "cached_tokens": int(row["cached_tokens"]),
+                    "reasoning_tokens": int(row["reasoning_tokens"]),
+                    "usage_source": str(row["usage_source"]),
+                    "estimate_method": (
+                        None
+                        if row["estimate_method"] is None
+                        else str(row["estimate_method"])
+                    ),
+                    "status_code": int(row["status_code"]),
+                }
+                for row in visible_rows
+            ],
+            "next_cursor": (
+                None
+                if last_row is None
+                else f"{float(last_row['recorded_at']).hex()}@{int(last_row['id'])}"
+            ),
         }
 
 
@@ -252,6 +373,7 @@ class RecoveryHistoryStore:
                 CREATE TABLE IF NOT EXISTS recovery_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     recorded_at REAL NOT NULL,
+                    request_started_at REAL,
                     request_id INTEGER NOT NULL,
                     provider_id TEXT NOT NULL,
                     attempt INTEGER NOT NULL,
@@ -268,6 +390,14 @@ class RecoveryHistoryStore:
                     ON recovery_events(provider_id, recorded_at);
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(recovery_events)")
+            }
+            if "request_started_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE recovery_events ADD COLUMN request_started_at REAL"
+                )
             self._delete_expired(connection, time.time())
 
     def record(
@@ -283,10 +413,12 @@ class RecoveryHistoryStore:
         stage: str,
         outcome: str,
         recorded_at: float | None = None,
+        request_started_at: float | None = None,
     ) -> None:
         timestamp = time.time() if recorded_at is None else float(recorded_at)
         values = (
             timestamp,
+            None if request_started_at is None else float(request_started_at),
             max(0, int(request_id)),
             str(provider_id),
             max(1, int(attempt)),
@@ -301,9 +433,9 @@ class RecoveryHistoryStore:
             connection.execute(
                 """
                 INSERT INTO recovery_events (
-                    recorded_at, request_id, provider_id, attempt, max_attempts,
-                    delay_seconds, kind, summary, stage, outcome
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    recorded_at, request_started_at, request_id, provider_id,
+                    attempt, max_attempts, delay_seconds, kind, summary, stage, outcome
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -314,10 +446,25 @@ class RecoveryHistoryStore:
         *,
         now: float | None = None,
         limit: int = RECOVERY_HISTORY_API_LIMIT,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         timestamp = time.time() if now is None else float(now)
         cutoff = timestamp - RECOVERY_HISTORY_HOURS * 3600
         bounded_limit = max(1, min(int(limit), RECOVERY_HISTORY_API_LIMIT))
+        clauses = ["recorded_at >= ?"]
+        params: list[Any] = [cutoff]
+        if cursor:
+            try:
+                cursor_time_hex, cursor_id_text = cursor.rsplit("@", 1)
+                cursor_time = float.fromhex(cursor_time_hex)
+                cursor_id = int(cursor_id_text)
+                if not math.isfinite(cursor_time) or cursor_id < 0:
+                    raise ValueError
+            except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+                raise ValueError("恢复记录游标无效") from exc
+            clauses.append("(recorded_at < ? OR (recorded_at = ? AND id < ?))")
+            params.extend((cursor_time, cursor_time, cursor_id))
+        where = " AND ".join(clauses)
         with self._lock, closing(self._connect()) as connection:
             connection.row_factory = sqlite3.Row
             if self._cleanup_due(timestamp):
@@ -330,20 +477,23 @@ class RecoveryHistoryStore:
                 ).fetchone()[0]
             )
             rows = connection.execute(
-                """
-                SELECT recorded_at, request_id, provider_id, attempt, max_attempts,
-                       delay_seconds, kind, summary, stage, outcome
+                f"""
+                SELECT id, recorded_at, request_started_at, request_id, provider_id,
+                       attempt, max_attempts, delay_seconds, kind, summary, stage, outcome
                 FROM recovery_events
-                WHERE recorded_at >= ?
+                WHERE {where}
                 ORDER BY recorded_at DESC, id DESC
                 LIMIT ?
                 """,
-                (cutoff, bounded_limit),
+                (*params, bounded_limit + 1),
             ).fetchall()
+        has_more = len(rows) > bounded_limit
+        visible_rows = rows[:bounded_limit]
+        last_row = visible_rows[-1] if has_more and visible_rows else None
         return {
             "window_hours": RECOVERY_HISTORY_HOURS,
             "total_count": total_count,
-            "truncated": total_count > len(rows),
+            "truncated": has_more,
             "items": [
                 {
                     "request_id": int(row["request_id"]),
@@ -360,9 +510,19 @@ class RecoveryHistoryStore:
                     "stage": str(row["stage"]),
                     "outcome": str(row["outcome"]),
                     "recorded_at": round(float(row["recorded_at"]) * 1000),
+                    "request_started_at": (
+                        None
+                        if row["request_started_at"] is None
+                        else round(float(row["request_started_at"]) * 1000)
+                    ),
                 }
-                for row in rows
+                for row in visible_rows
             ],
+            "next_cursor": (
+                None
+                if last_row is None
+                else f"{float(last_row['recorded_at']).hex()}@{int(last_row['id'])}"
+            ),
         }
 
     def _cleanup_due(self, now: float) -> bool:
@@ -385,7 +545,7 @@ class RecoveryHistoryStore:
         self._last_cleanup_at = now
 
 
-def _usage_summary_row(row: sqlite3.Row | None) -> dict[str, int]:
+def _usage_summary_row(row: sqlite3.Row | None) -> dict[str, Any]:
     fields = (
         "request_count",
         "input_tokens",
@@ -395,7 +555,15 @@ def _usage_summary_row(row: sqlite3.Row | None) -> dict[str, int]:
         "reasoning_tokens",
         "estimated_requests",
     )
-    return {field: int(row[field] or 0) if row is not None else 0 for field in fields}
+    summary: dict[str, Any] = {
+        field: int(row[field] or 0) if row is not None else 0 for field in fields
+    }
+    summary["last_success_at"] = (
+        None
+        if row is None or row["last_success_at"] is None
+        else round(float(row["last_success_at"]) * 1000)
+    )
+    return summary
 
 
 def _usage_window_cutoff(window: str, now: float) -> float | None:
@@ -705,6 +873,7 @@ class RouteSnapshot:
     request_id: int
     provider: ProxyProvider
     started_at: float
+    started_wall_at: float
 
 
 @dataclass(frozen=True)
@@ -741,6 +910,7 @@ class RetryErrorRecord:
     kind: str
     summary: str
     recorded_at: float
+    request_started_at: float
 
 
 @dataclass(frozen=True)
@@ -937,6 +1107,7 @@ class ProviderRouter:
                 request_id=self._request_sequence,
                 provider=provider,
                 started_at=time.monotonic(),
+                started_wall_at=time.time(),
             )
 
     def route_retry_to_current(
@@ -972,6 +1143,7 @@ class ProviderRouter:
                     request_id=snapshot.request_id,
                     provider=provider,
                     started_at=snapshot.started_at,
+                    started_wall_at=snapshot.started_wall_at,
                 ),
                 True,
             )
@@ -1024,6 +1196,7 @@ class ProviderRouter:
                     kind=kind,
                     summary=summary,
                     recorded_at=time.time(),
+                    request_started_at=snapshot.started_wall_at,
                 )
             )
             self._total_retries += 1
@@ -1372,17 +1545,50 @@ def create_proxy_app(
         return public_status(window)
 
     @app.get("/control/api/recovery-history", include_in_schema=False)
-    async def control_recovery_history():
+    async def control_recovery_history(request: Request):
         if recovery_history_store is None:
             history = public_status()["retry"]["history"]
         else:
             try:
-                history = recovery_history_store.history()
+                limit = int(
+                    request.query_params.get("limit", str(RECOVERY_HISTORY_API_LIMIT))
+                )
+                history = recovery_history_store.history(
+                    limit=limit,
+                    cursor=request.query_params.get("cursor"),
+                )
+            except ValueError as exc:
+                return JSONResponse(status_code=422, content={"detail": str(exc)})
             except (OSError, sqlite3.Error):
                 return JSONResponse(
                     status_code=503,
                     content={"detail": "无法读取本地恢复记录"},
                 )
+        return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
+
+    @app.get("/control/api/usage-history", include_in_schema=False)
+    async def control_usage_history(request: Request):
+        provider_id = request.query_params.get("provider_id", "").strip()
+        window = request.query_params.get("usage_window", "today").strip().lower()
+        cursor = request.query_params.get("cursor")
+        if window not in USAGE_WINDOWS:
+            return JSONResponse(status_code=422, content={"detail": "Token 统计时间范围无效"})
+        if not provider_id or not any(
+            provider.provider_id == provider_id for provider in router.providers()
+        ):
+            return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+        if usage_store is None:
+            return JSONResponse(status_code=503, content={"detail": "Token 记录功能不可用"})
+        try:
+            history = usage_store.history(
+                provider_id=provider_id,
+                window=window,
+                cursor=cursor,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取成功请求记录"})
         return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
 
     @app.post("/control/api/retry-policy", include_in_schema=False)
@@ -1629,6 +1835,7 @@ def _public_control_status(
             "stage": "before_output",
             "outcome": "retrying",
             "recorded_at": round(error.recorded_at * 1000),
+            "request_started_at": round(error.request_started_at * 1000),
         }
         for error in status.recent_retry_errors
     ]
@@ -1724,6 +1931,7 @@ def _record_recovery_event(
     try:
         store.record(
             request_id=snapshot.request_id,
+            request_started_at=snapshot.started_wall_at,
             provider_id=provider_id,
             attempt=attempt,
             max_attempts=max_attempts,
@@ -2003,8 +2211,7 @@ async def _forward_request(
         )
     failure_capture = None
     if (
-        recovery_history_store is not None
-        and retry_policy.enabled
+        (recovery_history_store is not None or usage_store is not None)
         and _is_event_stream(upstream_response)
     ):
         failure_capture = (
@@ -2016,6 +2223,7 @@ async def _forward_request(
 
     async def response_body() -> AsyncIterator[bytes]:
         stream_failure: tuple[str, str] | None = None
+        stream_completed = False
         try:
             if first_chunk is not None:
                 if usage_capture is not None:
@@ -2030,6 +2238,7 @@ async def _forward_request(
                 if failure_capture is not None:
                     failure_capture.feed(chunk)
                 yield chunk
+            stream_completed = True
         except httpx.HTTPError as exc:
             stream_failure = (
                 "stream_interrupted",
@@ -2065,6 +2274,11 @@ async def _forward_request(
                                 model=usage_capture.model,
                                 usage=usage,
                                 status_code=upstream_response.status_code,
+                                successful=(
+                                    stream_completed
+                                    and stream_failure is None
+                                    and 200 <= upstream_response.status_code < 300
+                                ),
                             )
                         except (OSError, sqlite3.Error):
                             pass
