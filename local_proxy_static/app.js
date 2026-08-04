@@ -49,6 +49,7 @@ const providerHealthPopover = document.querySelector("#provider-health-popover")
 const historyDetailPopover = document.querySelector("#history-detail-popover");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 const THEME_STORAGE_KEY = "codex-local-proxy-theme";
+const RECOVERY_HISTORY_DISPLAY_LIMIT = 500;
 
 function themePreference() {
   const value = document.documentElement.dataset.themePreference;
@@ -160,6 +161,44 @@ function sameRecoveryHistorySnapshot(left, right) {
     && Number(leftLatest || 0) === Number(rightLatest || 0);
 }
 
+function recoveryHistoryEntryKey(entry) {
+  return [
+    entry?.recorded_at,
+    entry?.request_id,
+    entry?.provider_id,
+    entry?.attempt,
+    entry?.outcome,
+  ].map((value) => String(value ?? "")).join("\u0000");
+}
+
+function recoveryHistoryForDisplay(detail, summary) {
+  if (!detail) return summary;
+  if (!summary || sameRecoveryHistorySnapshot(detail, summary)) return detail;
+  const detailItems = Array.isArray(detail.items) ? detail.items : [];
+  const summaryItems = Array.isArray(summary.items) ? summary.items : [];
+  const seen = new Set();
+  const items = [];
+  for (const entry of [...summaryItems, ...detailItems]) {
+    const key = recoveryHistoryEntryKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(entry);
+    if (items.length >= RECOVERY_HISTORY_DISPLAY_LIMIT) break;
+  }
+  const summaryTotal = Number(summary.total_count);
+  const detailTotal = Number(detail.total_count);
+  const totalCount = Number.isFinite(summaryTotal)
+    ? summaryTotal
+    : Number.isFinite(detailTotal) ? detailTotal : items.length;
+  return {
+    ...detail,
+    window_hours: Number(summary.window_hours) || Number(detail.window_hours) || 24,
+    total_count: totalCount,
+    truncated: totalCount > items.length,
+    items,
+  };
+}
+
 async function readRecoveryHistory() {
   const summary = latestStatus?.retry?.history;
   if (recoveryHistoryRequestActive || sameRecoveryHistorySnapshot(latestRecoveryHistory, summary)) return;
@@ -170,8 +209,8 @@ async function readRecoveryHistory() {
     latestRecoveryHistory = await response.json();
     if (latestStatus?.retry) renderRecoveryErrors(latestStatus.retry);
     if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
-  } catch (error) {
-    latestRecoveryHistory = null;
+  } catch {
+    // Keep the last complete snapshot instead of falling back to the one-item summary.
   } finally {
     recoveryHistoryRequestActive = false;
   }
@@ -181,13 +220,11 @@ function renderRecoveryErrors(retry) {
   const historySummary = retry.history && typeof retry.history === "object"
     ? retry.history
     : null;
-  if (
+  const historyNeedsRefresh = Boolean(
     latestRecoveryHistory
-    && !sameRecoveryHistorySnapshot(latestRecoveryHistory, historySummary)
-  ) {
-    latestRecoveryHistory = null;
-  }
-  const history = latestRecoveryHistory || historySummary;
+    && !sameRecoveryHistorySnapshot(latestRecoveryHistory, historySummary),
+  );
+  const history = recoveryHistoryForDisplay(latestRecoveryHistory, historySummary);
   const historyItems = Array.isArray(history?.items)
     ? history.items
     : Array.isArray(retry.recent_errors) ? retry.recent_errors : [];
@@ -202,6 +239,8 @@ function renderRecoveryErrors(retry) {
   recoveryHistoryMeta.textContent = history?.truncated
     ? `近 ${windowHours} 小时 · 显示最新 ${historyItems.length}/${totalCount} 条`
     : `近 ${windowHours} 小时 · ${totalCount} 条`;
+  const previousScrollTop = recoveryErrorList.scrollTop;
+  const previousScrollHeight = recoveryErrorList.scrollHeight;
   recoveryErrorList.replaceChildren();
   for (const error of historyItems) {
     const providerName = latestStatus?.providers?.find(
@@ -221,6 +260,13 @@ function renderRecoveryErrors(retry) {
     summary.textContent = error.summary || "上游临时错误";
     item.append(meta, summary);
     recoveryErrorList.append(item);
+  }
+  if (previousScrollTop > 0) {
+    recoveryErrorList.scrollTop = previousScrollTop
+      + Math.max(0, recoveryErrorList.scrollHeight - previousScrollHeight);
+  }
+  if (historyNeedsRefresh && recoveryPopover.classList.contains("show")) {
+    void readRecoveryHistory();
   }
 }
 
@@ -436,12 +482,29 @@ function normalizeProviderEndpoint(value) {
   }
 }
 
+function providerEndpointsMatch(left, right) {
+  const normalizedLeft = normalizeProviderEndpoint(left);
+  const normalizedRight = normalizeProviderEndpoint(right);
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+  const shorter = normalizedLeft.length < normalizedRight.length
+    ? normalizedLeft
+    : normalizedRight;
+  const longer = shorter === normalizedLeft ? normalizedRight : normalizedLeft;
+  return longer.startsWith(shorter) && longer.charAt(shorter.length) === "/";
+}
+
 function healthStatusForProvider(provider) {
   if (!Array.isArray(latestHealthStatus?.providers)) return null;
   const endpoint = normalizeProviderEndpoint(provider.endpoint);
-  return latestHealthStatus.providers.find(
+  const exactMatch = latestHealthStatus.providers.find(
     (candidate) => normalizeProviderEndpoint(candidate?.base_url) === endpoint,
-  ) || null;
+  );
+  if (exactMatch) return exactMatch;
+  const prefixMatches = latestHealthStatus.providers.filter(
+    (candidate) => providerEndpointsMatch(candidate?.base_url, endpoint),
+  );
+  return prefixMatches.length === 1 ? prefixMatches[0] : null;
 }
 
 function normalizeHealthState(value) {
