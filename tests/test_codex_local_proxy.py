@@ -246,7 +246,7 @@ class UsageTests(unittest.TestCase):
             round((now - 7 * 24 * 3600 + 1) * 1000),
         )
 
-    def test_success_history_filters_failures_and_paginates(self) -> None:
+    def test_request_history_includes_failures_and_paginates(self) -> None:
         now = 2_000_000.0
         records = (
             (now - 3, 200, TokenUsage(10, 2, 12, 4, 1, source="upstream")),
@@ -297,21 +297,35 @@ class UsageTests(unittest.TestCase):
             provider_id="provider-a",
             window="all",
             cursor=first["next_cursor"],
-            limit=1,
+            limit=2,
             now=now,
         )
 
-        self.assertEqual(first["total_count"], 2)
-        self.assertEqual(first["total"]["total_tokens"], 46)
-        self.assertEqual(first["items"][0]["total_tokens"], 34)
-        self.assertEqual(first["items"][0]["usage_source"], "estimated")
-        self.assertEqual(first["items"][0]["estimate_method"], "fixture-estimator")
+        self.assertEqual(first["total_count"], 4)
+        self.assertEqual(first["total"]["total_tokens"], 168)
+        self.assertEqual(first["total"]["successful_requests"], 2)
+        self.assertEqual(first["total"]["failed_requests"], 2)
+        self.assertEqual(first["total"]["successful_tokens"], 46)
+        self.assertEqual(first["total"]["failed_tokens"], 122)
+        self.assertEqual(first["items"][0]["total_tokens"], 99)
+        self.assertFalse(first["items"][0]["succeeded"])
         self.assertIsNotNone(first["next_cursor"])
-        self.assertEqual(second["items"][0]["total_tokens"], 12)
-        self.assertIsNone(second["next_cursor"])
-        self.assertTrue(
-            all(item["status_code"] == 200 for item in first["items"] + second["items"])
+        self.assertEqual(second["items"][0]["total_tokens"], 34)
+        self.assertTrue(second["items"][0]["succeeded"])
+        self.assertEqual(second["items"][0]["usage_source"], "estimated")
+        self.assertEqual(second["items"][0]["estimate_method"], "fixture-estimator")
+        self.assertEqual(second["items"][1]["status_code"], 503)
+        self.assertFalse(second["items"][1]["succeeded"])
+        third = self.store.history(
+            provider_id="provider-a",
+            window="all",
+            cursor=second["next_cursor"],
+            limit=2,
+            now=now,
         )
+        self.assertEqual(third["items"][0]["total_tokens"], 12)
+        self.assertTrue(third["items"][0]["succeeded"])
+        self.assertIsNone(third["next_cursor"])
         with self.assertRaisesRegex(ValueError, "游标"):
             self.store.history(
                 provider_id="provider-a",
@@ -756,6 +770,13 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
             status_code=200,
         )
         usage_store.record(
+            provider_id="selected",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(18, 2, 20, cached_tokens=12),
+            status_code=200,
+            successful=False,
+        )
+        usage_store.record(
             provider_id="other",
             model="gpt-5.6-sol",
             usage=TokenUsage(20, 5, 25),
@@ -792,10 +813,15 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["cache-control"], "no-store")
-        self.assertEqual(response.json()["total_count"], 1)
-        self.assertEqual(response.json()["items"][0]["total_tokens"], 15)
-        self.assertEqual(response.json()["items"][0]["cached_tokens"], 8)
-        self.assertEqual(response.json()["total"]["total_tokens"], 15)
+        self.assertEqual(response.json()["total_count"], 2)
+        self.assertEqual(response.json()["items"][0]["total_tokens"], 20)
+        self.assertEqual(response.json()["items"][0]["cached_tokens"], 12)
+        self.assertFalse(response.json()["items"][0]["succeeded"])
+        self.assertEqual(response.json()["items"][1]["total_tokens"], 15)
+        self.assertTrue(response.json()["items"][1]["succeeded"])
+        self.assertEqual(response.json()["total"]["total_tokens"], 35)
+        self.assertEqual(response.json()["total"]["successful_tokens"], 15)
+        self.assertEqual(response.json()["total"]["failed_tokens"], 20)
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(invalid_cursor.status_code, 422)
 
@@ -1760,8 +1786,12 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         usage_summary = usage_store.summary("all")
         usage_history = usage_store.history(provider_id="selected", window="all")
         self.assertEqual(usage_summary["total"]["request_count"], 1)
+        self.assertEqual(usage_summary["total"]["successful_requests"], 0)
+        self.assertEqual(usage_summary["total"]["failed_requests"], 1)
         self.assertIsNone(usage_summary["by_provider"]["selected"]["last_success_at"])
-        self.assertEqual(usage_history["total_count"], 0)
+        self.assertEqual(usage_history["total_count"], 1)
+        self.assertFalse(usage_history["items"][0]["succeeded"])
+        self.assertEqual(usage_history["items"][0]["status_code"], 200)
 
     async def test_embedded_upstream_failure_before_output_is_retried(self) -> None:
         attempts = 0
@@ -2126,8 +2156,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("~/.codex-local-proxy/", page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=16", page.text)
-        self.assertIn("app.js?v=18", page.text)
+        self.assertIn("styles.css?v=17", page.text)
+        self.assertIn("app.js?v=19", page.text)
         self.assertIn('id="usage-history-popover"', page.text)
         self.assertIn('id="recovery-history-meta"', page.text)
         self.assertIn("selectProvider", script.text)
@@ -2140,7 +2170,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("provider-token-cell", script.text)
         self.assertIn("openUsageHistoryPopover", script.text)
         self.assertIn("/control/api/usage-history", script.text)
-        self.assertIn("成功请求记录", script.text)
+        self.assertIn("请求记录", script.text)
+        self.assertIn("流级失败", script.text)
         self.assertIn("healthStatusUrl", script.text)
         self.assertNotIn("HEALTH_STATUS_URL", script.text)
         self.assertIn("normalizeProviderEndpoint", script.text)
