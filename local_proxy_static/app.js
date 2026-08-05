@@ -571,19 +571,42 @@ function usageSourceLabel(item) {
   return item?.usage_source === "estimated" ? "估算" : "上游";
 }
 
+function usageStatusLabel(item) {
+  if (item?.succeeded === true) return "成功";
+  const statusCode = Number(item?.status_code || 0);
+  if (statusCode >= 200 && statusCode < 300) return "流级失败";
+  return statusCode > 0 ? `HTTP ${statusCode} 失败` : "失败";
+}
+
+function usageHistoryMetaText(windowValue, totalCount, usage) {
+  const failedCount = Number(usage?.failed_requests || 0);
+  return [
+    usageWindowLabel(windowValue),
+    `${Number(totalCount || 0)} 条`,
+    failedCount > 0 ? `${failedCount} 条失败` : null,
+  ].filter(Boolean).join(" · ");
+}
+
 function renderUsageHistoryPopover() {
   if (!usageHistoryProvider) return;
   const usage = usageHistoryTotals || providerUsage(usageHistoryProvider.provider_id);
-  usageHistoryTitle.textContent = `${usageHistoryProvider.name} · 成功请求`;
-  usageHistoryMeta.textContent = `${usageWindowLabel(usageHistoryWindow)} · ${usageHistoryTotalCount} 条`;
-  usageHistorySummary.textContent = [
-    `总计 ${formatTokenCount(usage.total_tokens)} Token`,
-    `输入 ${formatTokenCount(usage.input_tokens)}`,
-    `输出 ${formatTokenCount(usage.output_tokens)}`,
-    Number(usage.cached_tokens || 0) > 0
-      ? `缓存 ${formatTokenCount(usage.cached_tokens)}`
-      : null,
-  ].filter(Boolean).join(" · ");
+  usageHistoryTitle.textContent = `${usageHistoryProvider.name} · 请求记录`;
+  usageHistoryMeta.textContent = usageHistoryMetaText(
+    usageHistoryWindow,
+    usageHistoryTotalCount,
+    usage,
+  );
+  usageHistorySummary.replaceChildren();
+  for (const [label, value, tone, suffix] of [
+    ["总计", usage.total_tokens, "total", " Token"],
+    ["成功", usage.successful_tokens, "success", ""],
+    ["失败/中断", usage.failed_tokens, "failed", ""],
+  ]) {
+    const summaryItem = document.createElement("span");
+    summaryItem.className = `usage-history-summary-item ${tone}`;
+    summaryItem.textContent = `${label} ${formatTokenCount(value)}${suffix}`;
+    usageHistorySummary.append(summaryItem);
+  }
 
   const previousScrollTop = usageHistoryList.scrollTop;
   usageHistoryList.replaceChildren();
@@ -592,12 +615,13 @@ function renderUsageHistoryPopover() {
     empty.className = "usage-history-empty";
     empty.textContent = usageHistoryError
       ? usageHistoryError
-      : usageHistoryLoading ? "正在读取成功请求记录…" : "当前时间范围内没有成功请求";
+      : usageHistoryLoading ? "正在读取请求记录…" : "当前时间范围内没有请求记录";
     usageHistoryList.append(empty);
   } else {
     for (const item of usageHistoryItems) {
+      const succeeded = item.succeeded === true;
       const row = document.createElement("li");
-      row.className = "usage-history-item";
+      row.className = `usage-history-item ${succeeded ? "succeeded" : "failed"}`;
       const top = document.createElement("div");
       top.className = "usage-history-item-top";
       const recordedAt = document.createElement("time");
@@ -627,6 +651,10 @@ function renderUsageHistoryPopover() {
       ].filter(Boolean)) {
         detail.append(Object.assign(document.createElement("span"), { textContent: text }));
       }
+      const status = document.createElement("span");
+      status.className = `usage-status-badge ${succeeded ? "succeeded" : "failed"}`;
+      status.textContent = usageStatusLabel(item);
+      detail.append(status);
       const source = document.createElement("span");
       source.className = `usage-source-badge${item.usage_source === "estimated" ? " estimated" : ""}`;
       source.textContent = usageSourceLabel(item);
@@ -669,7 +697,7 @@ async function readUsageHistory({ reset = false } = {}) {
     });
     if (cursor) params.set("cursor", cursor);
     const response = await fetch(`/control/api/usage-history?${params}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(await responseDetail(response, "无法读取成功请求记录"));
+    if (!response.ok) throw new Error(await responseDetail(response, "无法读取请求记录"));
     const result = await response.json();
     if (
       requestSequence !== usageHistoryRequestSequence
@@ -686,7 +714,7 @@ async function readUsageHistory({ reset = false } = {}) {
       : null;
   } catch (error) {
     if (requestSequence === usageHistoryRequestSequence) {
-      usageHistoryError = error?.message || "无法读取成功请求记录";
+      usageHistoryError = error?.message || "无法读取请求记录";
     }
   } finally {
     if (requestSequence === usageHistoryRequestSequence) {
@@ -746,6 +774,11 @@ function providerUsage(providerId) {
     total_tokens: 0,
     cached_tokens: 0,
     estimated_requests: 0,
+    successful_requests: 0,
+    failed_requests: 0,
+    successful_tokens: 0,
+    failed_tokens: 0,
+    last_request_at: null,
     last_success_at: null,
   };
 }
@@ -1226,6 +1259,8 @@ function renderProviderList() {
       providerUsage(provider.provider_id).request_count,
       providerUsage(provider.provider_id).total_tokens,
       providerUsage(provider.provider_id).estimated_requests,
+      providerUsage(provider.provider_id).failed_requests,
+      providerUsage(provider.provider_id).last_request_at,
       providerUsage(provider.provider_id).last_success_at,
       healthStatusForProvider(provider)?.last_checked,
     ]),
@@ -1310,7 +1345,7 @@ function renderProviderList() {
     if (!manageProvidersMode) {
       tokenCell.type = "button";
       tokenCell.disabled = Number(usage.request_count || 0) === 0;
-      tokenCell.setAttribute("aria-label", `查看 ${provider.name} 的成功请求记录`);
+      tokenCell.setAttribute("aria-label", `查看 ${provider.name} 的请求记录`);
       tokenCell.setAttribute("aria-controls", "usage-history-popover");
       tokenCell.setAttribute("aria-expanded", String(openUsageProviderId === provider.provider_id));
       tokenCell.addEventListener("click", (event) => {
@@ -1328,8 +1363,9 @@ function renderProviderList() {
       tokenValue.textContent = formatTokenCount(usage.total_tokens);
       const tokenUnit = document.createElement("span");
       tokenUnit.className = "provider-token-unit";
-      tokenUnit.textContent = usage.last_success_at
-        ? `最近 ${formatRetryTime(usage.last_success_at)}`
+      const latestUsageAt = usage.last_request_at || usage.last_success_at;
+      tokenUnit.textContent = latestUsageAt
+        ? `最近 ${formatRetryTime(latestUsageAt)}`
         : "Token";
       tokenCell.append(tokenValue, tokenUnit);
     } else {
@@ -1337,10 +1373,11 @@ function renderProviderList() {
       tokenZero.className = "provider-token-zero";
       tokenZero.textContent = "—";
       tokenCell.append(tokenZero);
-      if (usage.last_success_at) {
+      const latestUsageAt = usage.last_request_at || usage.last_success_at;
+      if (latestUsageAt) {
         const tokenUnit = document.createElement("span");
         tokenUnit.className = "provider-token-unit";
-        tokenUnit.textContent = `最近 ${formatRetryTime(usage.last_success_at)}`;
+        tokenUnit.textContent = `最近 ${formatRetryTime(latestUsageAt)}`;
         tokenCell.append(tokenUnit);
       }
     }
@@ -1353,7 +1390,7 @@ function renderProviderList() {
     }
     const tokenNotes = [];
     if (!manageProvidersMode && Number(usage.request_count || 0) > 0) {
-      tokenNotes.push("点击查看成功请求记录");
+      tokenNotes.push("点击查看请求记录");
     }
     if (usage.estimated_requests > 0) tokenNotes.push(`含 ${usage.estimated_requests} 个估算请求`);
     tokenCell.title = tokenNotes.join(" · ");
@@ -1420,11 +1457,13 @@ function renderProviderList() {
     } else {
       usageHistoryButton.setAttribute("aria-expanded", "true");
       positionUsageHistoryPopover();
-      const latestSuccess = Number(
-        providerUsage(usageHistoryProvider.provider_id).last_success_at || 0,
+      const latestRequest = Number(
+        providerUsage(usageHistoryProvider.provider_id).last_request_at
+          || providerUsage(usageHistoryProvider.provider_id).last_success_at
+          || 0,
       );
       const loadedLatest = Number(usageHistoryItems[0]?.recorded_at || 0);
-      if (!usageHistoryLoading && latestSuccess > loadedLatest) {
+      if (!usageHistoryLoading && latestRequest > loadedLatest) {
         void readUsageHistory({ reset: true });
       }
     }

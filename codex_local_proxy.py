@@ -217,13 +217,22 @@ class UsageStore:
         params: tuple[float, ...] = () if cutoff is None else (cutoff,)
         aggregate = """
             COUNT(*) AS request_count,
+            COALESCE(SUM(CASE WHEN succeeded = 1 THEN 1 ELSE 0 END), 0)
+                AS successful_requests,
+            COALESCE(SUM(CASE WHEN succeeded = 1 THEN 0 ELSE 1 END), 0)
+                AS failed_requests,
             COALESCE(SUM(input_tokens), 0) AS input_tokens,
             COALESCE(SUM(output_tokens), 0) AS output_tokens,
             COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(CASE WHEN succeeded = 1 THEN total_tokens ELSE 0 END), 0)
+                AS successful_tokens,
+            COALESCE(SUM(CASE WHEN succeeded = 1 THEN 0 ELSE total_tokens END), 0)
+                AS failed_tokens,
             COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
             COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
             COALESCE(SUM(CASE WHEN usage_source = 'estimated' THEN 1 ELSE 0 END), 0)
                 AS estimated_requests,
+            MAX(recorded_at) AS last_request_at,
             MAX(CASE WHEN succeeded = 1 THEN recorded_at END)
                 AS last_success_at
         """
@@ -264,7 +273,7 @@ class UsageStore:
         timestamp = time.time() if now is None else float(now)
         cutoff = _usage_window_cutoff(normalized, timestamp)
         bounded_limit = max(1, min(int(limit), USAGE_HISTORY_PAGE_LIMIT))
-        clauses = ["provider_id = ?", "succeeded = 1"]
+        clauses = ["provider_id = ?"]
         params: list[Any] = [str(provider_id)]
         if cutoff is not None:
             clauses.append("recorded_at >= ?")
@@ -279,7 +288,7 @@ class UsageStore:
                 if not math.isfinite(cursor_time) or cursor_id < 0:
                     raise ValueError
             except (AttributeError, OverflowError, TypeError, ValueError) as exc:
-                raise ValueError("成功请求游标无效") from exc
+                raise ValueError("请求记录游标无效") from exc
             clauses.append("(recorded_at < ? OR (recorded_at = ? AND id < ?))")
             params.extend((cursor_time, cursor_time, cursor_id))
         where = " AND ".join(clauses)
@@ -289,14 +298,24 @@ class UsageStore:
             total = connection.execute(
                 f"""
                 SELECT COUNT(*) AS request_count,
+                       COALESCE(SUM(CASE WHEN succeeded = 1 THEN 1 ELSE 0 END), 0)
+                           AS successful_requests,
+                       COALESCE(SUM(CASE WHEN succeeded = 1 THEN 0 ELSE 1 END), 0)
+                           AS failed_requests,
                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       COALESCE(SUM(CASE WHEN succeeded = 1 THEN total_tokens ELSE 0 END), 0)
+                           AS successful_tokens,
+                       COALESCE(SUM(CASE WHEN succeeded = 1 THEN 0 ELSE total_tokens END), 0)
+                           AS failed_tokens,
                        COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                        COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
                        COALESCE(SUM(CASE WHEN usage_source = 'estimated' THEN 1 ELSE 0 END), 0)
                            AS estimated_requests,
-                       MAX(recorded_at) AS last_success_at
+                       MAX(recorded_at) AS last_request_at,
+                       MAX(CASE WHEN succeeded = 1 THEN recorded_at END)
+                           AS last_success_at
                 FROM request_usage
                 WHERE {count_where}
                 """,
@@ -307,7 +326,7 @@ class UsageStore:
                 f"""
                 SELECT id, recorded_at, model, input_tokens, output_tokens,
                        total_tokens, cached_tokens, reasoning_tokens,
-                       usage_source, estimate_method, status_code
+                       usage_source, estimate_method, status_code, succeeded
                 FROM request_usage
                 WHERE {where}
                 ORDER BY recorded_at DESC, id DESC
@@ -339,6 +358,7 @@ class UsageStore:
                         else str(row["estimate_method"])
                     ),
                     "status_code": int(row["status_code"]),
+                    "succeeded": bool(row["succeeded"]),
                 }
                 for row in visible_rows
             ],
@@ -548,9 +568,13 @@ class RecoveryHistoryStore:
 def _usage_summary_row(row: sqlite3.Row | None) -> dict[str, Any]:
     fields = (
         "request_count",
+        "successful_requests",
+        "failed_requests",
         "input_tokens",
         "output_tokens",
         "total_tokens",
+        "successful_tokens",
+        "failed_tokens",
         "cached_tokens",
         "reasoning_tokens",
         "estimated_requests",
@@ -562,6 +586,11 @@ def _usage_summary_row(row: sqlite3.Row | None) -> dict[str, Any]:
         None
         if row is None or row["last_success_at"] is None
         else round(float(row["last_success_at"]) * 1000)
+    )
+    summary["last_request_at"] = (
+        None
+        if row is None or row["last_request_at"] is None
+        else round(float(row["last_request_at"]) * 1000)
     )
     return summary
 
@@ -1588,7 +1617,7 @@ def create_proxy_app(
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc)})
         except (OSError, sqlite3.Error):
-            return JSONResponse(status_code=503, content={"detail": "无法读取成功请求记录"})
+            return JSONResponse(status_code=503, content={"detail": "无法读取请求记录"})
         return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
 
     @app.post("/control/api/retry-policy", include_in_schema=False)
