@@ -42,9 +42,9 @@ $shortcutPath = Join-Path $desktop $ShortcutName
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $pythonw
-$shortcut.Arguments = '"' + $scriptPath + '" --tray'
+$shortcut.Arguments = '"' + $scriptPath + '" --tray --no-browser'
 $shortcut.WorkingDirectory = $projectPath
-$shortcut.Description = "Start Codex local proxy and open its control console"
+$shortcut.Description = "Start Codex local proxy in the notification area"
 $shortcut.IconLocation = $iconPath + ",0"
 $shortcut.Save()
 
