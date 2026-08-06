@@ -46,6 +46,8 @@ from codex_local_proxy import (
 APP_VERSION = "0.1.1"
 SETTINGS_VERSION = 5
 APP_DATA_DIRECTORY_NAME = ".codex-local-proxy"
+AUTO_START_VALUE_NAME = "CodexLocalProxy"
+AUTO_START_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 def data_directory() -> Path:
@@ -64,6 +66,90 @@ def legacy_data_directory() -> Path:
 
 def usage_database_path() -> Path:
     return data_directory() / "usage.sqlite3"
+
+
+def auto_start_supported() -> bool:
+    return os.name == "nt"
+
+
+def auto_start_command() -> str:
+    executable_path = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False):
+        command = [str(executable_path), "--no-browser"]
+    else:
+        pythonw_path = executable_path.with_name("pythonw.exe")
+        if executable_path.name.casefold() == "python.exe" and pythonw_path.is_file():
+            executable_path = pythonw_path
+        command = [
+            str(executable_path),
+            str(Path(__file__).resolve()),
+            "--tray",
+            "--no-browser",
+        ]
+    return subprocess.list2cmdline(command)
+
+
+def _read_auto_start_value() -> str | None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            AUTO_START_RUN_KEY,
+            0,
+            winreg.KEY_QUERY_VALUE,
+        ) as key:
+            value, value_type = winreg.QueryValueEx(key, AUTO_START_VALUE_NAME)
+    except FileNotFoundError:
+        return None
+    if value_type not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+        return None
+    return str(value)
+
+
+def _write_auto_start_value(value: str) -> None:
+    import winreg
+
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER,
+        AUTO_START_RUN_KEY,
+        0,
+        winreg.KEY_SET_VALUE,
+    ) as key:
+        winreg.SetValueEx(key, AUTO_START_VALUE_NAME, 0, winreg.REG_SZ, value)
+
+
+def _delete_auto_start_value() -> None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            AUTO_START_RUN_KEY,
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            winreg.DeleteValue(key, AUTO_START_VALUE_NAME)
+    except FileNotFoundError:
+        pass
+
+
+def is_auto_start_enabled() -> bool:
+    if not auto_start_supported():
+        return False
+    value = _read_auto_start_value()
+    if not value:
+        return False
+    return os.path.expandvars(value).strip().casefold() == auto_start_command().casefold()
+
+
+def set_auto_start_enabled(enabled: bool) -> None:
+    if not auto_start_supported():
+        raise RuntimeError("当前系统不支持 Windows 开机自启设置")
+    if enabled:
+        _write_auto_start_value(auto_start_command())
+    else:
+        _delete_auto_start_value()
 
 
 def display_path(path: Path) -> str:
@@ -289,7 +375,7 @@ def run_application(
     *,
     database: Path,
     port: int,
-    open_browser: bool = True,
+    open_browser: bool = False,
     tray: bool = False,
 ) -> int:
     from claude_local_proxy_app import load_settings as load_claude_settings
@@ -556,6 +642,27 @@ def _run_tray(
     def open_claude_console(icon: Any = None, item: Any = None) -> None:
         webbrowser.open(claude_control_url)
 
+    def auto_start_checked(item: Any = None) -> bool:
+        try:
+            return is_auto_start_enabled()
+        except OSError:
+            return False
+
+    def toggle_auto_start(icon: Any, item: Any = None) -> None:
+        try:
+            enabled = not is_auto_start_enabled()
+            set_auto_start_enabled(enabled)
+            icon.update_menu()
+            try:
+                icon.notify(
+                    "开机自启已开启。" if enabled else "开机自启已关闭。",
+                    "Codex 本地中转",
+                )
+            except (AttributeError, NotImplementedError, OSError):
+                pass
+        except (OSError, RuntimeError) as exc:
+            show_startup_error(f"修改开机自启失败：{exc}")
+
     def stop_servers() -> None:
         for server in servers:
             server.request_stop()
@@ -571,17 +678,34 @@ def _run_tray(
         stop_servers()
         icon.stop()
 
+    menu_items = [
+        pystray.MenuItem("打开 Codex 控制台", open_codex_console, default=True),
+        pystray.MenuItem("打开 Claude Code 控制台", open_claude_console),
+        pystray.Menu.SEPARATOR,
+    ]
+    if auto_start_supported():
+        menu_items.extend(
+            (
+                pystray.MenuItem(
+                    "开机自启",
+                    toggle_auto_start,
+                    checked=auto_start_checked,
+                ),
+                pystray.Menu.SEPARATOR,
+            )
+        )
+    menu_items.extend(
+        (
+            pystray.MenuItem("重启本地中转", restart_proxy),
+            pystray.MenuItem("退出本地中转", exit_proxy),
+        )
+    )
+
     icon = pystray.Icon(
         "codex-local-proxy",
         image,
         "Codex 与 Claude Code 本地中转",
-        menu=pystray.Menu(
-            pystray.MenuItem("打开 Codex 控制台", open_codex_console, default=True),
-            pystray.MenuItem("打开 Claude Code 控制台", open_claude_console),
-            pystray.MenuItem("重启本地中转", restart_proxy),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出本地中转", exit_proxy),
-        ),
+        menu=pystray.Menu(*menu_items),
     )
     tray_holder["icon"] = icon
     icon.run()
@@ -668,7 +792,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Codex CC Switch 本地中转")
     parser.add_argument("--database", type=Path)
     parser.add_argument("--port", type=int)
-    parser.add_argument("--no-browser", action="store_true")
+    browser_group = parser.add_mutually_exclusive_group()
+    browser_group.add_argument("--open-browser", action="store_true")
+    browser_group.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--tray", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--write-icon", type=Path)
@@ -701,7 +827,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_application(
             database=database,
             port=port,
-            open_browser=not args.no_browser,
+            open_browser=args.open_browser,
             tray=args.tray or bool(getattr(sys, "frozen", False)),
         )
     except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:

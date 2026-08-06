@@ -1,6 +1,6 @@
 ## Codex 本地中转 Windows 便携版
 
-下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。程序会打开本地控制台并常驻 Windows 通知区域。
+下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。程序会静默启动并常驻 Windows 通知区域，不会自动打开网页；需要时可从托盘菜单分别打开 Codex 和 Claude Code 控制台。托盘菜单支持为当前用户开启或关闭“开机自启”。
 
 使用要求：
 
@@ -19,7 +19,7 @@
 
 ## Codex 本地中转 macOS 便携版
 
-下载 `CodexLocalProxy-macos-arm64.zip` 后解压得到 `CodexLocalProxy-macos-arm64.app`，拖入「应用程序」文件夹（可选）即可使用。程序会同时打开 Codex 和 Claude Code 控制台并常驻 macOS 菜单栏。仅支持 Apple Silicon（M 系列芯片）机型。
+下载 `CodexLocalProxy-macos-arm64.zip` 后解压得到 `CodexLocalProxy-macos-arm64.app`，拖入「应用程序」文件夹（可选）即可使用。程序会静默启动并常驻 macOS 菜单栏，需要时可从菜单栏手动打开 Codex 或 Claude Code 控制台。仅支持 Apple Silicon（M 系列芯片）机型。
 
 使用要求：
 
