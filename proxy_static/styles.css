@@ -254,9 +254,10 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   background: transparent;
   color: var(--muted);
   line-height: 1;
+  cursor: default;
 }
 .health-refresh-button:hover, .health-refresh-button:focus-visible { background: var(--teal-soft); color: var(--teal); outline: none; }
-.health-refresh-button:disabled { cursor: wait; opacity: .45; }
+.health-refresh-button:disabled { cursor: default; opacity: .45; }
 .toolbar-actions { align-items: center; gap: 8px; }
 .usage-window-control {
   position: relative;

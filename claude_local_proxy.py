@@ -20,9 +20,6 @@ from codex_local_proxy import (
 from provider_proxy_protocol import ClaudeMessagesProtocol
 
 
-CLAUDE_CONTROL_ASSET_DIR = Path(__file__).resolve().parent / "claude_proxy_static"
-
-
 @dataclass(frozen=True)
 class ClaudeProxyProvider(ProxyProvider):
     credential_kind: str = "api_key"
@@ -72,14 +69,13 @@ def load_claude_proxy_providers(
 
 
 def create_claude_proxy_app(router: ProviderRouter, **kwargs: Any):
-    asset_dir = CLAUDE_CONTROL_ASSET_DIR if CLAUDE_CONTROL_ASSET_DIR.is_dir() else CONTROL_ASSET_DIR
     if "client" not in kwargs and "client_factory" not in kwargs:
         kwargs["client_factory"] = ClaudeCurlClient
     return create_proxy_app(
         router,
         protocol_adapter=ClaudeMessagesProtocol(),
         service_name="claude-local-proxy",
-        control_asset_dir=asset_dir,
+        control_asset_dir=CONTROL_ASSET_DIR,
         allowed_proxy_paths=frozenset({"messages", "messages/count_tokens"}),
         provider_selectable=lambda provider: bool(
             getattr(provider, "compatible", False) and provider.has_credentials

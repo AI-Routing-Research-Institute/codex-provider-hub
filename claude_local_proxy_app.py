@@ -123,10 +123,37 @@ def claude_config_snippets(port: int = DEFAULT_CLAUDE_PORT) -> dict[str, str]:
     }
 
 
+def claude_ui_config(port: int, codex_port: int, root: Path) -> dict[str, Any]:
+    return {
+        "service_id": "claude",
+        "display_name": "Claude Code 本地中转",
+        "brand_mark": "CC",
+        "client_name": "Claude Code",
+        "protocol_label": "Messages · SSE",
+        "proxy_url": f"http://127.0.0.1:{port}",
+        "peer_console_label": "Codex 控制台",
+        "peer_console_url": f"http://127.0.0.1:{codex_port}/control/",
+        "config_endpoint": "/control/api/claude-config",
+        "config_button_label": "复制 Claude 配置",
+        "config_location_label": "Claude Code 配置位置",
+        "config_location_hint": "配置片段用于启动 Claude Code",
+        "data_directory": display_path(root),
+        "config_location": "~/.claude/settings.json",
+        "restart_config_text": "端口将在退出并重新启动本地中转后生效；届时需要重新复制 Claude Code 配置。",
+        "copy_config_success_title": "Claude Code 配置已复制",
+        "copy_config_success_detail": "在当前终端运行配置后启动 Claude Code。",
+        "shutdown_client_name": "Claude Code",
+        "provider_label": "Claude Code",
+        "theme_storage_key": "local-proxy-theme",
+        "features": {"usage_history": True},
+    }
+
+
 def build_claude_server(
     *,
     database: Path,
     port: int,
+    codex_port: int = 17890,
     data_root: Path | None = None,
     on_shutdown_requested=None,
 ) -> LocalProxyServer:
@@ -254,5 +281,6 @@ def build_claude_server(
         runtime_settings_snapshot=runtime_snapshot,
         on_runtime_settings_changed=apply_runtime_settings,
         validate_runtime_database=validate_runtime_database,
+        ui_config=lambda: claude_ui_config(port, codex_port, root),
         app_factory=create_claude_proxy_app,
     )

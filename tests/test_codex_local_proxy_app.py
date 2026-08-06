@@ -12,6 +12,7 @@ import codex_local_proxy_app
 
 from codex_local_proxy_app import (
     codex_config_fragment,
+    codex_ui_config,
     data_directory,
     default_settings,
     display_path,
@@ -24,6 +25,12 @@ from codex_local_proxy_app import (
 
 
 class LocalProxySettingsTests(unittest.TestCase):
+    def test_ui_config_uses_active_and_peer_ports(self) -> None:
+        config = codex_ui_config(19000, 19001)
+        self.assertEqual(config["proxy_url"], "http://127.0.0.1:19000/v1")
+        self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19001/control/")
+        self.assertEqual(config["config_endpoint"], "/control/api/codex-config")
+
     def test_settings_round_trip_and_corrupt_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "settings.json"

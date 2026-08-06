@@ -2129,6 +2129,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         page = await client.get("/control/")
         script = await client.get("/control/static/app.js")
         styles = await client.get("/control/static/styles.css")
+        ui_config = await client.get("/control/api/ui-config")
         refreshed = await client.post(
             "/control/api/refresh",
             headers={"X-Local-Proxy-Control": "1"},
@@ -2140,7 +2141,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(page.status_code, 200)
-        self.assertIn("Codex 本地中转", page.text)
+        self.assertIn("本地中转", page.text)
+        self.assertNotIn("Codex 本地中转", page.text)
         self.assertIn('id="theme-button"', page.text)
         self.assertIn('data-theme-value="dark"', page.text)
         self.assertIn('id="recovery-details-button"', page.text)
@@ -2153,11 +2155,11 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="runtime-port"', page.text)
         self.assertIn('id="runtime-database-path"', page.text)
         self.assertIn('id="runtime-health-url"', page.text)
-        self.assertIn("~/.codex-local-proxy/", page.text)
+        self.assertIn('id="runtime-data-directory"', page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
         self.assertIn("styles.css?v=17", page.text)
-        self.assertIn("app.js?v=19", page.text)
+        self.assertIn("app.js?v=20", page.text)
         self.assertIn('id="usage-history-popover"', page.text)
         self.assertIn('id="recovery-history-meta"', page.text)
         self.assertIn("selectProvider", script.text)
@@ -2170,6 +2172,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("provider-token-cell", script.text)
         self.assertIn("openUsageHistoryPopover", script.text)
         self.assertIn("/control/api/usage-history", script.text)
+        self.assertIn("/control/api/ui-config", script.text)
+        self.assertNotIn("/control/api/codex-config", script.text)
         self.assertIn("请求记录", script.text)
         self.assertIn("流级失败", script.text)
         self.assertIn("healthStatusUrl", script.text)
@@ -2181,7 +2185,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("expandedHealthProviderIds", script.text)
         self.assertIn("最近 60 次", script.text)
         self.assertIn("尚未输出且再次失败的旧请求将由新供应商接管", script.text)
-        self.assertIn("codex-local-proxy-theme", script.text)
+        self.assertIn("local-proxy-theme", script.text)
+        self.assertNotIn("codex-local-proxy-theme", script.text)
         self.assertIn("recent_errors", script.text)
         self.assertIn("retry.history", script.text)
         self.assertIn("/control/api/recovery-history", script.text)
@@ -2213,6 +2218,10 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max-height: min(340px", styles.text)
         self.assertIn(".setting-control-with-action", styles.text)
         self.assertEqual(script.headers["cache-control"], "no-store")
+        self.assertEqual(ui_config.headers["cache-control"], "no-store")
+        self.assertEqual(ui_config.json()["service_id"], "codex")
+        self.assertEqual(ui_config.json()["config_endpoint"], "/control/api/codex-config")
+        self.assertTrue(ui_config.json()["features"]["usage_history"])
         self.assertEqual(refreshed.json()["current_provider_id"], "refreshed")
         self.assertEqual(
             refreshed.json()["health_status_url"],

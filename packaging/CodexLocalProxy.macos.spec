@@ -27,8 +27,7 @@ hidden_imports = [
     *collect_submodules("tiktoken_ext"),
 ]
 data_files = [
-    (str(ROOT / "local_proxy_static"), "local_proxy_static"),
-    (str(ROOT / "claude_proxy_static"), "claude_proxy_static"),
+    (str(ROOT / "proxy_static"), "proxy_static"),
     *collect_data_files("tiktoken"),
 ]
 
