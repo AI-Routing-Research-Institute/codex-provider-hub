@@ -234,7 +234,7 @@ cp config/providers.example.toml config/providers.toml
 .
 ├── codex_local_proxy.py       本地中转、路由、重试和 Token 统计
 ├── codex_local_proxy_app.py   Windows 托盘入口
-├── local_proxy_static/        本地中转控制台
+├── proxy_static/              Codex 与 Claude Code 共享控制台
 ├── probe_codex_cc_switch.py   CC Switch 供应商探测 CLI
 ├── probe_codex_gui.py         桌面探测界面
 ├── provider_status/           健康监测 Worker、Codex/Claude 探测、存储和状态页
@@ -256,7 +256,7 @@ cp config/providers.example.toml config/providers.toml
 检查前端脚本与主题运行时：
 
 ```powershell
-node --check local_proxy_static/app.js
+node --check proxy_static/app.js
 node --check provider_status/static/app.js
 node --test tests/theme_runtime.test.js
 ```

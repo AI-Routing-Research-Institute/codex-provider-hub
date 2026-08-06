@@ -282,6 +282,32 @@ def codex_config_fragment(port: int = DEFAULT_PORT) -> str:
     )
 
 
+def codex_ui_config(port: int, claude_port: int) -> dict[str, Any]:
+    return {
+        "service_id": "codex",
+        "display_name": "Codex 本地中转",
+        "brand_mark": "CX",
+        "client_name": "Codex",
+        "protocol_label": "Responses · SSE",
+        "proxy_url": f"http://127.0.0.1:{port}/v1",
+        "peer_console_label": "Claude Code 控制台",
+        "peer_console_url": f"http://127.0.0.1:{claude_port}/control/",
+        "config_endpoint": "/control/api/codex-config",
+        "config_button_label": "复制 Codex 配置",
+        "config_location_label": "Codex 配置文件",
+        "config_location_hint": "“复制 Codex 配置”生成的片段需要合并到此文件",
+        "data_directory": display_path(data_directory()),
+        "config_location": "~/.codex/config.toml",
+        "restart_config_text": "端口将在退出并重新启动本地中转后生效；届时需要重新复制 Codex 配置。",
+        "copy_config_success_title": "Codex 配置已复制",
+        "copy_config_success_detail": "首次配置后重启一次 Codex，后续切换不再需要重启。",
+        "shutdown_client_name": "Codex",
+        "provider_label": "Codex API",
+        "theme_storage_key": "local-proxy-theme",
+        "features": {"usage_history": True},
+    }
+
+
 def existing_proxy_url(
     port: int,
     *,
@@ -307,15 +333,7 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         raise FileNotFoundError(
             "本地中转页面资源缺失：" + "、".join(missing_assets)
         )
-    from claude_local_proxy import CLAUDE_CONTROL_ASSET_DIR, load_claude_proxy_providers
-
-    missing_claude_assets = [
-        name for name in asset_names if not (CLAUDE_CONTROL_ASSET_DIR / name).is_file()
-    ]
-    if missing_claude_assets:
-        raise FileNotFoundError(
-            "Claude 本地中转页面资源缺失：" + "、".join(missing_claude_assets)
-        )
+    from claude_local_proxy import load_claude_proxy_providers
     tray_backend_available = True
     if os.name == "nt":
         import pystray
@@ -347,7 +365,6 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
             provider.compatible and provider.has_credentials
             for provider in claude_providers
         ),
-        "claude_control_asset_count": len(asset_names),
         "tray_backend_available": tray_backend_available,
         "claude_curl_transport_available": claude_curl_transport_available,
         "icon_size": list(icon.size),
@@ -558,6 +575,7 @@ def run_application(
         runtime_settings_snapshot=runtime_settings_snapshot,
         on_runtime_settings_changed=apply_runtime_settings,
         validate_runtime_database=validate_runtime_database,
+        ui_config=lambda: codex_ui_config(port, claude_port),
     )
     from claude_local_proxy_app import build_claude_server
 
@@ -567,6 +585,7 @@ def run_application(
     claude_server = build_claude_server(
         database=claude_database,
         port=claude_port,
+        codex_port=port,
         on_shutdown_requested=stop_hub,
     )
     hub_servers.extend((server, claude_server))

@@ -24,7 +24,6 @@ class WindowsReleaseTests(unittest.TestCase):
         self.assertEqual(result["control_asset_count"], 3)
         self.assertEqual(result["claude_provider_count"], 1)
         self.assertEqual(result["claude_compatible_provider_count"], 1)
-        self.assertEqual(result["claude_control_asset_count"], 3)
         self.assertTrue(result["tray_backend_available"])
         self.assertTrue(result["claude_curl_transport_available"])
         self.assertEqual(result["icon_size"], [64, 64])
@@ -34,8 +33,9 @@ class WindowsReleaseTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn('ROOT / "local_proxy_static"', spec)
-        self.assertIn('ROOT / "claude_proxy_static"', spec)
+        self.assertIn('ROOT / "proxy_static"', spec)
+        self.assertNotIn('ROOT / "local_proxy_static"', spec)
+        self.assertNotIn('ROOT / "claude_proxy_static"', spec)
         self.assertIn('collect_submodules("tiktoken_ext")', spec)
         self.assertIn('"pystray._win32"', spec)
         self.assertIn('name="CodexLocalProxy-win-x64"', spec)

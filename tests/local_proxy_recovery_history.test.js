@@ -6,7 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const sourcePath = path.join(__dirname, "..", "local_proxy_static", "app.js");
+const sourcePath = path.join(__dirname, "..", "proxy_static", "app.js");
 const source = fs.readFileSync(sourcePath, "utf8");
 const start = source.indexOf("function formatRetryTime");
 const end = source.indexOf("async function readRecoveryHistory");

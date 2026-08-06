@@ -32,6 +32,28 @@ let usageHistoryLoading = false;
 let usageHistoryRequestSequence = 0;
 let usageHistoryWindow = "today";
 let usageHistoryError = null;
+let uiConfig = {
+  display_name: "本地中转",
+  brand_mark: "LP",
+  client_name: "客户端",
+  protocol_label: "—",
+  proxy_url: "",
+  peer_console_label: "切换控制台",
+  peer_console_url: "#",
+  config_endpoint: "/control/api/config",
+  config_button_label: "复制客户端配置",
+  config_location_label: "客户端配置文件",
+  config_location_hint: "配置片段的默认位置",
+  data_directory: "—",
+  config_location: "—",
+  restart_config_text: "端口将在退出并重新启动本地中转后生效；届时需要重新复制客户端配置。",
+  copy_config_success_title: "配置已复制",
+  copy_config_success_detail: "配置片段已复制到剪贴板。",
+  shutdown_client_name: "客户端",
+  provider_label: "客户端",
+  theme_storage_key: "local-proxy-theme",
+  features: { usage_history: true },
+};
 
 const providerList = document.querySelector("#provider-list");
 const emptyState = document.querySelector("#empty-state");
@@ -65,8 +87,55 @@ const usageHistoryMore = document.querySelector("#usage-history-more");
 const usageHistoryClose = document.querySelector("#usage-history-close");
 const historyDetailPopover = document.querySelector("#history-detail-popover");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
-const THEME_STORAGE_KEY = "codex-local-proxy-theme";
+let themeStorageKey = "local-proxy-theme";
 const RECOVERY_HISTORY_PAGE_SIZE = 50;
+
+function text(selector, value) {
+  const element = document.querySelector(selector);
+  if (element && value != null) element.textContent = String(value);
+}
+
+function applyUiConfig(config) {
+  if (!config || typeof config !== "object") return;
+  uiConfig = {
+    ...uiConfig,
+    ...config,
+    features: { ...uiConfig.features, ...(config.features || {}) },
+  };
+  themeStorageKey = uiConfig.theme_storage_key || "local-proxy-theme";
+  document.title = uiConfig.display_name;
+  document.querySelector(".app-window").setAttribute("aria-label", `${uiConfig.display_name}控制台`);
+  text(".brand-mark", uiConfig.brand_mark);
+  text(".brand-copy h1", uiConfig.display_name);
+  text(".brand-copy p", `从 CC Switch 读取供应商，切换后无需重启 ${uiConfig.client_name}`);
+  const peerLink = document.querySelector(".console-link");
+  peerLink.href = uiConfig.peer_console_url || "#";
+  peerLink.textContent = uiConfig.peer_console_label || "切换控制台";
+  text("#proxy-url", uiConfig.proxy_url || "—");
+  text("#wire-api", uiConfig.protocol_label || "—");
+  text("#runtime-config-label", uiConfig.config_location_label);
+  text("#runtime-config-hint", uiConfig.config_location_hint);
+  text("#runtime-data-directory", uiConfig.data_directory);
+  text("#runtime-config-location", uiConfig.config_location);
+  text("#runtime-port-hint", `只监听 127.0.0.1；修改后需要重启并重新复制 ${uiConfig.client_name} 配置`);
+  text("#runtime-restart-notice", uiConfig.restart_config_text);
+  text("#copy-config", uiConfig.config_button_label);
+  text("#footer-message", "Key 不会显示，也不会写入页面或日志");
+  document.querySelector("#usage-history-popover")?.toggleAttribute(
+    "hidden",
+    uiConfig.features.usage_history === false,
+  );
+}
+
+async function readUiConfig() {
+  try {
+    const response = await fetch("/control/api/ui-config", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    applyUiConfig(await response.json());
+  } catch {
+    applyUiConfig(uiConfig);
+  }
+}
 
 function themePreference() {
   const value = document.documentElement.dataset.themePreference;
@@ -81,7 +150,7 @@ function applyTheme(preference, { persist = false } = {}) {
   document.documentElement.dataset.theme = resolved;
   if (persist) {
     try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, preference);
+    window.localStorage.setItem(themeStorageKey, preference);
     } catch (error) {}
   }
   const labels = { system: "跟随系统", light: "浅色", dark: "深色" };
@@ -389,7 +458,7 @@ function renderSettingsSummary() {
   state.lastChild.textContent = policy.enabled ? "自动恢复已启用" : "自动恢复已关闭";
   document.querySelector("#settings-summary").textContent = policy.enabled
     ? `${policy.max_attempts === -1 ? "无限重试" : `最多尝试 ${policy.max_attempts} 次`}，首次等待 ${policy.delay_seconds} 秒`
-    : "临时错误将直接返回 Codex";
+    : `临时错误将直接返回 ${uiConfig.client_name}`;
 }
 
 function formatRetryKind(kind) {
@@ -442,12 +511,12 @@ function renderRuntimeSettingsSummary() {
 
 function renderRuntimeSettings(settings) {
   latestRuntimeSettings = settings;
-  runtimePortInput.value = String(settings.configured_port ?? settings.active_port ?? 17890);
+  runtimePortInput.value = String(settings.configured_port ?? settings.active_port ?? "");
   runtimeDatabaseInput.value = settings.database_path || "~/.cc-switch/cc-switch.db";
   runtimeHealthUrlInput.value = settings.health_status_url || "";
   document.querySelector("#database-path").textContent = runtimeDatabaseInput.value;
-  document.querySelector("#runtime-data-directory").textContent = settings.data_directory || "~/.codex-local-proxy";
-  document.querySelector("#runtime-codex-config").textContent = settings.codex_config_file || "~/.codex/config.toml";
+  document.querySelector("#runtime-data-directory").textContent = settings.data_directory || uiConfig.data_directory;
+  document.querySelector("#runtime-config-location").textContent = settings.codex_config_file || settings.claude_config_file || uiConfig.config_location;
   const restartRequired = settings.restart_required === true;
   document.querySelector("#runtime-restart-notice").hidden = !restartRequired;
   const state = document.querySelector("#runtime-settings-state");
@@ -1475,7 +1544,7 @@ function renderProviderList() {
     ? `找到 ${providers.length} 个供应商`
     : manageProvidersMode
       ? `共 ${latestStatus.providers.length} 个供应商，已隐藏 ${hiddenCount} 个`
-      : `已显示 ${visibleCount} 个 Codex API 供应商`;
+      : `已显示 ${visibleCount} 个 ${uiConfig.provider_label} 供应商`;
 }
 
 function renderStatus(status) {
@@ -1497,7 +1566,9 @@ function renderStatus(status) {
   document.querySelector("#current-endpoint").textContent = current?.endpoint || "—";
   document.querySelector("#active-requests").textContent = String(status.active_requests);
   document.querySelector("#auth-state").textContent = current?.has_credentials ? "已安全读取" : "缺失";
-  document.querySelector("#wire-api").textContent = current?.wire_api === "responses" ? "Responses · SSE" : escapeText(current?.wire_api || "—");
+  document.querySelector("#wire-api").textContent = current?.wire_api
+    ? (current.wire_api === "responses" ? "Responses · SSE" : current.wire_api === "anthropic_messages" ? "Messages · SSE" : escapeText(current.wire_api))
+    : uiConfig.protocol_label;
   const last = status.last_status_code;
   document.querySelector("#last-request").textContent = last == null
     ? "尚无请求"
@@ -1781,7 +1852,7 @@ async function validateRuntimeDatabase() {
     runtimeDatabaseInput.value = result.database_path;
     showToast(
       "数据来源可用",
-      `已读取 ${result.provider_count} 个 Codex API 供应商。`,
+      `已读取 ${result.provider_count} 个 ${uiConfig.provider_label} 供应商。`,
     );
   } catch (error) {
     showToast("数据来源不可用", error?.message || "无法读取供应商数据库。", "error");
@@ -1885,17 +1956,25 @@ async function copyDataDirectory() {
 
 async function copyConfig() {
   try {
-    const response = await fetch("/control/api/codex-config", { cache: "no-store" });
+    const response = await fetch(uiConfig.config_endpoint, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    await navigator.clipboard.writeText(await response.text());
-    showToast("Codex 配置已复制", "首次配置后重启一次 Codex，后续切换不再需要重启。");
+    const rawConfig = await response.text();
+    let configText = rawConfig;
+    try {
+      const snippets = JSON.parse(rawConfig);
+      if (snippets && typeof snippets === "object") {
+        configText = snippets.powershell || snippets.bash || rawConfig;
+      }
+    } catch (error) {}
+    await navigator.clipboard.writeText(configText);
+    showToast(uiConfig.copy_config_success_title, uiConfig.copy_config_success_detail);
   } catch (error) {
     showToast("复制失败", "浏览器没有允许写入剪贴板。", "error");
   }
 }
 
 async function shutdownProxy() {
-  if (!window.confirm("退出本地中转后，Codex 新请求将无法连接。确定退出吗？")) return;
+  if (!window.confirm(`退出本地中转后，${uiConfig.shutdown_client_name} 新请求将无法连接。确定退出吗？`)) return;
   try {
     const response = await fetch("/control/api/shutdown", {
       method: "POST",
@@ -2032,14 +2111,18 @@ window.addEventListener("resize", () => {
 themeMedia.addEventListener("change", () => {
   if (themePreference() === "system") applyTheme("system");
 });
-document.querySelector("#proxy-url").textContent = `${window.location.origin}/v1`;
+async function initialize() {
+  await readUiConfig();
+  if (!uiConfig.proxy_url) text("#proxy-url", `${window.location.origin}/v1`);
+  applyTheme(themePreference());
+  renderHealthSourceStatus();
+  readStatus();
+  readRuntimeSettings({ quiet: true });
+  pollTimer = window.setInterval(() => readStatus({ quiet: true }), 1000);
+  healthPollTimer = window.setInterval(
+    () => readHealthStatus({ quiet: true }),
+    30000,
+  );
+}
 
-applyTheme(themePreference());
-renderHealthSourceStatus();
-readStatus();
-readRuntimeSettings({ quiet: true });
-pollTimer = window.setInterval(() => readStatus({ quiet: true }), 1000);
-healthPollTimer = window.setInterval(
-  () => readHealthStatus({ quiet: true }),
-  30000,
-);
+void initialize();

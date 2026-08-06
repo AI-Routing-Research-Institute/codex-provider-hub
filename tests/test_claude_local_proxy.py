@@ -13,7 +13,7 @@ from claude_local_proxy import (
     create_claude_proxy_app,
     load_claude_proxy_providers,
 )
-from codex_local_proxy import ProviderRouter, RetryPolicy, UsageStore, create_proxy_app
+from codex_local_proxy import ProviderRouter, RetryPolicy, TokenUsage, UsageStore, create_proxy_app
 from codex_local_proxy import RecoveryHistoryStore
 from provider_proxy_protocol import ClaudeMessagesProtocol
 
@@ -780,17 +780,54 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
         try:
             page = await client.get("/control/")
             script = await client.get("/control/static/app.js")
+            styles = await client.get("/control/static/styles.css")
+            ui_config = await client.get("/control/api/ui-config")
             config = await client.get("/control/api/claude-config")
             old_config = await client.get("/control/api/codex-config")
         finally:
             await client.aclose()
 
-        self.assertIn("Claude Code 本地中转", page.text)
-        self.assertIn("127.0.0.1:17891", page.text)
-        self.assertIn("http://127.0.0.1:17890/control/", page.text)
-        self.assertIn("/control/api/claude-config", script.text)
+        self.assertIn("本地中转", page.text)
+        self.assertNotIn("Claude Code 本地中转", page.text)
+        self.assertIn('id="usage-history-popover"', page.text)
+        self.assertIn("/control/api/ui-config", script.text)
+        self.assertIn("/control/api/usage-history", script.text)
+        self.assertIn(".usage-history-popover", styles.text)
+        self.assertEqual(ui_config.json()["service_id"], "claude")
+        self.assertEqual(ui_config.json()["proxy_url"], "http://127.0.0.1:17891")
+        self.assertEqual(ui_config.json()["peer_console_url"], "http://127.0.0.1:17890/control/")
+        self.assertEqual(ui_config.json()["config_endpoint"], "/control/api/claude-config")
+        self.assertTrue(ui_config.json()["features"]["usage_history"])
         self.assertEqual(config.status_code, 200)
         self.assertEqual(old_config.status_code, 404)
+
+    async def test_control_usage_history_returns_claude_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            usage_store = UsageStore(Path(temp_dir) / "usage.sqlite3")
+            usage_store.record(
+                provider_id="claude-a",
+                model="claude-test",
+                usage=TokenUsage(12, 3, 15, cached_tokens=4),
+                status_code=200,
+            )
+            app = create_claude_proxy_app(
+                ProviderRouter((claude_provider(),)),
+                usage_store=usage_store,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            )
+            try:
+                response = await client.get(
+                    "/control/api/usage-history",
+                    params={"provider_id": "claude-a", "usage_window": "all"},
+                )
+            finally:
+                await client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"][0]["model"], "claude-test")
+        self.assertEqual(response.json()["items"][0]["total_tokens"], 15)
 
 
 if __name__ == "__main__":

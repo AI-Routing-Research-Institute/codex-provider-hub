@@ -8,6 +8,7 @@ import claude_local_proxy_app
 from claude_local_proxy_app import (
     DEFAULT_CLAUDE_PORT,
     claude_config_snippets,
+    claude_ui_config,
     data_directory,
     default_settings,
     load_settings,
@@ -17,6 +18,12 @@ from claude_local_proxy_app import (
 
 
 class ClaudeLocalProxySettingsTests(unittest.TestCase):
+    def test_ui_config_uses_active_and_peer_ports(self) -> None:
+        config = claude_ui_config(19001, 19000, Path("C:/claude-local-proxy"))
+        self.assertEqual(config["proxy_url"], "http://127.0.0.1:19001")
+        self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/")
+        self.assertEqual(config["config_endpoint"], "/control/api/claude-config")
+
     def test_defaults_use_independent_port_and_data_directory(self) -> None:
         self.assertEqual(DEFAULT_CLAUDE_PORT, 17891)
         self.assertEqual(default_settings()["port"], 17891)
