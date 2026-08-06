@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_app_server_client import AppServerTurnResult
+from probe_tools.codex_app_server_client import AppServerTurnResult
 import probe_codex_cc_switch as probe
 
 

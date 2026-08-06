@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_curl_transport import ClaudeCurlClient
-from codex_local_proxy import (
+from local_proxy.transports.claude import ClaudeCurlClient
+from local_proxy.core import (
     CONTROL_ASSET_DIR,
     DEFAULT_DATABASE,
     ProviderRouter,
@@ -17,7 +17,7 @@ from codex_local_proxy import (
     ProviderConfigurationError,
     create_proxy_app,
 )
-from provider_proxy_protocol import ClaudeMessagesProtocol
+from local_proxy.protocols.claude_messages import ClaudeMessagesProtocol
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ def _claude_provider_from_row(
     base_url = env.get("ANTHROPIC_BASE_URL") or row["url"]
     if not isinstance(base_url, str) or not base_url.strip():
         raise ProviderConfigurationError("没有配置 ANTHROPIC_BASE_URL")
-    from codex_local_proxy import _normalize_base_url
+    from local_proxy.core import _normalize_base_url
 
     normalized_url = _normalize_base_url(base_url)
     configured_field = meta.get("apiKeyField")

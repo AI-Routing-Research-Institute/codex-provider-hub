@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from codex_local_proxy_app import APP_VERSION, smoke_test
+from local_proxy_app import APP_VERSION, smoke_test
 
 from scripts.create_local_proxy_smoke_db import create_database
 
@@ -25,11 +25,17 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertEqual(result["provider_count"], 1)
         self.assertTrue(result["current_provider_configured"])
         self.assertEqual(result["credential_count"], 0)
+        self.assertEqual(result["service_count"], 1)
+        self.assertEqual(result["listen_address"], "127.0.0.1:17890")
+        self.assertEqual(
+            result["control_paths"],
+            ["/control/codex/", "/control/claude/"],
+        )
         self.assertEqual(result["control_asset_count"], 3)
         self.assertEqual(result["claude_provider_count"], 1)
         self.assertEqual(result["claude_compatible_provider_count"], 1)
         self.assertTrue(result["tray_backend_available"])
-        self.assertTrue(result["claude_curl_transport_available"])
+        self.assertTrue(result["claude_transport_available"])
         self.assertEqual(result["icon_size"], [64, 64])
 
     def test_macos_spec_uses_appkit_backend_and_app_bundle(self) -> None:

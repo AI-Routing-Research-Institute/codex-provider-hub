@@ -35,7 +35,7 @@ $distPath = if ([System.IO.Path]::IsPathRooted($DistDirectory)) {
 
 New-Item -ItemType Directory -Force -Path $buildPath, $workPath, $distPath | Out-Null
 
-& $python (Join-Path $projectPath "codex_local_proxy_app.py") --write-icon $iconPath
+& $python (Join-Path $projectPath "local_proxy_app.py") --write-icon $iconPath
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
     throw "Unable to generate the executable icon"
 }

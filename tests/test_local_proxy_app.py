@@ -8,9 +8,9 @@ from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
-import codex_local_proxy_app
+from local_proxy import application as local_proxy_app
 
-from codex_local_proxy_app import (
+from local_proxy.application import (
     codex_config_fragment,
     codex_ui_config,
     data_directory,
@@ -25,11 +25,11 @@ from codex_local_proxy_app import (
 
 
 class LocalProxySettingsTests(unittest.TestCase):
-    def test_ui_config_uses_active_and_peer_ports(self) -> None:
-        config = codex_ui_config(19000, 19001)
+    def test_ui_config_uses_unified_port_and_peer_console_path(self) -> None:
+        config = codex_ui_config(19000)
         self.assertEqual(config["proxy_url"], "http://127.0.0.1:19000/v1")
-        self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19001/control/")
-        self.assertEqual(config["config_endpoint"], "/control/api/codex-config")
+        self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/claude/")
+        self.assertEqual(config["config_endpoint"], "/control/codex/api/codex-config")
 
     def test_settings_round_trip_and_corrupt_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -133,10 +133,10 @@ class LocalProxySettingsTests(unittest.TestCase):
 
 class CodexConfigTests(unittest.TestCase):
     def test_fragment_uses_fixed_loopback_responses_provider(self) -> None:
-        fragment = codex_config_fragment(17891)
+        fragment = codex_config_fragment(18888)
 
         self.assertIn('model_provider = "local_cc_switch"', fragment)
-        self.assertIn('base_url = "http://127.0.0.1:17891/v1"', fragment)
+        self.assertIn('base_url = "http://127.0.0.1:18888/v1"', fragment)
         self.assertIn('wire_api = "responses"', fragment)
         self.assertIn("requires_openai_auth = true", fragment)
         self.assertNotIn("api_key", fragment.casefold())
@@ -147,18 +147,18 @@ class CodexConfigTests(unittest.TestCase):
             mock.patch.object(sys, "frozen", True, create=True),
             mock.patch.object(sys, "executable", executable),
         ):
-            frozen_command = codex_local_proxy_app.auto_start_command()
+            frozen_command = local_proxy_app.auto_start_command()
         with (
             mock.patch.object(sys, "frozen", False, create=True),
             mock.patch.object(sys, "executable", executable),
         ):
-            source_command = codex_local_proxy_app.auto_start_command()
+            source_command = local_proxy_app.auto_start_command()
 
         self.assertEqual(
             frozen_command,
             subprocess.list2cmdline([executable, "--no-browser"]),
         )
-        self.assertIn("codex_local_proxy_app.py", source_command)
+        self.assertIn("local_proxy_app.py", source_command)
         self.assertIn("--tray", source_command)
         self.assertTrue(source_command.endswith("--no-browser"))
 
@@ -172,14 +172,14 @@ class CodexConfigTests(unittest.TestCase):
                 mock.patch.object(sys, "frozen", False, create=True),
                 mock.patch.object(sys, "executable", str(executable)),
             ):
-                command = codex_local_proxy_app.auto_start_command()
+                command = local_proxy_app.auto_start_command()
 
         self.assertEqual(
             command,
             subprocess.list2cmdline(
                 [
                     str(pythonw.resolve()),
-                    str(Path(codex_local_proxy_app.__file__).resolve()),
+                    str(Path(local_proxy_app.__file__).resolve().parents[1] / "local_proxy_app.py"),
                     "--tray",
                     "--no-browser",
                 ]
@@ -188,27 +188,27 @@ class CodexConfigTests(unittest.TestCase):
 
     def test_auto_start_state_and_changes_use_current_user_value(self) -> None:
         with (
-            mock.patch.object(codex_local_proxy_app, "auto_start_supported", return_value=True),
-            mock.patch.object(codex_local_proxy_app, "auto_start_command", return_value="current command"),
-            mock.patch.object(codex_local_proxy_app, "_read_auto_start_value", return_value="CURRENT COMMAND"),
+            mock.patch.object(local_proxy_app, "auto_start_supported", return_value=True),
+            mock.patch.object(local_proxy_app, "auto_start_command", return_value="current command"),
+            mock.patch.object(local_proxy_app, "_read_auto_start_value", return_value="CURRENT COMMAND"),
         ):
-            self.assertTrue(codex_local_proxy_app.is_auto_start_enabled())
+            self.assertTrue(local_proxy_app.is_auto_start_enabled())
 
         with (
-            mock.patch.object(codex_local_proxy_app, "auto_start_supported", return_value=True),
-            mock.patch.object(codex_local_proxy_app, "auto_start_command", return_value="current command"),
-            mock.patch.object(codex_local_proxy_app, "_read_auto_start_value", return_value="old command"),
+            mock.patch.object(local_proxy_app, "auto_start_supported", return_value=True),
+            mock.patch.object(local_proxy_app, "auto_start_command", return_value="current command"),
+            mock.patch.object(local_proxy_app, "_read_auto_start_value", return_value="old command"),
         ):
-            self.assertFalse(codex_local_proxy_app.is_auto_start_enabled())
+            self.assertFalse(local_proxy_app.is_auto_start_enabled())
 
         with (
-            mock.patch.object(codex_local_proxy_app, "auto_start_supported", return_value=True),
-            mock.patch.object(codex_local_proxy_app, "auto_start_command", return_value="current command"),
-            mock.patch.object(codex_local_proxy_app, "_write_auto_start_value") as write_value,
-            mock.patch.object(codex_local_proxy_app, "_delete_auto_start_value") as delete_value,
+            mock.patch.object(local_proxy_app, "auto_start_supported", return_value=True),
+            mock.patch.object(local_proxy_app, "auto_start_command", return_value="current command"),
+            mock.patch.object(local_proxy_app, "_write_auto_start_value") as write_value,
+            mock.patch.object(local_proxy_app, "_delete_auto_start_value") as delete_value,
         ):
-            codex_local_proxy_app.set_auto_start_enabled(True)
-            codex_local_proxy_app.set_auto_start_enabled(False)
+            local_proxy_app.set_auto_start_enabled(True)
+            local_proxy_app.set_auto_start_enabled(False)
 
         write_value.assert_called_once_with("current command")
         delete_value.assert_called_once_with()
@@ -216,15 +216,15 @@ class CodexConfigTests(unittest.TestCase):
     def test_main_defaults_to_silent_start_and_allows_explicit_browser_open(self) -> None:
         settings = default_settings()
         with (
-            mock.patch.object(codex_local_proxy_app, "migrate_legacy_data_directory"),
-            mock.patch.object(codex_local_proxy_app, "load_settings", return_value=settings),
-            mock.patch.object(codex_local_proxy_app, "run_application", return_value=0) as run,
+            mock.patch.object(local_proxy_app, "migrate_legacy_data_directory"),
+            mock.patch.object(local_proxy_app, "load_settings", return_value=settings),
+            mock.patch.object(local_proxy_app, "run_application", return_value=0) as run,
         ):
-            self.assertEqual(codex_local_proxy_app.main([]), 0)
+            self.assertEqual(local_proxy_app.main([]), 0)
             self.assertFalse(run.call_args.kwargs["open_browser"])
-            self.assertEqual(codex_local_proxy_app.main(["--open-browser"]), 0)
+            self.assertEqual(local_proxy_app.main(["--open-browser"]), 0)
             self.assertTrue(run.call_args.kwargs["open_browser"])
-            self.assertEqual(codex_local_proxy_app.main(["--no-browser"]), 0)
+            self.assertEqual(local_proxy_app.main(["--no-browser"]), 0)
             self.assertFalse(run.call_args.kwargs["open_browser"])
 
     def test_replacement_process_uses_saved_settings_in_frozen_app(self) -> None:
@@ -234,7 +234,7 @@ class CodexConfigTests(unittest.TestCase):
             mock.patch.object(sys, "executable", executable),
             mock.patch.object(subprocess, "Popen") as popen,
         ):
-            codex_local_proxy_app.launch_replacement_process()
+            local_proxy_app.launch_replacement_process()
 
         command = popen.call_args.args[0]
         options = popen.call_args.kwargs
@@ -248,11 +248,11 @@ class CodexConfigTests(unittest.TestCase):
             mock.patch.object(sys, "frozen", False, create=True),
             mock.patch.object(subprocess, "Popen") as popen,
         ):
-            codex_local_proxy_app.launch_replacement_process()
+            local_proxy_app.launch_replacement_process()
 
         command = popen.call_args.args[0]
         self.assertEqual(command[0], sys.executable)
-        self.assertEqual(Path(command[1]).name, "codex_local_proxy_app.py")
+        self.assertEqual(Path(command[1]).name, "local_proxy_app.py")
         self.assertEqual(command[-2:], ["--tray", "--no-browser"])
 
     def test_tray_restart_stops_server_and_returns_restart_request(self) -> None:
@@ -292,19 +292,18 @@ class CodexConfigTests(unittest.TestCase):
 
         fake_pystray = mock.Mock(Menu=FakeMenu, MenuItem=FakeMenuItem, Icon=FakeIcon)
         fake_pystray.Menu.SEPARATOR = FakeMenu.SEPARATOR
-        codex_server = mock.Mock()
-        claude_server = mock.Mock()
+        server = mock.Mock()
         tray_holder: dict[str, object] = {}
         with (
             mock.patch.dict(sys.modules, {"pystray": fake_pystray}),
-            mock.patch.object(codex_local_proxy_app, "create_app_icon", return_value=object()),
-            mock.patch.object(codex_local_proxy_app, "auto_start_supported", return_value=True),
-            mock.patch.object(codex_local_proxy_app, "is_auto_start_enabled", return_value=True),
+            mock.patch.object(local_proxy_app, "create_app_icon", return_value=object()),
+            mock.patch.object(local_proxy_app, "auto_start_supported", return_value=True),
+            mock.patch.object(local_proxy_app, "is_auto_start_enabled", return_value=True),
         ):
-            restart_requested = codex_local_proxy_app._run_tray(
-                (codex_server, claude_server),
-                "http://127.0.0.1:17890/control/",
-                "http://127.0.0.1:17891/control/",
+            restart_requested = local_proxy_app._run_tray(
+                server,
+                "http://127.0.0.1:17890/control/codex/",
+                "http://127.0.0.1:17890/control/claude/",
                 tray_holder,
             )
             auto_start_item = menu_items_by_label["开机自启"]
@@ -312,44 +311,37 @@ class CodexConfigTests(unittest.TestCase):
 
         self.assertTrue(restart_requested)
         self.assertTrue(tray_holder["icon"].stopped)
-        codex_server.request_stop.assert_called_once_with()
-        claude_server.request_stop.assert_called_once_with()
+        server.request_stop.assert_called_once_with()
         self.assertEqual(
             menu_labels,
             ["打开 Codex 控制台", "打开 Claude Code 控制台", "开机自启", "重启本地中转", "退出本地中转"],
         )
         self.assertTrue(auto_start_checked)
 
-    def test_run_servers_opens_both_consoles_and_stops_both(self) -> None:
-        codex_server = mock.Mock(running=False)
-        claude_server = mock.Mock(running=False)
-        with mock.patch.object(codex_local_proxy_app.webbrowser, "open") as browser:
-            result = codex_local_proxy_app.run_hub_servers(
-                codex_server,
-                claude_server,
-                codex_control_url="http://127.0.0.1:17890/control/",
-                claude_control_url="http://127.0.0.1:17891/control/",
+    def test_run_server_opens_both_views_and_stops_once(self) -> None:
+        server = mock.Mock(running=False)
+        with mock.patch.object(local_proxy_app.webbrowser, "open") as browser:
+            result = local_proxy_app.run_local_proxy_server(
+                server,
+                codex_control_url="http://127.0.0.1:17890/control/codex/",
+                claude_control_url="http://127.0.0.1:17890/control/claude/",
                 open_browser=True,
                 tray=False,
             )
 
         self.assertEqual(result, 0)
-        codex_server.start.assert_called_once_with()
-        claude_server.start.assert_called_once_with()
-        browser.assert_any_call("http://127.0.0.1:17890/control/")
-        browser.assert_any_call("http://127.0.0.1:17891/control/")
-        codex_server.stop.assert_called_once_with()
-        claude_server.stop.assert_called_once_with()
+        server.start.assert_called_once_with()
+        browser.assert_any_call("http://127.0.0.1:17890/control/codex/")
+        browser.assert_any_call("http://127.0.0.1:17890/control/claude/")
+        server.stop.assert_called_once_with()
 
     def test_run_servers_stays_silent_when_browser_opening_is_disabled(self) -> None:
-        codex_server = mock.Mock(running=False)
-        claude_server = mock.Mock(running=False)
-        with mock.patch.object(codex_local_proxy_app.webbrowser, "open") as browser:
-            result = codex_local_proxy_app.run_hub_servers(
-                codex_server,
-                claude_server,
-                codex_control_url="http://127.0.0.1:17890/control/",
-                claude_control_url="http://127.0.0.1:17891/control/",
+        server = mock.Mock(running=False)
+        with mock.patch.object(local_proxy_app.webbrowser, "open") as browser:
+            result = local_proxy_app.run_local_proxy_server(
+                server,
+                codex_control_url="http://127.0.0.1:17890/control/codex/",
+                claude_control_url="http://127.0.0.1:17890/control/claude/",
                 open_browser=False,
                 tray=False,
             )
@@ -359,30 +351,98 @@ class CodexConfigTests(unittest.TestCase):
 
     def test_existing_proxy_url_accepts_expected_service_name(self) -> None:
         response = mock.Mock(status_code=200)
-        response.json.return_value = {"service": "claude-local-proxy"}
-        with mock.patch.object(codex_local_proxy_app.httpx, "get", return_value=response):
-            url = codex_local_proxy_app.existing_proxy_url(
-                17891,
-                service_name="claude-local-proxy",
+        response.json.return_value = {"service": "codex-provider-hub"}
+        with mock.patch.object(local_proxy_app.httpx, "get", return_value=response):
+            url = local_proxy_app.existing_proxy_url(
+                17890,
             )
 
-        self.assertEqual(url, "http://127.0.0.1:17891/control/")
+        self.assertEqual(url, "http://127.0.0.1:17890/control/codex/")
 
-    def test_partial_legacy_instance_requires_restart_before_dual_service_start(self) -> None:
+    def test_existing_unified_instance_is_reused(self) -> None:
         with (
             mock.patch.object(
-                codex_local_proxy_app,
+                local_proxy_app,
                 "existing_proxy_url",
-                side_effect=["http://127.0.0.1:17890/control/", None],
+                return_value="http://127.0.0.1:17890/control/codex/",
             ),
-            self.assertRaisesRegex(RuntimeError, "退出旧版本地中转"),
+            mock.patch.object(local_proxy_app.webbrowser, "open") as browser,
         ):
-            codex_local_proxy_app.run_application(
+            result = local_proxy_app.run_application(
+                database=Path("cc-switch.db"),
+                port=17890,
+                open_browser=True,
+                tray=False,
+            )
+
+        self.assertEqual(result, 0)
+        browser.assert_any_call("http://127.0.0.1:17890/control/codex/")
+        browser.assert_any_call("http://127.0.0.1:17890/control/claude/")
+
+    def test_run_application_constructs_one_server_for_both_protocols(self) -> None:
+        from local_proxy import claude_profile
+
+        server = mock.Mock()
+        codex_profile_instance = mock.Mock()
+        claude_profile_instance = mock.Mock()
+        settings = default_settings()
+        with (
+            mock.patch.object(local_proxy_app, "existing_proxy_url", return_value=None),
+            mock.patch.object(local_proxy_app, "load_settings", return_value=settings),
+            mock.patch.object(
+                local_proxy_app,
+                "build_codex_profile",
+                return_value=codex_profile_instance,
+            ) as codex_profile_builder,
+            mock.patch.object(claude_profile, "load_settings", return_value={}),
+            mock.patch.object(
+                claude_profile,
+                "build_claude_profile",
+                return_value=claude_profile_instance,
+            ),
+            mock.patch.object(local_proxy_app, "create_proxy_app", return_value=object()) as app_factory,
+            mock.patch.object(
+                local_proxy_app,
+                "LocalProxyServer",
+                return_value=server,
+            ) as server_class,
+            mock.patch.object(
+                local_proxy_app,
+                "run_local_proxy_server",
+                return_value=0,
+            ) as runner,
+        ):
+            result = local_proxy_app.run_application(
                 database=Path("cc-switch.db"),
                 port=17890,
                 open_browser=False,
                 tray=False,
             )
+
+        self.assertEqual(result, 0)
+        codex_profile_builder.assert_called_once_with(
+            database=Path("cc-switch.db"),
+            port=17890,
+            settings_data=settings,
+        )
+        app_factory.assert_called_once_with(
+            codex_profile=codex_profile_instance,
+            claude_profile=claude_profile_instance,
+            on_shutdown_requested=mock.ANY,
+        )
+        server_class.assert_called_once_with(
+            host="127.0.0.1",
+            port=17890,
+            application=app_factory.return_value,
+        )
+        runner.assert_called_once_with(
+            server,
+            codex_control_url="http://127.0.0.1:17890/control/codex/",
+            claude_control_url="http://127.0.0.1:17890/control/claude/",
+            open_browser=False,
+            tray=False,
+            tray_holder=mock.ANY,
+        )
 
     def test_shortcut_targets_browser_app_launcher(self) -> None:
         script = (
@@ -391,7 +451,7 @@ class CodexConfigTests(unittest.TestCase):
             / "install_local_proxy_shortcut.ps1"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('"codex_local_proxy_app.py"', script)
+        self.assertIn('"local_proxy_app.py"', script)
         self.assertIn("--tray", script)
         self.assertIn("--no-browser", script)
         self.assertIn("IconLocation", script)

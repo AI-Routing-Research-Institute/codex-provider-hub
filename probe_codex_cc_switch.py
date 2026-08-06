@@ -21,7 +21,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
-from codex_app_server_client import (
+from probe_tools.codex_app_server_client import (
     AppServerProtocolError,
     AppServerTurnResult,
     CodexAppServerClient,

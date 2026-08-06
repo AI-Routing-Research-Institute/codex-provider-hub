@@ -14,7 +14,7 @@ from typing import Any
 import probe_codex_cc_switch as backend
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_SCRIPT = PROJECT_ROOT / "probe_codex_cc_switch.py"
 REPORT_DIR = PROJECT_ROOT / "reports"
 BUILTIN_MODELS = (

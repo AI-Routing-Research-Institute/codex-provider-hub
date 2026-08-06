@@ -8,14 +8,14 @@ from unittest.mock import patch
 
 import httpx
 
-from claude_local_proxy import (
+from local_proxy.claude import (
     ClaudeProxyProvider,
     create_claude_proxy_app,
     load_claude_proxy_providers,
 )
-from codex_local_proxy import ProviderRouter, RetryPolicy, TokenUsage, UsageStore, create_proxy_app
-from codex_local_proxy import RecoveryHistoryStore
-from provider_proxy_protocol import ClaudeMessagesProtocol
+from local_proxy.core import ProviderRouter, RetryPolicy, TokenUsage, UsageStore, create_proxy_app
+from local_proxy.core import RecoveryHistoryStore
+from local_proxy.protocols.claude_messages import ClaudeMessagesProtocol
 
 
 async def no_wait(_: float) -> None:
@@ -690,7 +690,7 @@ class ClaudeProtocolTests(unittest.IsolatedAsyncioTestCase):
 class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
     def test_production_app_uses_curl_client_factory(self) -> None:
         curl_client = object()
-        with patch("claude_local_proxy.ClaudeCurlClient", return_value=curl_client) as factory:
+        with patch("local_proxy.claude.ClaudeCurlClient", return_value=curl_client) as factory:
             app = create_claude_proxy_app(ProviderRouter((claude_provider(),)))
 
         factory.assert_called_once_with()
@@ -698,7 +698,7 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
     def test_injected_client_does_not_create_curl_client(self) -> None:
         injected = object()
-        with patch("claude_local_proxy.ClaudeCurlClient") as factory:
+        with patch("local_proxy.claude.ClaudeCurlClient") as factory:
             app = create_claude_proxy_app(
                 ProviderRouter((claude_provider(),)),
                 client=injected,
@@ -769,8 +769,8 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
             ProviderRouter((claude_provider(),)),
             config_fragment=lambda: json.dumps(
                 {
-                    "powershell": '$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17891"\n',
-                    "bash": 'export ANTHROPIC_BASE_URL="http://127.0.0.1:17891"\n',
+                    "powershell": '$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17890"\n',
+                    "bash": 'export ANTHROPIC_BASE_URL="http://127.0.0.1:17890"\n',
                 }
             ),
         )
@@ -790,12 +790,15 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("本地中转", page.text)
         self.assertNotIn("Claude Code 本地中转", page.text)
         self.assertIn('id="usage-history-popover"', page.text)
-        self.assertIn("/control/api/ui-config", script.text)
-        self.assertIn("/control/api/usage-history", script.text)
+        self.assertIn('controlUrl("/api/ui-config")', script.text)
+        self.assertIn('controlUrl("/api/usage-history")', script.text)
         self.assertIn(".usage-history-popover", styles.text)
         self.assertEqual(ui_config.json()["service_id"], "claude")
-        self.assertEqual(ui_config.json()["proxy_url"], "http://127.0.0.1:17891")
-        self.assertEqual(ui_config.json()["peer_console_url"], "http://127.0.0.1:17890/control/")
+        self.assertEqual(ui_config.json()["proxy_url"], "http://127.0.0.1:17890")
+        self.assertEqual(
+            ui_config.json()["peer_console_url"],
+            "http://127.0.0.1:17890/control/codex/",
+        )
         self.assertEqual(ui_config.json()["config_endpoint"], "/control/api/claude-config")
         self.assertTrue(ui_config.json()["features"]["usage_history"])
         self.assertEqual(config.status_code, 200)

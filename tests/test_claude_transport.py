@@ -4,7 +4,7 @@ import unittest
 import httpx
 from curl_cffi.requests.exceptions import RequestException
 
-from claude_curl_transport import ClaudeCurlClient
+from local_proxy.transports.claude import ClaudeCurlClient
 
 
 class FakeCurlResponse:

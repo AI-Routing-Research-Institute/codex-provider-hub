@@ -8,9 +8,9 @@ from pathlib import Path
 from unittest import mock
 
 
-MODULE_SPEC = importlib.util.find_spec("codex_app_server_client")
+MODULE_SPEC = importlib.util.find_spec("probe_tools.codex_app_server_client")
 if MODULE_SPEC is not None:
-    import codex_app_server_client as app_server
+    from probe_tools import codex_app_server_client as app_server
 else:
     app_server = None
 
@@ -175,7 +175,7 @@ class ScriptedProcess:
 
 class AppServerClientTests(unittest.TestCase):
     def require_module(self):
-        self.assertIsNotNone(app_server, "codex_app_server_client module must exist")
+        self.assertIsNotNone(app_server, "probe_tools.codex_app_server_client module must exist")
         return app_server
 
     def make_client(

@@ -10,7 +10,7 @@ import probe_codex_cc_switch as backend
 
 class SettingsTests(unittest.TestCase):
     def test_settings_round_trip_and_corrupt_file_fallback(self) -> None:
-        import probe_gui_support as support
+        from probe_tools import probe_gui_support as support
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
@@ -48,7 +48,7 @@ class ModelCatalogTests(unittest.TestCase):
         )
 
     def test_catalog_and_first_run_defaults(self) -> None:
-        import probe_gui_support as support
+        from probe_tools import probe_gui_support as support
 
         providers = [
             self.make_provider("p1", "One", "gpt-5.5"),
@@ -78,7 +78,7 @@ class ModelCatalogTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_build_probe_command_contains_exact_selections_and_defaults(self) -> None:
-        import probe_gui_support as support
+        from probe_tools import probe_gui_support as support
 
         command = support.build_probe_command(
             python_executable=Path(r"C:\Python314\python.exe"),
@@ -99,7 +99,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("read-only", command)
 
     def test_resolve_codex_binary_uses_first_runnable_candidate(self) -> None:
-        import probe_gui_support as support
+        from probe_tools import probe_gui_support as support
 
         denied = Path(r"C:\WindowsApps\codex.exe")
         working = Path(r"C:\npm\codex.exe")
@@ -109,7 +109,7 @@ class CommandTests(unittest.TestCase):
                 raise PermissionError("denied")
             return subprocess.CompletedProcess(command, 0, "codex-cli 0.144.1", "")
 
-        with patch("probe_gui_support.subprocess.run", side_effect=fake_run):
+        with patch("probe_tools.probe_gui_support.subprocess.run", side_effect=fake_run):
             resolved = support.resolve_codex_binary([denied, working])
 
         self.assertEqual(resolved, working)
@@ -117,7 +117,7 @@ class CommandTests(unittest.TestCase):
 
 class ReportTests(unittest.TestCase):
     def test_report_rows_include_status_elapsed_and_key_information(self) -> None:
-        import probe_gui_support as support
+        from probe_tools import probe_gui_support as support
 
         report = {
             "results": [

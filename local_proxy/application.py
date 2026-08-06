@@ -23,49 +23,40 @@ if sys.stderr is None:
 
 import httpx
 
-from codex_local_proxy import (
+from local_proxy.core import (
     CONTROL_ASSET_DIR,
     DEFAULT_DATABASE,
     DEFAULT_HOST,
     DEFAULT_PORT,
-    HealthStatusUrlStore,
     LocalProxyServer,
     ProviderRouter,
-    RecoveryHistoryStore,
-    RetryPolicy,
-    RetryPolicyStore,
-    UsageStore,
+    create_proxy_app,
     filter_self_referencing_providers,
-    load_proxy_providers,
-    normalize_health_status_url,
-    order_proxy_providers,
-    retry_policy_from_mapping,
 )
+from local_proxy.codex import load_proxy_providers
+from local_proxy.codex_profile import (
+    build_codex_profile,
+    codex_config_fragment,
+    codex_ui_config,
+    data_directory,
+    default_settings,
+    load_settings,
+    save_settings,
+    settings_path,
+    usage_database_path,
+)
+from local_proxy.paths import display_path, resolve_user_path
 
 
 APP_VERSION = "0.1.1"
-SETTINGS_VERSION = 5
-APP_DATA_DIRECTORY_NAME = ".codex-local-proxy"
 AUTO_START_VALUE_NAME = "CodexLocalProxy"
 AUTO_START_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-
-
-def data_directory() -> Path:
-    return Path.home() / APP_DATA_DIRECTORY_NAME
-
-
-def settings_path() -> Path:
-    return data_directory() / "settings.json"
 
 
 def legacy_data_directory() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     base = Path(local_app_data) if local_app_data else Path.home() / ".config"
     return base / "CodexLocalProxy"
-
-
-def usage_database_path() -> Path:
-    return data_directory() / "usage.sqlite3"
 
 
 def auto_start_supported() -> bool:
@@ -82,7 +73,7 @@ def auto_start_command() -> str:
             executable_path = pythonw_path
         command = [
             str(executable_path),
-            str(Path(__file__).resolve()),
+            str(Path(__file__).resolve().parents[1] / "local_proxy_app.py"),
             "--tray",
             "--no-browser",
         ]
@@ -152,19 +143,6 @@ def set_auto_start_enabled(enabled: bool) -> None:
         _delete_auto_start_value()
 
 
-def display_path(path: Path) -> str:
-    resolved = path.expanduser().resolve()
-    try:
-        relative = resolved.relative_to(Path.home().resolve())
-    except ValueError:
-        return str(resolved)
-    return "~" if not relative.parts else f"~/{relative.as_posix()}"
-
-
-def resolve_user_path(value: str | Path) -> Path:
-    return Path(value).expanduser().resolve()
-
-
 def migrate_legacy_data_directory(
     source: Path | None = None,
     target: Path | None = None,
@@ -198,120 +176,10 @@ def migrate_legacy_data_directory(
     return tuple(migrated)
 
 
-def default_settings() -> dict[str, Any]:
-    return {
-        "schema_version": SETTINGS_VERSION,
-        "selected_provider_id": None,
-        "port": DEFAULT_PORT,
-        "database_path": display_path(DEFAULT_DATABASE),
-        "retry": RetryPolicy().as_public_dict(),
-        "provider_order": [],
-        "hidden_provider_ids": [],
-        "health_status_url": None,
-    }
-
-
-def load_settings(path: Path | None = None) -> dict[str, Any]:
-    target = path or settings_path()
-    settings = default_settings()
-    if not target.is_file():
-        return settings
-    try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return settings
-    if not isinstance(payload, dict):
-        return settings
-    provider_id = payload.get("selected_provider_id")
-    if isinstance(provider_id, str) and provider_id.strip():
-        settings["selected_provider_id"] = provider_id.strip()
-    port = payload.get("port")
-    if isinstance(port, int) and not isinstance(port, bool) and 1024 <= port <= 65535:
-        settings["port"] = port
-    database_path = payload.get("database_path")
-    if isinstance(database_path, str) and database_path.strip():
-        try:
-            settings["database_path"] = display_path(
-                resolve_user_path(database_path.strip())
-            )
-        except (OSError, RuntimeError, ValueError):
-            pass
-    try:
-        settings["retry"] = retry_policy_from_mapping(payload.get("retry", {})).as_public_dict()
-    except ValueError:
-        pass
-    for field_name in ("provider_order", "hidden_provider_ids"):
-        values = payload.get(field_name)
-        if isinstance(values, list):
-            settings[field_name] = list(
-                dict.fromkeys(
-                    value.strip()
-                    for value in values
-                    if isinstance(value, str) and value.strip()
-                )
-            )
-    try:
-        settings["health_status_url"] = normalize_health_status_url(
-            payload.get("health_status_url")
-        )
-    except ValueError:
-        pass
-    return settings
-
-
-def save_settings(settings: dict[str, Any], path: Path | None = None) -> None:
-    target = path or settings_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(target)
-
-
-def codex_config_fragment(port: int = DEFAULT_PORT) -> str:
-    return (
-        'model_provider = "local_cc_switch"\n'
-        "\n"
-        "[model_providers.local_cc_switch]\n"
-        'name = "CC Switch Local Proxy"\n'
-        f'base_url = "http://127.0.0.1:{port}/v1"\n'
-        'wire_api = "responses"\n'
-        "requires_openai_auth = true\n"
-    )
-
-
-def codex_ui_config(port: int, claude_port: int) -> dict[str, Any]:
-    return {
-        "service_id": "codex",
-        "display_name": "Codex 本地中转",
-        "brand_mark": "CX",
-        "client_name": "Codex",
-        "protocol_label": "Responses · SSE",
-        "proxy_url": f"http://127.0.0.1:{port}/v1",
-        "peer_console_label": "Claude Code 控制台",
-        "peer_console_url": f"http://127.0.0.1:{claude_port}/control/",
-        "config_endpoint": "/control/api/codex-config",
-        "config_button_label": "复制 Codex 配置",
-        "config_location_label": "Codex 配置文件",
-        "config_location_hint": "“复制 Codex 配置”生成的片段需要合并到此文件",
-        "data_directory": display_path(data_directory()),
-        "config_location": "~/.codex/config.toml",
-        "restart_config_text": "端口将在退出并重新启动本地中转后生效；届时需要重新复制 Codex 配置。",
-        "copy_config_success_title": "Codex 配置已复制",
-        "copy_config_success_detail": "首次配置后重启一次 Codex，后续切换不再需要重启。",
-        "shutdown_client_name": "Codex",
-        "provider_label": "Codex API",
-        "theme_storage_key": "local-proxy-theme",
-        "features": {"usage_history": True},
-    }
-
-
 def existing_proxy_url(
     port: int,
     *,
-    service_name: str = "codex-local-proxy",
+    service_name: str = "codex-provider-hub",
 ) -> str | None:
     url = f"http://127.0.0.1:{port}"
     try:
@@ -320,7 +188,7 @@ def existing_proxy_url(
     except (httpx.HTTPError, ValueError):
         return None
     if response.status_code == 200 and payload.get("service") == service_name:
-        return f"{url}/control/"
+        return f"{url}/control/codex/"
     return None
 
 
@@ -333,7 +201,7 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         raise FileNotFoundError(
             "本地中转页面资源缺失：" + "、".join(missing_assets)
         )
-    from claude_local_proxy import load_claude_proxy_providers
+    from local_proxy.claude import load_claude_proxy_providers
     tray_backend_available = True
     if os.name == "nt":
         import pystray
@@ -344,7 +212,7 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
 
     curl = Curl()
     curl.close()
-    claude_curl_transport_available = True
+    claude_transport_available = True
     icon = create_app_icon()
     providers = filter_self_referencing_providers(
         load_proxy_providers(database), DEFAULT_PORT
@@ -357,8 +225,13 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         "provider_count": len(providers),
         "current_provider_configured": current is not None,
         "credential_count": sum(provider.has_credentials for provider in providers),
+        "service_count": 1,
         "listen_address": f"{DEFAULT_HOST}:{DEFAULT_PORT}",
-        "control_path": "/control/",
+        "control_paths": ["/control/codex/", "/control/claude/"],
+        "proxy_paths": {
+            "codex": "/v1/*",
+            "claude": ["/v1/messages", "/v1/messages/count_tokens"],
+        },
         "control_asset_count": len(asset_names),
         "claude_provider_count": len(claude_providers),
         "claude_compatible_provider_count": sum(
@@ -366,7 +239,7 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
             for provider in claude_providers
         ),
         "tray_backend_available": tray_backend_available,
-        "claude_curl_transport_available": claude_curl_transport_available,
+        "claude_transport_available": claude_transport_available,
         "icon_size": list(icon.size),
     }
 
@@ -395,214 +268,66 @@ def run_application(
     open_browser: bool = False,
     tray: bool = False,
 ) -> int:
-    from claude_local_proxy_app import load_settings as load_claude_settings
-
+    from local_proxy.claude_profile import load_settings as load_claude_settings
     claude_settings = load_claude_settings()
-    claude_port = int(claude_settings["port"])
     existing = existing_proxy_url(port)
-    existing_claude = existing_proxy_url(
-        claude_port,
-        service_name="claude-local-proxy",
-    )
-    if existing is not None and existing_claude is not None:
+    if existing is not None:
         if open_browser:
             webbrowser.open(existing)
-            webbrowser.open(existing_claude)
+            webbrowser.open(f"http://127.0.0.1:{port}/control/claude/")
         return 0
-    if existing is not None or existing_claude is not None:
-        raise RuntimeError(
-            "检测到旧版或不完整的本地中转实例，请先从托盘退出旧版本地中转后重新启动。"
-        )
 
     settings = load_settings()
-    settings_lock = threading.RLock()
-    active_database_path = database.expanduser().resolve()
-
-    def load_prepared_providers(source: Path) -> tuple:
-        loaded = filter_self_referencing_providers(
-            load_proxy_providers(source),
-            port,
-        )
-        with settings_lock:
-            provider_order = tuple(settings.get("provider_order", ()))
-        return order_proxy_providers(loaded, provider_order)
-
-    def prepared_providers() -> tuple:
-        with settings_lock:
-            source = active_database_path
-        return load_prepared_providers(source)
-
-    providers = prepared_providers()
-    router = ProviderRouter(
-        providers,
-        current_provider_id=settings.get("selected_provider_id"),
-    )
-    retry_policy_store = RetryPolicyStore(
-        retry_policy_from_mapping(settings.get("retry", {}))
-    )
-    health_status_url_store = HealthStatusUrlStore(
-        settings.get("health_status_url")
-    )
-    local_database_path = usage_database_path()
-    usage_store = UsageStore(local_database_path)
-    recovery_history_store = RecoveryHistoryStore(local_database_path)
-
-    def update_settings(**changes: Any) -> None:
-        with settings_lock:
-            settings.update(changes)
-            settings["schema_version"] = SETTINGS_VERSION
-            save_settings(settings)
-
-    def remember_selection(provider_id: str) -> None:
-        update_settings(selected_provider_id=provider_id)
-
-    def remember_retry_policy(policy: RetryPolicy) -> None:
-        update_settings(retry=policy.as_public_dict())
-
-    def remember_hidden_provider_ids(provider_ids: tuple[str, ...]) -> None:
-        update_settings(hidden_provider_ids=list(provider_ids))
-
-    def remember_provider_order(provider_ids: tuple[str, ...]) -> None:
-        update_settings(provider_order=list(provider_ids))
-
-    def runtime_settings_snapshot() -> dict[str, Any]:
-        with settings_lock:
-            configured_port = int(settings.get("port", port))
-            database_display = display_path(active_database_path)
-        return {
-            "configured_port": configured_port,
-            "active_port": port,
-            "restart_required": configured_port != port,
-            "database_path": database_display,
-            "health_status_url": health_status_url_store.get(),
-            "data_directory": display_path(data_directory()),
-            "settings_file": display_path(settings_path()),
-            "usage_database": display_path(usage_database_path()),
-            "codex_config_file": "~/.codex/config.toml",
-        }
-
-    def validate_database_source(value: str) -> tuple[Path, tuple]:
-        source = resolve_user_path(value.strip())
-        if not source.is_file():
-            raise ValueError(f"未找到 CC Switch 数据库：{display_path(source)}")
-        try:
-            loaded = load_prepared_providers(source)
-        except (OSError, sqlite3.Error, ValueError) as exc:
-            raise ValueError("无法读取 CC Switch 数据库或数据库结构不兼容") from exc
-        if not loaded:
-            raise ValueError("数据库中没有可用的 Codex 供应商")
-        return source, loaded
-
-    def validate_runtime_database(value: str) -> dict[str, Any]:
-        source, loaded = validate_database_source(value)
-        return {
-            "database_path": display_path(source),
-            "provider_count": len(loaded),
-            "current_provider_configured": any(
-                provider.is_cc_switch_current for provider in loaded
-            ),
-        }
-
-    def apply_runtime_settings(payload: dict[str, Any]) -> dict[str, Any]:
-        nonlocal active_database_path
-        configured_port = payload.get("port")
-        if (
-            isinstance(configured_port, bool)
-            or not isinstance(configured_port, int)
-            or not 1024 <= configured_port <= 65535
-        ):
-            raise ValueError("端口必须是 1024 到 65535 之间的整数")
-        database_value = payload.get("database_path")
-        if not isinstance(database_value, str) or not database_value.strip():
-            raise ValueError("数据来源不能为空")
-        health_status_url = normalize_health_status_url(
-            payload.get("health_status_url")
-        )
-        source, loaded = validate_database_source(database_value)
-
-        with settings_lock:
-            candidate = dict(settings)
-            candidate.update(
-                schema_version=SETTINGS_VERSION,
-                port=configured_port,
-                database_path=display_path(source),
-                health_status_url=health_status_url,
-            )
-            save_settings(candidate)
-            settings.clear()
-            settings.update(candidate)
-            active_database_path = source
-
-        health_status_url_store.replace(health_status_url)
-        current = router.current_provider()
-        selected = router.replace_providers(
-            loaded,
-            preferred_id=current.provider_id if current else None,
-        )
-        if selected is not None and selected.provider_id != settings.get(
-            "selected_provider_id"
-        ):
-            update_settings(selected_provider_id=selected.provider_id)
-        return runtime_settings_snapshot()
-
     tray_holder: dict[str, Any] = {}
-    hub_servers: list[LocalProxyServer] = []
+    server_holder: dict[str, LocalProxyServer] = {}
 
-    def stop_hub() -> None:
-        for active_server in tuple(hub_servers):
+    def stop_application() -> None:
+        active_server = server_holder.get("server")
+        if active_server is not None:
             active_server.request_stop()
         icon = tray_holder.get("icon")
         if icon is not None:
             icon.stop()
 
-    server = LocalProxyServer(
-        router,
-        host=DEFAULT_HOST,
+    codex_profile = build_codex_profile(
+        database=database,
         port=port,
-        reload_providers=prepared_providers,
-        on_provider_selected=remember_selection,
-        hidden_provider_ids=settings.get("hidden_provider_ids", ()),
-        provider_order=settings.get("provider_order", ()),
-        on_hidden_provider_ids_changed=remember_hidden_provider_ids,
-        on_provider_order_changed=remember_provider_order,
-        config_fragment=lambda: codex_config_fragment(port),
-        retry_policy_store=retry_policy_store,
-        on_retry_policy_changed=remember_retry_policy,
-        on_shutdown_requested=stop_hub,
-        usage_store=usage_store,
-        recovery_history_store=recovery_history_store,
-        health_status_url_store=health_status_url_store,
-        runtime_settings_snapshot=runtime_settings_snapshot,
-        on_runtime_settings_changed=apply_runtime_settings,
-        validate_runtime_database=validate_runtime_database,
-        ui_config=lambda: codex_ui_config(port, claude_port),
+        settings_data=settings,
     )
-    from claude_local_proxy_app import build_claude_server
 
     claude_database = resolve_user_path(
         claude_settings.get("database_path") or str(database)
     )
-    claude_server = build_claude_server(
+    from local_proxy.claude_profile import build_claude_profile
+
+    claude_profile = build_claude_profile(
         database=claude_database,
-        port=claude_port,
-        codex_port=port,
-        on_shutdown_requested=stop_hub,
+        port=port,
     )
-    hub_servers.extend((server, claude_server))
-    return run_hub_servers(
+
+    application = create_proxy_app(
+        codex_profile=codex_profile,
+        claude_profile=claude_profile,
+        on_shutdown_requested=stop_application,
+    )
+    server = LocalProxyServer(
+        host=DEFAULT_HOST,
+        port=port,
+        application=application,
+    )
+    server_holder["server"] = server
+    return run_local_proxy_server(
         server,
-        claude_server,
-        codex_control_url=f"http://127.0.0.1:{port}/control/",
-        claude_control_url=f"http://127.0.0.1:{claude_port}/control/",
+        codex_control_url=f"http://127.0.0.1:{port}/control/codex/",
+        claude_control_url=f"http://127.0.0.1:{port}/control/claude/",
         open_browser=open_browser,
         tray=tray,
         tray_holder=tray_holder,
     )
 
 
-def run_hub_servers(
-    codex_server: LocalProxyServer,
-    claude_server: LocalProxyServer,
+def run_local_proxy_server(
+    server: LocalProxyServer,
     *,
     codex_control_url: str,
     claude_control_url: str,
@@ -610,31 +335,29 @@ def run_hub_servers(
     tray: bool,
     tray_holder: dict[str, Any] | None = None,
 ) -> int:
-    servers = (codex_server, claude_server)
-    started: list[LocalProxyServer] = []
+    started = False
     active_tray_holder = tray_holder if tray_holder is not None else {}
     restart_requested = False
     try:
-        for server in servers:
-            server.start()
-            started.append(server)
+        server.start()
+        started = True
         if open_browser:
             webbrowser.open(codex_control_url)
             webbrowser.open(claude_control_url)
         if tray:
             restart_requested = _run_tray(
-                servers,
+                server,
                 codex_control_url,
                 claude_control_url,
                 active_tray_holder,
             )
         else:
-            while any(server.running for server in servers):
+            while server.running:
                 time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
-        for server in reversed(started):
+        if started:
             server.stop()
     if restart_requested:
         launch_replacement_process()
@@ -642,7 +365,7 @@ def run_hub_servers(
 
 
 def _run_tray(
-    servers: tuple[LocalProxyServer, LocalProxyServer],
+    server: LocalProxyServer,
     codex_control_url: str,
     claude_control_url: str,
     tray_holder: dict[str, Any],
@@ -682,19 +405,15 @@ def _run_tray(
         except (OSError, RuntimeError) as exc:
             show_startup_error(f"修改开机自启失败：{exc}")
 
-    def stop_servers() -> None:
-        for server in servers:
-            server.request_stop()
-
     def restart_proxy(icon: Any, item: Any = None) -> None:
         if restart_requested.is_set():
             return
         restart_requested.set()
-        stop_servers()
+        server.request_stop()
         icon.stop()
 
     def exit_proxy(icon: Any, item: Any = None) -> None:
-        stop_servers()
+        server.request_stop()
         icon.stop()
 
     menu_items = [
@@ -736,7 +455,7 @@ def launch_replacement_process() -> None:
         command = [sys.executable, "--no-browser"]
         working_directory = Path(sys.executable).resolve().parent
     else:
-        script = Path(__file__).resolve()
+        script = Path(__file__).resolve().parents[1] / "local_proxy_app.py"
         command = [sys.executable, str(script), "--tray", "--no-browser"]
         working_directory = script.parent
 
@@ -852,7 +571,3 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
         show_startup_error(str(exc))
         return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
