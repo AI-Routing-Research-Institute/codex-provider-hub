@@ -26,33 +26,22 @@
 
 ## 它做什么
 
-Codex Provider Hub 面向同时使用多个 Codex API 和 Claude Code 供应商的个人自部署场景。安装包启动一个后台程序，同时提供两个独立网页：Codex 使用 `127.0.0.1:17890`，Claude Code 使用 `127.0.0.1:17891`。
+Codex Provider Hub 面向同时使用多个 Codex API 和 Claude Code 供应商的个人自部署场景。安装包只启动一个监听 `127.0.0.1:17890` 的后台服务，并在同一端口提供 Codex 与 Claude Code 两个控制台视图。
 
 项目包含三组可以独立使用的能力：
 
-- 本地中转：从 CC Switch 数据库只读加载 Codex 与 Claude 供应商，提供一个 Windows 托盘程序、两个 Web 控制台、即时切换、失败重试和 Token 统计。
+- 本地中转：从 CC Switch 数据库只读加载 Codex 与 Claude 供应商，通过一个本地服务提供两个 Web 控制台、即时切换、失败重试和 Token 统计。
 - 健康监测：定时探测供应商和模型可用性，通过独立状态页展示当前状态、历史结果和请求诊断。
 - 探测工具：提供命令行、GUI 和 TUI 适配工具，用隔离的 Codex 运行目录验证供应商能力。
 
 ## 核心工作流
 
 ```text
-┌─────────────────────┐
-│ Codex               │
-│ 固定连接本机中转地址  │
-└──────────┬──────────┘
-           │ Responses API / SSE
-           ▼
-┌─────────────────────┐       只读       ┌─────────────────────┐
-│ Local Proxy         │◄─────────────────│ CC Switch SQLite DB │
-│ 路由 / 重试 / 统计    │                  │ 供应商地址和认证配置   │
-└──────────┬──────────┘                  └─────────────────────┘
-           │ 当前选择的供应商
-           ▼
-┌─────────────────────┐
-│ Upstream Provider   │
-│ OpenAI Responses API│
-└─────────────────────┘
+Codex ───── Responses API / SSE ────┐
+                                    │
+Claude Code ─ Messages API / SSE ───┼──► Local Proxy ───► Upstream Providers
+                                    │    单端口路由 / 重试 / 统计
+CC Switch SQLite DB ──── 只读 ──────┘
 
 独立监测链路：
 
@@ -65,8 +54,8 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 
 ### 本地中转与控制台
 
-- 默认监听 `127.0.0.1:17890`，Codex 只需配置一次。
-- Claude Code 独立监听 `127.0.0.1:17891`，使用独立供应商选择、重试状态和 Token 数据。
+- 只监听 `127.0.0.1:17890`：`/v1/messages` 及其 Token 计数接口使用 Claude 协议，其他 `/v1/*` 使用 Codex Responses 协议。
+- Codex 与 Claude Code 共用进程和端口，但保留独立供应商选择、重试状态、Token 数据与恢复记录。
 - 从 `~/.cc-switch/cc-switch.db` 只读加载 Codex API 供应商。
 - 支持供应商即时切换、隐藏、拖动排序和搜索。
 - 支持 Windows 通知区域常驻、重复启动检测和桌面快捷方式。
@@ -99,7 +88,7 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 
 ### Windows 便携版（推荐）
 
-Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，但程序会同时启动 Codex 与 Claude Code 两个本地中转服务：
+Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，程序会启动一个同时支持 Codex 与 Claude Code 的本地中转服务：
 
 - [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
@@ -108,7 +97,7 @@ Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-
 
 ### macOS 便携版
 
-Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载 `.zip` 便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，但程序会同时启动 Codex 与 Claude Code 两个本地中转服务：
+Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载 `.zip` 便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，程序会启动一个同时支持 Codex 与 Claude Code 的本地中转服务：
 
 - [下载 `CodexLocalProxy-macos-arm64.zip`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip)
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip.sha256)
@@ -146,7 +135,7 @@ python3 -m venv .venv
 需要先安装并配置 CC Switch，确保本机存在 `~/.cc-switch/cc-switch.db`。
 
 ```powershell
-.\.venv\Scripts\python.exe codex_local_proxy_app.py
+.\.venv\Scripts\python.exe local_proxy_app.py
 ```
 
 默认不会自动打开网页。如需在启动时同时打开两个控制台，可显式追加 `--open-browser`。
@@ -154,19 +143,19 @@ python3 -m venv .venv
 控制台地址：
 
 ```text
-http://127.0.0.1:17890/control/
+http://127.0.0.1:17890/control/codex/
 ```
 
 Claude Code 控制台：
 
 ```text
-http://127.0.0.1:17891/control/
+http://127.0.0.1:17890/control/claude/
 ```
 
 Claude Code PowerShell 配置：
 
 ```powershell
-$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17891"
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17890"
 $env:ANTHROPIC_API_KEY = "local-claude-proxy"
 claude
 ```
@@ -232,11 +221,20 @@ cp config/providers.example.toml config/providers.toml
 
 ```text
 .
-├── codex_local_proxy.py       本地中转、路由、重试和 Token 统计
-├── codex_local_proxy_app.py   Windows 托盘入口
+├── local_proxy_app.py         本地中转统一启动入口
+├── local_proxy/               统一应用、公共转发核心、Codex/Claude 平级协议模块
+│   ├── application.py         统一服务生命周期和托盘
+│   ├── server.py              一个 FastAPI 应用和一个 LocalProxyServer
+│   ├── core.py                公共路由、重试、存储和转发基础能力
+│   ├── codex.py / claude.py   两套平级供应商实现
+│   ├── codex_profile.py       Codex 配置与 Profile 装配
+│   ├── claude_profile.py      Claude 配置与 Profile 装配
+│   ├── protocols/             协议适配器
+│   └── transports/            上游传输实现
 ├── proxy_static/              Codex 与 Claude Code 共享控制台
 ├── probe_codex_cc_switch.py   CC Switch 供应商探测 CLI
 ├── probe_codex_gui.py         桌面探测界面
+├── probe_tools/               探测入口共用的客户端和 GUI 支持模块
 ├── provider_status/           健康监测 Worker、Codex/Claude 探测、存储和状态页
 ├── config/                    公开供应商配置示例
 ├── deploy/                    systemd 与 Nginx 部署模板

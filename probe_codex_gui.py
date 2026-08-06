@@ -16,7 +16,7 @@ from typing import Any, Callable
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-import probe_gui_support as support
+from probe_tools import probe_gui_support as support
 
 
 APP_TITLE = "Codex 供应商探测"

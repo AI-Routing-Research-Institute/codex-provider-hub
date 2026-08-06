@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-from codex_local_proxy import (
+from local_proxy.core import (
     HealthStatusUrlStore,
     LocalProxyServer,
     ProviderRouter,
@@ -24,10 +24,10 @@ from codex_local_proxy import (
     UsageStore,
     create_proxy_app,
     filter_self_referencing_providers,
-    load_proxy_providers,
     order_proxy_providers,
 )
-from provider_proxy_protocol import ClaudeMessagesProtocol
+from local_proxy.codex import load_proxy_providers
+from local_proxy.protocols.claude_messages import ClaudeMessagesProtocol
 
 
 async def _empty_wait() -> None:
@@ -2158,8 +2158,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="runtime-data-directory"', page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=17", page.text)
-        self.assertIn("app.js?v=20", page.text)
+        self.assertIn("styles.css?v=18", page.text)
+        self.assertIn("app.js?v=21", page.text)
         self.assertIn('id="usage-history-popover"', page.text)
         self.assertIn('id="recovery-history-meta"', page.text)
         self.assertIn("selectProvider", script.text)
@@ -2171,8 +2171,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('suffix: "B"', script.text)
         self.assertIn("provider-token-cell", script.text)
         self.assertIn("openUsageHistoryPopover", script.text)
-        self.assertIn("/control/api/usage-history", script.text)
-        self.assertIn("/control/api/ui-config", script.text)
+        self.assertIn('controlUrl("/api/usage-history")', script.text)
+        self.assertIn('controlUrl("/api/ui-config")', script.text)
         self.assertNotIn("/control/api/codex-config", script.text)
         self.assertIn("请求记录", script.text)
         self.assertIn("流级失败", script.text)
@@ -2189,7 +2189,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("codex-local-proxy-theme", script.text)
         self.assertIn("recent_errors", script.text)
         self.assertIn("retry.history", script.text)
-        self.assertIn("/control/api/recovery-history", script.text)
+        self.assertIn('controlUrl("/api/recovery-history")', script.text)
         self.assertIn("recoveryOutcomeLabel", script.text)
         self.assertIn("输出后未重放", script.text)
         self.assertIn("positionRecoveryPopover", script.text)

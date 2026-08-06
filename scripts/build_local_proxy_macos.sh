@@ -47,7 +47,7 @@ DIST_PATH="$(
 mkdir -p "$BUILD_PATH" "$WORK_PATH" "$DIST_PATH"
 
 # Generate the app icon. The .icns suffix selects the macOS container.
-"$PYTHON" "$PROJECT_PATH/codex_local_proxy_app.py" --write-icon "$ICON_PATH"
+"$PYTHON" "$PROJECT_PATH/local_proxy_app.py" --write-icon "$ICON_PATH"
 if [[ ! -f $ICON_PATH ]]; then
     printf 'Unable to generate the application icon: %s\n' "$ICON_PATH" >&2
     exit 1

@@ -1,18 +1,18 @@
 # Codex 本地中转
 
-统一程序同时运行两个本地中转，从 `~/.cc-switch/cc-switch.db` 只读加载各自供应商：
+统一程序只启动一个监听 `127.0.0.1:17890` 的本地中转，从 `~/.cc-switch/cc-switch.db` 只读加载两套供应商。Codex 控制台地址：
 
 ```text
-http://127.0.0.1:17890/control/
+http://127.0.0.1:17890/control/codex/
 ```
 
 ```text
-Claude Code: http://127.0.0.1:17891/control/
+Claude Code: http://127.0.0.1:17890/control/claude/
 ```
 
 ## Windows 便携版
 
-从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，默认同时打开两个控制台并通过一个图标常驻 Windows 通知区域，不需要安装项目虚拟环境。
+从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，通过一个图标常驻 Windows 通知区域，不需要安装项目虚拟环境。托盘菜单可以分别打开两个控制台视图。
 
 便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。Codex 数据保存在 `~/.codex-local-proxy/`，Claude Code 数据保存在 `~/.claude-local-proxy/`，两套选择、统计和恢复记录互不混用。
 
@@ -21,12 +21,12 @@ Claude Code: http://127.0.0.1:17891/control/
 在 Claude Code 控制台复制 PowerShell 配置，或在当前终端执行：
 
 ```powershell
-$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17891"
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17890"
 $env:ANTHROPIC_API_KEY = "local-claude-proxy"
 claude
 ```
 
-Claude 服务读取 CC Switch 的 `app_type = "claude"` 供应商，支持 `ANTHROPIC_API_KEY` 和 `ANTHROPIC_AUTH_TOKEN`。它原样转发 Anthropic Messages 请求，并在可见输出开始前处理网络错误、HTTP `408/429/500/502/503/504/529` 和 Anthropic SSE 临时错误。输出开始后不会重放请求。
+统一服务把 `/v1/messages` 和 `/v1/messages/count_tokens` 路由到 Claude 协议，其余 `/v1/*` 路由到 Codex 协议；不提供无 `/v1` 前缀的 `/messages`。Claude 协议读取 CC Switch 的 `app_type = "claude"` 供应商，支持 `ANTHROPIC_API_KEY` 和 `ANTHROPIC_AUTH_TOKEN`。它原样转发 Anthropic Messages 请求，并在可见输出开始前处理网络错误、HTTP `408/429/500/502/503/504/529` 和 Anthropic SSE 临时错误。输出开始后不会重放请求。
 
 `meta.apiFormat = "openai_chat"` 的条目会在页面显示为协议不兼容。第一版不进行 OpenAI Chat Completions 到 Anthropic Messages 的转换。
 
@@ -37,7 +37,7 @@ Claude 服务读取 CC Switch 的 `app_type = "claude"` 供应商，支持 `ANTH
 ## 启动
 
 ```powershell
-.\.venv\Scripts\python.exe codex_local_proxy_app.py
+.\.venv\Scripts\python.exe local_proxy_app.py
 ```
 
 安装桌面快捷方式：
@@ -50,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 
 ## 运行设置
 
-控制台的“运行设置”页可以修改本地端口、供应商数据源和服务器检测地址。数据源保存前会以只读方式验证，保存后立即替换新请求使用的供应商列表；检测地址也会立即生效。端口修改需要退出并重新启动本地中转，随后重新复制一次 Codex 配置。
+控制台的“运行设置”页可以修改供应商数据源和服务器检测地址；统一端口只在 Codex 控制台中配置。数据源保存前会以只读方式验证，保存后立即替换新请求使用的供应商列表；检测地址也会立即生效。端口修改需要退出并重新启动本地中转，随后重新复制 Codex 与 Claude Code 配置。
 
 本地数据目录固定为 `~/.codex-local-proxy/`，页面只展示该位置，不允许修改。`settings.json` 保存端口、数据源、检测地址、重试策略和供应商显示偏好，`usage.sqlite3` 保存 Token 聚合数据和最近 24 小时的脱敏恢复记录。Codex 自身的配置文件仍是 `~/.codex/config.toml`，本地中转不会自动覆盖它。
 

@@ -1,6 +1,16 @@
 "use strict";
 
 const CONTROL_HEADER = { "X-Local-Proxy-Control": "1" };
+const CONTROL_BASE = (() => {
+  const pathname = window.location?.pathname || "/control/codex/";
+  const match = pathname.match(/^\/control\/(codex|claude)(?:\/|$)/);
+  return match ? `/control/${match[1]}` : "/control/codex";
+})();
+
+function controlUrl(path) {
+  return `${CONTROL_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 let latestStatus = null;
 let latestHealthStatus = null;
 let healthStatusError = null;
@@ -40,7 +50,7 @@ let uiConfig = {
   proxy_url: "",
   peer_console_label: "切换控制台",
   peer_console_url: "#",
-  config_endpoint: "/control/api/config",
+  config_endpoint: controlUrl("/api/config"),
   config_button_label: "复制客户端配置",
   config_location_label: "客户端配置文件",
   config_location_hint: "配置片段的默认位置",
@@ -52,7 +62,7 @@ let uiConfig = {
   shutdown_client_name: "客户端",
   provider_label: "客户端",
   theme_storage_key: "local-proxy-theme",
-  features: { usage_history: true },
+  features: { usage_history: true, shared_port: false },
 };
 
 const providerList = document.querySelector("#provider-list");
@@ -118,6 +128,11 @@ function applyUiConfig(config) {
   text("#runtime-data-directory", uiConfig.data_directory);
   text("#runtime-config-location", uiConfig.config_location);
   text("#runtime-port-hint", `只监听 127.0.0.1；修改后需要重启并重新复制 ${uiConfig.client_name} 配置`);
+  const runtimePort = document.querySelector("#runtime-port");
+  if (runtimePort) runtimePort.disabled = uiConfig.features.shared_port === true;
+  if (uiConfig.features.shared_port === true) {
+    text("#runtime-port-hint", "统一端口由 Codex 控制台管理");
+  }
   text("#runtime-restart-notice", uiConfig.restart_config_text);
   text("#copy-config", uiConfig.config_button_label);
   text("#footer-message", "Key 不会显示，也不会写入页面或日志");
@@ -129,7 +144,7 @@ function applyUiConfig(config) {
 
 async function readUiConfig() {
   try {
-    const response = await fetch("/control/api/ui-config", { cache: "no-store" });
+    const response = await fetch(controlUrl("/api/ui-config"), { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     applyUiConfig(await response.json());
   } catch {
@@ -354,7 +369,7 @@ async function readRecoveryHistory({ loadMore = false, refresh = false } = {}) {
   try {
     const params = new URLSearchParams({ limit: String(RECOVERY_HISTORY_PAGE_SIZE) });
     if (loadMore) params.set("cursor", latestRecoveryHistory.next_cursor);
-    const response = await fetch(`/control/api/recovery-history?${params}`, { cache: "no-store" });
+    const response = await fetch(`${controlUrl("/api/recovery-history")}?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json();
     latestRecoveryHistory = loadMore
@@ -536,7 +551,7 @@ async function responseDetail(response, fallback) {
 
 async function readRuntimeSettings({ quiet = false } = {}) {
   try {
-    const response = await fetch("/control/api/runtime-settings", { cache: "no-store" });
+    const response = await fetch(controlUrl("/api/runtime-settings"), { cache: "no-store" });
     if (!response.ok) throw new Error(await responseDetail(response, `HTTP ${response.status}`));
     renderRuntimeSettings(await response.json());
   } catch (error) {
@@ -765,7 +780,7 @@ async function readUsageHistory({ reset = false } = {}) {
       usage_window: selectedWindow,
     });
     if (cursor) params.set("cursor", cursor);
-    const response = await fetch(`/control/api/usage-history?${params}`, { cache: "no-store" });
+    const response = await fetch(`${controlUrl("/api/usage-history")}?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(await responseDetail(response, "无法读取请求记录"));
     const result = await response.json();
     if (
@@ -1638,7 +1653,7 @@ async function readStatus({ quiet = false } = {}) {
   const requestSequence = ++statusRequestSequence;
   try {
     const response = await fetch(
-      `/control/api/status?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl("/api/status")}?usage_window=${encodeURIComponent(usageWindow.value)}`,
       { cache: "no-store" },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1701,7 +1716,7 @@ async function setProviderHidden(provider, hidden) {
   controlRequestActive = true;
   try {
     const response = await fetch(
-      `/control/api/providers/${encodeURIComponent(provider.provider_id)}/visibility?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/visibility`)}?usage_window=${encodeURIComponent(usageWindow.value)}`,
       {
         method: "POST",
         headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
@@ -1728,7 +1743,7 @@ async function saveProviderOrder(providerIds) {
   controlRequestActive = true;
   try {
     const response = await fetch(
-      `/control/api/providers/order?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl("/api/providers/order")}?usage_window=${encodeURIComponent(usageWindow.value)}`,
       {
         method: "POST",
         headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
@@ -1764,7 +1779,7 @@ async function selectProvider(provider) {
   const requestSequence = ++statusRequestSequence;
   try {
     const response = await fetch(
-      `/control/api/providers/${encodeURIComponent(provider.provider_id)}/select?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/select`)}?usage_window=${encodeURIComponent(usageWindow.value)}`,
       { method: "POST", headers: CONTROL_HEADER, cache: "no-store" },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1787,7 +1802,7 @@ async function refreshProviders() {
   controlRequestActive = true;
   const requestSequence = ++statusRequestSequence;
   try {
-    const response = await fetch(`/control/api/refresh?usage_window=${encodeURIComponent(usageWindow.value)}`, {
+    const response = await fetch(`${controlUrl("/api/refresh")}?usage_window=${encodeURIComponent(usageWindow.value)}`, {
       method: "POST",
       headers: CONTROL_HEADER,
       cache: "no-store",
@@ -1814,7 +1829,7 @@ async function saveRetrySettings(event) {
   }
   button.disabled = true;
   try {
-    const response = await fetch("/control/api/retry-policy", {
+    const response = await fetch(controlUrl("/api/retry-policy"), {
       method: "POST",
       headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
       body: JSON.stringify(policy),
@@ -1841,7 +1856,7 @@ async function validateRuntimeDatabase() {
   }
   button.disabled = true;
   try {
-    const response = await fetch("/control/api/runtime-settings/validate-database", {
+    const response = await fetch(controlUrl("/api/runtime-settings/validate-database"), {
       method: "POST",
       headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
       body: JSON.stringify({ database_path: databasePath }),
@@ -1919,7 +1934,7 @@ async function saveRuntimeSettings(event) {
   }
   button.disabled = true;
   try {
-    const response = await fetch("/control/api/runtime-settings", {
+    const response = await fetch(controlUrl("/api/runtime-settings"), {
       method: "POST",
       headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1976,7 +1991,7 @@ async function copyConfig() {
 async function shutdownProxy() {
   if (!window.confirm(`退出本地中转后，${uiConfig.shutdown_client_name} 新请求将无法连接。确定退出吗？`)) return;
   try {
-    const response = await fetch("/control/api/shutdown", {
+    const response = await fetch(controlUrl("/api/shutdown"), {
       method: "POST",
       headers: CONTROL_HEADER,
       cache: "no-store",

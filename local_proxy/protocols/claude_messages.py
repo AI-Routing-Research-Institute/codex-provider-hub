@@ -196,10 +196,10 @@ class ClaudeUsageCapture:
                     self._observe(value)
         if not 200 <= status_code < 300:
             return None
-        from codex_local_proxy import TokenUsage
+        from local_proxy.core import TokenUsage
 
         if not self._saw_usage:
-            from codex_local_proxy import _estimate_text_tokens
+            from local_proxy.core import _estimate_text_tokens
 
             request = _decode_json(self.request_body)
             input_text = "\n".join(_anthropic_text_segments(request))

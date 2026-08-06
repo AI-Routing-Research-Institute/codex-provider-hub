@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectPath = (Resolve-Path -LiteralPath $ProjectRoot).Path
-$scriptPath = Join-Path $projectPath "codex_local_proxy_app.py"
+$scriptPath = Join-Path $projectPath "local_proxy_app.py"
 if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
     throw "未找到本地中转入口：$scriptPath"
 }

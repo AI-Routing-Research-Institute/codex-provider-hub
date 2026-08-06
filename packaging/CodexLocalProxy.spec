@@ -20,7 +20,7 @@ data_files = [
 ]
 
 a = Analysis(
-    [str(ROOT / "codex_local_proxy_app.py")],
+    [str(ROOT / "local_proxy_app.py")],
     pathex=[str(ROOT)],
     binaries=[],
     datas=data_files,
