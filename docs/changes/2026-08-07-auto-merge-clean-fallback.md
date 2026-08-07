@@ -56,4 +56,4 @@ GitHub API 错误文本或检查状态查询不完整时，Agent 将硬停止并
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/3
