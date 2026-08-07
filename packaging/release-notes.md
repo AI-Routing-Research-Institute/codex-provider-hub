@@ -1,40 +1,40 @@
-## Codex 本地中转 Windows 便携版
+# Codex Provider Hub v0.1.7
 
-下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。程序会静默启动并常驻 Windows 通知区域，不会自动打开网页；需要时可从托盘菜单分别打开 Codex 和 Claude Code 控制台。托盘菜单支持为当前用户开启或关闭“开机自启”。
+## 用户可见变化
 
-使用要求：
+- Codex Responses 与 Claude Messages 合并为一个本地服务，默认只监听 `127.0.0.1:17890`。
+- Codex 与 Claude Code 控制台共用一套前端资源，分别通过 `/control/codex/` 和 `/control/claude/` 访问。
+- 共享端口、CC Switch 数据库路径、重试策略和检测地址；供应商选择、排序、隐藏及用量数据仍按协议隔离。
+- 新增最近 24 小时请求记录、运行中请求、筛选、分页和请求结果详情。
+- Codex 支持显示会话名称并为指定会话固定供应商；Claude 请求记录可用，但不启用会话路由。
+- 加固模型容量错误识别，超长错误文本仍可在输出前进入自动重试。
 
-- Windows x64
-- 已安装并配置 CC Switch
-- CC Switch 数据库位于当前用户的 `~/.cc-switch/cc-switch.db`
+## 数据与兼容性
 
-安全说明：
+运行数据统一保存在 `~/.codex-local-proxy/`：
 
-- EXE 不包含供应商数据库、API Key、本机设置、检测地址或用量数据
-- 设置和用量保存在 `%LOCALAPPDATA%\CodexLocalProxy`
-- 可使用随附的 `.sha256` 文件验证下载完整性
-- 当前版本尚未进行商业代码签名，Windows SmartScreen 可能显示“未知发布者”
+```text
+shared-settings.json
+codex-settings.json
+codex-usage.sqlite3
+claude-settings.json
+claude-usage.sqlite3
+```
 
-本版本包含供应商切换、Token 统计、自动重试与熔断、服务器可用性摘要，以及输出前 `response.failed/upstream_error` 自动恢复。
+- 首次启动会自动拆分旧 Codex/Claude 配置和 SQLite 数据；确认新目标存在后删除旧文件，不额外保留备份。
+- 不再监听旧 Claude 独立端口 `17891`。Claude Code 继续以本地根地址作为 `ANTHROPIC_BASE_URL`，实际请求 `/v1/messages`。
+- SQLite 会自动增加请求历史表；旧 Token 和恢复记录保持兼容，无需手动迁移。
+- EXE/App 不包含 CC Switch 数据库、API Key、本机配置或用量数据。
 
-## Codex 本地中转 macOS 便携版
+## 下载与运行
 
-下载 `CodexLocalProxy-macos-arm64.zip` 后解压得到 `CodexLocalProxy-macos-arm64.app`，拖入「应用程序」文件夹（可选）即可使用。程序会静默启动并常驻 macOS 菜单栏，需要时可从菜单栏手动打开 Codex 或 Claude Code 控制台。仅支持 Apple Silicon（M 系列芯片）机型。
+- Windows x64：下载 `CodexLocalProxy-win-x64.exe`。当前版本未进行商业代码签名，SmartScreen 可能显示“未知发布者”。
+- macOS：下载 `CodexLocalProxy-macos-arm64.zip`，仅支持 macOS 11+ Apple Silicon。首次运行需右键选择“打开”，或移除 Gatekeeper 隔离属性。
+- 两个平台均需先安装并配置 CC Switch，并确保 `~/.cc-switch/cc-switch.db` 存在。
+- 可使用随附的 `.sha256` 文件验证下载完整性。
 
-使用要求：
+## 验证证据
 
-- macOS 11.0 或更高版本，Apple Silicon（ARM64）
-- 已安装并配置 CC Switch
-- CC Switch 数据库位于当前用户的 `~/.cc-switch/cc-switch.db`
-
-首次打开说明（重要）：
-
-- 当前版本未经 Apple 代码签名与公证，直接双击会被 Gatekeeper 拦截
-- **首次打开方式**：右键点击 `.app` → 选择「打开」→ 在「无法验证开发者」对话框中点击「打开」，之后即可正常双击启动
-- 或在终端执行：`xattr -dr com.apple.quarantine /路径/到/CodexLocalProxy-macos-arm64.app`
-
-安全说明：
-
-- App 不包含供应商数据库、API Key、本机设置、检测地址或用量数据
-- 共享设置与两套协议数据统一保存在 `~/.codex-local-proxy`，Codex 和 Claude Code 的选择与用量文件彼此独立
-- 可使用随附的 `.sha256` 文件验证下载完整性
+- Python 完整测试：335 项通过。
+- Node 前端测试：19 项通过。
+- 源码 smoke test：通过，单服务、两个控制台、两套协议及共享静态资源均已覆盖。
