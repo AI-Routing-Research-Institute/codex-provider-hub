@@ -66,6 +66,7 @@ def default_protocol_settings() -> dict[str, Any]:
         "selected_provider_id": None,
         "provider_order": [],
         "hidden_provider_ids": [],
+        "session_provider_overrides": {},
     }
 
 
@@ -166,6 +167,16 @@ def load_protocol_settings(path: Path) -> dict[str, Any]:
                     if isinstance(value, str) and value.strip()
                 )
             )
+    overrides = payload.get("session_provider_overrides")
+    if isinstance(overrides, dict):
+        settings["session_provider_overrides"] = {
+            thread_id: provider_id.strip()
+            for thread_id, provider_id in list(overrides.items())[:1000]
+            if isinstance(thread_id, str)
+            and 1 <= len(thread_id) <= 256
+            and isinstance(provider_id, str)
+            and provider_id.strip()
+        }
     return settings
 
 
@@ -184,6 +195,16 @@ def save_protocol_settings(settings: dict[str, Any], path: Path) -> None:
                     if isinstance(value, str) and value.strip()
                 )
             )
+    overrides = settings.get("session_provider_overrides")
+    if isinstance(overrides, dict):
+        normalized["session_provider_overrides"] = {
+            thread_id: provider_id.strip()
+            for thread_id, provider_id in list(overrides.items())[-1000:]
+            if isinstance(thread_id, str)
+            and 1 <= len(thread_id) <= 256
+            and isinstance(provider_id, str)
+            and provider_id.strip()
+        }
     _write_json_object(path, normalized)
 
 

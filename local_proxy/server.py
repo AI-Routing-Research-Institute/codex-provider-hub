@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from local_proxy.core import (
     _empty_usage_summary,
     _forward_request,
     _public_control_status,
+    _public_requests,
     _valid_control_request,
     order_proxy_providers,
     retry_policy_from_mapping,
@@ -60,7 +62,7 @@ UI_CONFIG_FIELDS = frozenset(
         "features",
     }
 )
-UI_FEATURE_FIELDS = frozenset({"usage_history"})
+UI_FEATURE_FIELDS = frozenset({"usage_history", "session_routing"})
 
 
 @dataclass
@@ -73,6 +75,7 @@ class ProxyProfile:
     allowed_proxy_paths: frozenset[str] | None = None
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None
     on_provider_selected: Callable[[str], None] | None = None
+    on_session_provider_override_changed: Callable[[str, str | None], None] | None = None
     hidden_provider_ids: Iterable[str] = ()
     provider_order: Iterable[str] = ()
     on_hidden_provider_ids_changed: Callable[[tuple[str, ...]], None] | None = None
@@ -94,6 +97,7 @@ class ProxyProfile:
     ui_config: Callable[[], Mapping[str, Any]] | None = None
     provider_selectable: Callable[[ProxyProvider], bool] | None = None
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None
     config_endpoint_name: str = "config"
     owns_client: bool = True
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -217,6 +221,7 @@ def create_unified_proxy_app(
             usage_store=profile.usage_store,
             recovery_history_store=profile.recovery_history_store,
             protocol_adapter=profile.protocol_adapter,
+            session_name_resolver=profile.session_name_resolver,
         )
 
     return app
@@ -253,6 +258,7 @@ def _register_control_routes(
             health_status_url=profile.health_status_url_store.get(),
             service_name=profile.service_name,
             provider_public_fields=profile.provider_public_fields,
+            session_name_resolver=profile.session_name_resolver,
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
@@ -329,6 +335,76 @@ def _register_control_routes(
         except (OSError, sqlite3.Error):
             return JSONResponse(status_code=503, content={"detail": "无法读取请求记录"})
         return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
+
+    async def control_requests(request: Request):
+        if profile.usage_store is None:
+            return JSONResponse(status_code=503, content={"detail": "请求记录功能不可用"})
+        provider_id = request.query_params.get("provider_id", "").strip() or None
+        if provider_id and not any(
+            provider.provider_id == provider_id for provider in profile.router.providers()
+        ):
+            return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+        try:
+            payload = _public_requests(
+                profile.router,
+                profile.usage_store,
+                window=request.query_params.get("window", "24h"),
+                status_filter=request.query_params.get("status", "all"),
+                provider_id=provider_id,
+                query=request.query_params.get("query", ""),
+                cursor=request.query_params.get("cursor"),
+                session_name_resolver=profile.session_name_resolver,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取本地请求记录"})
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+    async def control_session_route(session_key: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.usage_store is None or not re.fullmatch(r"[0-9a-f]{24}", session_key):
+            return JSONResponse(status_code=404, content={"detail": "未找到该会话"})
+        try:
+            payload = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return JSONResponse(status_code=422, content={"detail": "会话路由格式无效"})
+        if not isinstance(payload, dict) or "provider_id" not in payload:
+            return JSONResponse(status_code=422, content={"detail": "会话路由格式无效"})
+        provider_id = payload["provider_id"]
+        if provider_id is not None and not isinstance(provider_id, str):
+            return JSONResponse(status_code=422, content={"detail": "provider_id 必须是字符串或 null"})
+        thread_id = profile.router.thread_id_for_session_key(session_key)
+        if thread_id is None:
+            thread_id = profile.usage_store.thread_id_for_session_key(session_key)
+        if thread_id is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到该会话"})
+        if provider_id is not None:
+            candidate = next(
+                (
+                    provider
+                    for provider in profile.router.providers()
+                    if provider.provider_id == provider_id
+                ),
+                None,
+            )
+            if candidate is None:
+                return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+            if profile.provider_selectable is not None and not profile.provider_selectable(candidate):
+                return JSONResponse(status_code=409, content={"detail": "该供应商与当前协议不兼容"})
+        previous = profile.router.session_provider_override(thread_id)
+        try:
+            profile.router.set_session_provider_override(thread_id, provider_id)
+            if profile.on_session_provider_override_changed is not None:
+                profile.on_session_provider_override_changed(thread_id, provider_id)
+        except (OSError, ValueError, sqlite3.Error):
+            profile.router.set_session_provider_override(thread_id, previous)
+            return JSONResponse(status_code=503, content={"detail": "无法保存会话路由"})
+        return JSONResponse(
+            content={"session_key": session_key, "provider_id": provider_id},
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def control_retry_policy(request: Request):
         if not _valid_control_request(request):
@@ -500,6 +576,13 @@ def _register_control_routes(
     app.add_api_route(f"{prefix}/api/status", control_status, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/recovery-history", control_recovery_history, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/usage-history", control_usage_history, methods=["GET"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/requests", control_requests, methods=["GET"], include_in_schema=False)
+    app.add_api_route(
+        f"{prefix}/api/session-routes/{{session_key}}",
+        control_session_route,
+        methods=["POST"],
+        include_in_schema=False,
+    )
     app.add_api_route(f"{prefix}/api/retry-policy", control_retry_policy, methods=["POST"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/runtime-settings", control_runtime_settings, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/runtime-settings", control_update_runtime_settings, methods=["POST"], include_in_schema=False)

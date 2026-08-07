@@ -94,7 +94,10 @@ def claude_ui_config(port: int, root: Path | None = None) -> dict[str, Any]:
         "shutdown_client_name": "Claude Code",
         "provider_label": "Claude Code",
         "theme_storage_key": "local-proxy-theme",
-        "features": {"usage_history": True},
+        "features": {
+            "usage_history": True,
+            "session_routing": False,
+        },
     }
 
 

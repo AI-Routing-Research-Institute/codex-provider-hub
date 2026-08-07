@@ -22,6 +22,8 @@ from local_proxy.core import (
     TokenUsage,
     UsageCapture,
     UsageStore,
+    _codex_thread_id,
+    _public_control_status,
     create_proxy_app,
     filter_self_referencing_providers,
     order_proxy_providers,
@@ -50,6 +52,37 @@ def provider(
 
 
 class ProviderRouterTests(unittest.TestCase):
+    def test_active_request_exposes_resolved_name_without_thread_id(self) -> None:
+        router = ProviderRouter((provider("first", current=True),))
+        thread_id = "019fa83f-2a11-73b0-a862-4d51679219ef"
+        request = router.begin_request(thread_id=thread_id)
+
+        payload = _public_control_status(
+            router,
+            session_name_resolver=lambda requested: {
+                item: "Codex服务可用检测" for item in requested
+            },
+        )
+
+        self.assertEqual(
+            payload["providers"][0]["active_sessions"],
+            [{"name": "Codex服务可用检测"}],
+        )
+        self.assertNotIn(thread_id, json.dumps(payload, ensure_ascii=False))
+        router.finish_request(request, status_code=200)
+        self.assertEqual(router.status().active_request_details, ())
+
+    def test_codex_thread_id_reads_bounded_json_metadata(self) -> None:
+        thread_id = "019fa83f-2a11-73b0-a862-4d51679219ef"
+        headers = {
+            "x-codex-turn-metadata": json.dumps(
+                {"thread_id": thread_id, "turn_id": "turn-fixture"}
+            )
+        }
+
+        self.assertEqual(_codex_thread_id(headers), thread_id)
+        self.assertIsNone(_codex_thread_id({"x-codex-turn-metadata": "not-json"}))
+
     def test_switch_affects_new_requests_without_moving_active_request(self) -> None:
         router = ProviderRouter((provider("first", current=True), provider("second")))
 
@@ -97,6 +130,25 @@ class ProviderRouterTests(unittest.TestCase):
         self.assertEqual(router.status().recent_retry_errors[0].provider_id, "first")
         router.finish_request(rerouted, status_code=200)
         self.assertEqual(router.status().active_by_provider, {})
+
+    def test_session_override_routes_new_requests_and_retries_to_fixed_provider(self) -> None:
+        router = ProviderRouter(
+            (provider("first", current=True), provider("second")),
+            session_provider_overrides={"thread-a": "second"},
+        )
+
+        request = router.begin_request(thread_id="thread-a")
+        router.select("first")
+        rerouted, changed = router.route_retry_to_current(request)
+
+        self.assertEqual(request.provider.provider_id, "second")
+        self.assertFalse(changed)
+        self.assertEqual(rerouted.provider.provider_id, "second")
+        router.finish_request(request, status_code=200)
+        router.set_session_provider_override("thread-a", None)
+        following = router.begin_request(thread_id="thread-a")
+        self.assertEqual(following.provider.provider_id, "first")
+        router.finish_request(following, status_code=200)
 
     def test_refresh_preserves_selection_and_falls_back_safely(self) -> None:
         router = ProviderRouter((provider("first"), provider("second", current=True)))
@@ -410,6 +462,52 @@ class UsageTests(unittest.TestCase):
         self.assertNotIn("response_body", columns)
         self.assertNotIn("api_key", columns)
 
+    def test_local_request_history_keeps_24_hours_without_duplicating_usage(self) -> None:
+        now = 2_000_000.0
+        usage = TokenUsage(12, 3, 15, cached_tokens=4)
+        usage_id = self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=usage,
+            status_code=200,
+            recorded_at=now,
+            successful=False,
+        )
+        self.store.record_request(
+            started_at=now - 4,
+            finished_at=now,
+            provider_id="provider-a",
+            thread_id="thread-fixture",
+            session_name="Codex 服务可用检测",
+            model="gpt-5.6-sol",
+            status_code=200,
+            successful=False,
+            outcome="failed",
+            retry_count=2,
+            error_kind="stream_interrupted",
+            error_summary='Authorization: Bearer fixture-private-token',
+            usage=usage,
+            usage_id=usage_id,
+        )
+
+        history = self.store.request_history(
+            window="24h",
+            status="failed",
+            query="Codex 服务",
+            now=now + 1,
+        )
+
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["retry_count"], 2)
+        self.assertEqual(history["items"][0]["total_tokens"], 15)
+        self.assertNotIn("fixture-private-token", history["items"][0]["error_summary"])
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(request_history)")
+            }
+        self.assertNotIn("request_body", columns)
+
 
 class RecoveryHistoryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -648,6 +746,69 @@ api-version = "2026-07-01"
 
 
 class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_api_hides_thread_id_and_persists_session_route(self) -> None:
+        seen_hosts: list[str] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            seen_hosts.append(request.url.host)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "response-fixture",
+                    "output": [],
+                    "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                },
+            )
+
+        thread_id = "019fa83f-2a11-73b0-a862-4d51679219ef"
+        metadata = json.dumps({"thread_id": thread_id})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            usage_store = UsageStore(Path(temp_dir) / "usage.sqlite3")
+            router = ProviderRouter((provider("first", current=True), provider("second")))
+            upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = create_proxy_app(
+                router,
+                client=upstream_client,
+                usage_store=usage_store,
+                session_name_resolver=lambda requested: {
+                    item: "请求列表测试" for item in requested
+                },
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            )
+            try:
+                first = await client.post(
+                    "/v1/responses",
+                    headers={"x-codex-turn-metadata": metadata},
+                    json={"model": "gpt-test", "input": "hello"},
+                )
+                requests = await client.get("/control/api/requests")
+                item = requests.json()["items"][0]
+                routed = await client.post(
+                    f"/control/api/session-routes/{item['session_key']}",
+                    headers={**{"X-Local-Proxy-Control": "1"}},
+                    json={"provider_id": "second"},
+                )
+                second = await client.post(
+                    "/v1/responses",
+                    headers={"x-codex-turn-metadata": metadata},
+                    json={"model": "gpt-test", "input": "again"},
+                )
+            finally:
+                await client.aclose()
+                await upstream_client.aclose()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(routed.status_code, 200)
+        self.assertEqual(seen_hosts, ["first.example.test", "second.example.test"])
+        self.assertEqual(item["session_name"], "请求列表测试")
+        self.assertEqual(item["model"], "gpt-test")
+        self.assertEqual(item["total_tokens"], 6)
+        self.assertNotIn(thread_id, requests.text)
+
     async def test_protocol_adapter_replaces_claude_placeholder_auth(self) -> None:
         seen: list[httpx.Request] = []
 
@@ -2319,8 +2480,9 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="runtime-data-directory"', page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=18", page.text)
-        self.assertIn("app.js?v=21", page.text)
+        self.assertIn("styles.css?v=20", page.text)
+        self.assertIn("app.js?v=23", page.text)
+        self.assertIn('id="active-sessions-popover"', page.text)
         self.assertIn('id="usage-history-popover"', page.text)
         self.assertIn('id="recovery-history-meta"', page.text)
         self.assertIn("selectProvider", script.text)
@@ -2332,6 +2494,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('suffix: "B"', script.text)
         self.assertIn("provider-token-cell", script.text)
         self.assertIn("openUsageHistoryPopover", script.text)
+        self.assertIn("openActiveSessionsPopover", script.text)
         self.assertIn('controlUrl("/api/usage-history")', script.text)
         self.assertIn('controlUrl("/api/ui-config")', script.text)
         self.assertNotIn("/control/api/codex-config", script.text)
@@ -2365,6 +2528,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(".usage-summary", styles.text)
         self.assertIn(".provider-token-cell", styles.text)
         self.assertIn(".usage-history-popover", styles.text)
+        self.assertIn(".active-sessions-popover", styles.text)
         self.assertIn("--provider-grid-columns", styles.text)
         self.assertIn("scrollbar-gutter: stable", styles.text)
         self.assertIn(".provider-health-cell", styles.text)

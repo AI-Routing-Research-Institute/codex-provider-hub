@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from local_proxy.codex import load_proxy_providers
+from local_proxy.codex_sessions import CodexSessionNameIndex
 from local_proxy.core import (
     DEFAULT_PORT,
     HealthStatusUrlStore,
@@ -91,7 +92,10 @@ def codex_ui_config(port: int, root: Path | None = None) -> dict[str, Any]:
         "shutdown_client_name": "Codex",
         "provider_label": "Codex API",
         "theme_storage_key": "local-proxy-theme",
-        "features": {"usage_history": True},
+        "features": {
+            "usage_history": True,
+            "session_routing": True,
+        },
     }
 
 
@@ -130,11 +134,32 @@ def build_codex_profile(
     router = ProviderRouter(
         providers,
         current_provider_id=settings.get("selected_provider_id"),
+        session_provider_overrides=settings.get("session_provider_overrides", {}),
     )
+    session_name_index = CodexSessionNameIndex()
 
     def persist(**changes: Any) -> None:
         with settings_lock:
             settings.update(changes, schema_version=SETTINGS_VERSION)
+            save_settings(settings, active_settings_path)
+
+    def persist_session_provider_override(
+        thread_id: str,
+        provider_id: str | None,
+    ) -> None:
+        with settings_lock:
+            overrides = dict(settings.get("session_provider_overrides", {}))
+            if provider_id is None:
+                overrides.pop(thread_id, None)
+            else:
+                overrides.pop(thread_id, None)
+                overrides[thread_id] = provider_id
+                if len(overrides) > 1000:
+                    overrides = dict(list(overrides.items())[-1000:])
+            settings.update(
+                session_provider_overrides=overrides,
+                schema_version=SETTINGS_VERSION,
+            )
             save_settings(settings, active_settings_path)
 
     def apply_database(source: Path, loaded: tuple) -> None:
@@ -168,6 +193,7 @@ def build_codex_profile(
         ),
         reload_providers=prepared_providers,
         on_provider_selected=lambda provider_id: persist(selected_provider_id=provider_id),
+        on_session_provider_override_changed=persist_session_provider_override,
         hidden_provider_ids=settings.get("hidden_provider_ids", ()),
         provider_order=settings.get("provider_order", ()),
         on_hidden_provider_ids_changed=lambda ids: persist(hidden_provider_ids=list(ids)),
@@ -187,5 +213,6 @@ def build_codex_profile(
         },
         runtime_metadata=runtime_metadata,
         ui_config=lambda: codex_ui_config(port, root),
+        session_name_resolver=session_name_index.resolve,
         config_endpoint_name="codex-config",
     )

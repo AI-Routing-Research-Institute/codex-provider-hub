@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import email.utils
+import hashlib
 import json
 import math
 import re
@@ -44,6 +45,9 @@ RECOVERY_HISTORY_HOURS = 24
 RECOVERY_HISTORY_API_LIMIT = 500
 RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 USAGE_HISTORY_PAGE_LIMIT = 50
+REQUEST_HISTORY_HOURS = 24
+REQUEST_HISTORY_PAGE_LIMIT = 50
+REQUEST_HISTORY_WINDOWS = {"1h", "6h", "24h"}
 SSE_RETRY_EVENT_PARSE_BYTES = 256 * 1024
 SSE_RETRY_PREFLIGHT_BYTES = 8 * 1024 * 1024
 SSE_RETRY_MARKER_TAIL_BYTES = 512
@@ -64,6 +68,8 @@ REQUEST_HEADERS_TO_REPLACE = HOP_BY_HOP_HEADERS | {
     "content-length",
     "host",
 }
+CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
+MAX_CODEX_TURN_METADATA_CHARS = 32 * 1024
 RESPONSE_HEADERS_TO_DROP = HOP_BY_HOP_HEADERS | {"content-length"}
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 SENSITIVE_ASSIGNMENT_RE = re.compile(
@@ -169,6 +175,37 @@ class UsageStore:
                     ON request_usage(recorded_at);
                 CREATE INDEX IF NOT EXISTS request_usage_provider_time
                     ON request_usage(provider_id, recorded_at);
+                CREATE TABLE IF NOT EXISTS request_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at REAL NOT NULL,
+                    finished_at REAL NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    session_key TEXT,
+                    session_name TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status_code INTEGER,
+                    succeeded INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    retry_count INTEGER NOT NULL,
+                    error_kind TEXT,
+                    error_summary TEXT,
+                    usage_id INTEGER,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                    usage_source TEXT,
+                    estimate_method TEXT
+                );
+                CREATE INDEX IF NOT EXISTS request_history_finished_at
+                    ON request_history(finished_at);
+                CREATE INDEX IF NOT EXISTS request_history_provider_time
+                    ON request_history(provider_id, finished_at);
+                CREATE INDEX IF NOT EXISTS request_history_session_key
+                    ON request_history(session_key);
                 """
             )
             columns = {
@@ -194,7 +231,7 @@ class UsageStore:
         status_code: int,
         recorded_at: float | None = None,
         successful: bool | None = None,
-    ) -> None:
+    ) -> int:
         timestamp = time.time() if recorded_at is None else float(recorded_at)
         status = int(status_code)
         values = (
@@ -212,7 +249,7 @@ class UsageStore:
             int(200 <= status < 300 if successful is None else bool(successful)),
         )
         with self._lock, closing(self._connect()) as connection, connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO request_usage (
                     recorded_at, provider_id, model, input_tokens, output_tokens,
@@ -222,6 +259,233 @@ class UsageStore:
                 """,
                 values,
             )
+            return int(cursor.lastrowid)
+
+    def record_request(
+        self,
+        *,
+        started_at: float,
+        provider_id: str,
+        thread_id: str | None,
+        session_name: str,
+        model: str,
+        status_code: int | None,
+        successful: bool,
+        outcome: str,
+        retry_count: int,
+        error_kind: str | None = None,
+        error_summary: str | None = None,
+        usage: TokenUsage | None = None,
+        usage_id: int | None = None,
+        finished_at: float | None = None,
+    ) -> None:
+        completed_at = time.time() if finished_at is None else float(finished_at)
+        started = min(float(started_at), completed_at)
+        safe_thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
+        safe_session_name = str(session_name or "未知会话")[:240]
+        safe_model = str(model or "unknown")[:240]
+        safe_summary = (
+            _sanitize_retry_summary(error_summary) if error_summary else None
+        )
+        token_usage = usage or TokenUsage(0, 0, 0, source="none")
+        values = (
+            started,
+            completed_at,
+            str(provider_id),
+            safe_thread_id,
+            _session_key(safe_thread_id),
+            safe_session_name,
+            safe_model,
+            None if status_code is None else int(status_code),
+            int(bool(successful)),
+            str(outcome)[:64],
+            max(0, round((completed_at - started) * 1000)),
+            max(0, int(retry_count)),
+            None if error_kind is None else str(error_kind)[:80],
+            safe_summary,
+            usage_id,
+            max(0, token_usage.input_tokens),
+            max(0, token_usage.output_tokens),
+            max(0, token_usage.total_tokens),
+            max(0, token_usage.cached_tokens),
+            max(0, token_usage.reasoning_tokens),
+            None if usage is None else token_usage.source,
+            None if usage is None else token_usage.estimate_method,
+        )
+        with self._lock, closing(self._connect()) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO request_history (
+                    started_at, finished_at, provider_id, thread_id, session_key,
+                    session_name, model, status_code, succeeded, outcome,
+                    duration_ms, retry_count, error_kind, error_summary, usage_id,
+                    input_tokens, output_tokens, total_tokens, cached_tokens,
+                    reasoning_tokens, usage_source, estimate_method
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            connection.execute(
+                "DELETE FROM request_history WHERE finished_at < ?",
+                (completed_at - REQUEST_HISTORY_HOURS * 3600,),
+            )
+
+    def request_history(
+        self,
+        *,
+        window: str = "24h",
+        status: str = "all",
+        provider_id: str | None = None,
+        query: str = "",
+        cursor: str | None = None,
+        limit: int = REQUEST_HISTORY_PAGE_LIMIT,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        normalized_window = window.strip().lower()
+        if normalized_window not in REQUEST_HISTORY_WINDOWS:
+            raise ValueError("请求记录时间范围无效")
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"all", "succeeded", "failed"}:
+            raise ValueError("请求记录状态无效")
+        timestamp = time.time() if now is None else float(now)
+        hours = {"1h": 1, "6h": 6, "24h": 24}[normalized_window]
+        cutoff = timestamp - hours * 3600
+        bounded_limit = max(1, min(int(limit), REQUEST_HISTORY_PAGE_LIMIT))
+        clauses = ["sort_at >= ?"]
+        params: list[Any] = [cutoff]
+        if normalized_status == "succeeded":
+            clauses.append("succeeded = 1")
+        elif normalized_status == "failed":
+            clauses.append("succeeded = 0")
+        if provider_id:
+            clauses.append("provider_id = ?")
+            params.append(str(provider_id))
+        normalized_query = query.strip()[:100]
+        if normalized_query:
+            clauses.append(
+                "(session_name LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' "
+                "OR provider_id LIKE ? ESCAPE '\\' OR COALESCE(error_summary, '') LIKE ? ESCAPE '\\')"
+            )
+            escaped = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            params.extend((pattern, pattern, pattern, pattern))
+        if cursor:
+            try:
+                cursor_time_hex, cursor_id_text = cursor.rsplit("@", 1)
+                cursor_time = float.fromhex(cursor_time_hex)
+                cursor_id = int(cursor_id_text)
+                if not math.isfinite(cursor_time) or cursor_id < 0:
+                    raise ValueError
+            except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+                raise ValueError("请求记录游标无效") from exc
+            clauses.append("(sort_at < ? OR (sort_at = ? AND cursor_id < ?))")
+            params.extend((cursor_time, cursor_time, cursor_id))
+        where = " AND ".join(clauses)
+        common_table = """
+            WITH items AS (
+                SELECT finished_at AS sort_at, id * 2 AS cursor_id,
+                       started_at, finished_at, provider_id, thread_id,
+                       session_key, session_name, model, status_code, succeeded,
+                       outcome, duration_ms, retry_count, error_kind, error_summary,
+                       input_tokens, output_tokens, total_tokens, cached_tokens,
+                       reasoning_tokens, usage_source, estimate_method
+                FROM request_history
+                UNION ALL
+                SELECT recorded_at AS sort_at, id * 2 + 1 AS cursor_id,
+                       recorded_at AS started_at, recorded_at AS finished_at,
+                       provider_id, NULL AS thread_id, NULL AS session_key,
+                       '未知会话' AS session_name, model, status_code, succeeded,
+                       CASE WHEN succeeded = 1 THEN 'succeeded' ELSE 'failed' END AS outcome,
+                       NULL AS duration_ms, 0 AS retry_count, NULL AS error_kind,
+                       NULL AS error_summary, input_tokens, output_tokens,
+                       total_tokens, cached_tokens, reasoning_tokens,
+                       usage_source, estimate_method
+                FROM request_usage AS legacy
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM request_history AS history
+                    WHERE history.usage_id = legacy.id
+                )
+            )
+        """
+        count_clauses = [clause for clause in clauses if not clause.startswith("(sort_at <")]
+        count_params = params[:-3] if cursor else params
+        with self._lock, closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            with connection:
+                connection.execute(
+                    "DELETE FROM request_history WHERE finished_at < ?",
+                    (timestamp - REQUEST_HISTORY_HOURS * 3600,),
+                )
+            total_count = int(
+                connection.execute(
+                    f"{common_table} SELECT COUNT(*) FROM items WHERE {' AND '.join(count_clauses)}",
+                    count_params,
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"""
+                {common_table}
+                SELECT * FROM items
+                WHERE {where}
+                ORDER BY sort_at DESC, cursor_id DESC
+                LIMIT ?
+                """,
+                (*params, bounded_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > bounded_limit
+        visible_rows = rows[:bounded_limit]
+        last_row = visible_rows[-1] if has_more and visible_rows else None
+        return {
+            "window": normalized_window,
+            "total_count": total_count,
+            "items": [
+                {
+                    "started_at": round(float(row["started_at"]) * 1000),
+                    "finished_at": round(float(row["finished_at"]) * 1000),
+                    "provider_id": str(row["provider_id"]),
+                    "_thread_id": row["thread_id"],
+                    "session_key": row["session_key"],
+                    "session_name": str(row["session_name"]),
+                    "model": str(row["model"]),
+                    "status_code": None if row["status_code"] is None else int(row["status_code"]),
+                    "succeeded": bool(row["succeeded"]),
+                    "outcome": str(row["outcome"]),
+                    "duration_ms": (
+                        None
+                        if row["duration_ms"] is None
+                        else int(row["duration_ms"])
+                    ),
+                    "retry_count": int(row["retry_count"]),
+                    "error_kind": row["error_kind"],
+                    "error_summary": row["error_summary"],
+                    "input_tokens": int(row["input_tokens"]),
+                    "output_tokens": int(row["output_tokens"]),
+                    "total_tokens": int(row["total_tokens"]),
+                    "cached_tokens": int(row["cached_tokens"]),
+                    "reasoning_tokens": int(row["reasoning_tokens"]),
+                    "usage_source": row["usage_source"],
+                    "estimate_method": row["estimate_method"],
+                }
+                for row in visible_rows
+            ],
+            "next_cursor": (
+                None
+                if last_row is None
+                else f"{float(last_row['sort_at']).hex()}@{int(last_row['cursor_id'])}"
+            ),
+        }
+
+    def thread_id_for_session_key(self, session_key: str) -> str | None:
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT thread_id FROM request_history
+                WHERE session_key = ? AND thread_id IS NOT NULL
+                ORDER BY finished_at DESC LIMIT 1
+                """,
+                (session_key,),
+            ).fetchone()
+        return None if row is None else str(row[0])
 
     def summary(self, window: str, *, now: float | None = None) -> dict[str, Any]:
         normalized = window.strip().lower()
@@ -919,12 +1183,23 @@ class RouteSnapshot:
     provider: ProxyProvider
     started_at: float
     started_wall_at: float
+    session_provider_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ActiveRequest:
+    request_id: int
+    provider_id: str
+    thread_id: str | None
+    started_wall_at: float
+    model: str = "unknown"
 
 
 @dataclass(frozen=True)
 class ProxyStatus:
     current_provider_id: str | None
     active_by_provider: dict[str, int]
+    active_request_details: tuple[ActiveRequest, ...]
     total_requests: int
     last_provider_id: str | None
     last_status_code: int | None
@@ -1070,11 +1345,13 @@ class ProviderRouter:
         self,
         providers: Iterable[ProxyProvider],
         current_provider_id: str | None = None,
+        session_provider_overrides: Mapping[str, str] | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self._providers: dict[str, ProxyProvider] = {}
         self._current_provider_id: str | None = None
         self._active: dict[str, int] = {}
+        self._active_request_details: dict[int, ActiveRequest] = {}
         self._total_requests = 0
         self._last_provider_id: str | None = None
         self._last_status_code: int | None = None
@@ -1089,6 +1366,14 @@ class ProviderRouter:
         )
         self._consecutive_failures: dict[str, int] = {}
         self._circuit_open_until: dict[str, float] = {}
+        self._session_provider_overrides = {
+            str(thread_id): str(provider_id)
+            for thread_id, provider_id in (session_provider_overrides or {}).items()
+            if isinstance(thread_id, str)
+            and thread_id
+            and isinstance(provider_id, str)
+            and provider_id
+        }
         self.replace_providers(providers, preferred_id=current_provider_id)
 
     def providers(self) -> tuple[ProxyProvider, ...]:
@@ -1137,10 +1422,17 @@ class ProviderRouter:
             self._current_provider_id = provider_id
             return provider
 
-    def begin_request(self) -> RouteSnapshot:
+    def begin_request(self, *, thread_id: str | None = None) -> RouteSnapshot:
         with self._lock:
-            provider = self.current_provider()
+            override_id = self._session_provider_overrides.get(thread_id or "")
+            provider = (
+                self._providers.get(override_id)
+                if override_id is not None
+                else self.current_provider()
+            )
             if provider is None:
+                if override_id is not None:
+                    raise ProviderConfigurationError("会话指定的供应商当前不可用")
                 raise ProviderConfigurationError("没有可用于转发的 CC Switch 供应商")
             open_until = self._circuit_open_until.get(provider.provider_id, 0.0)
             if open_until > time.monotonic():
@@ -1148,19 +1440,76 @@ class ProviderRouter:
             self._active[provider.provider_id] = self._active.get(provider.provider_id, 0) + 1
             self._total_requests += 1
             self._request_sequence += 1
-            return RouteSnapshot(
+            snapshot = RouteSnapshot(
                 request_id=self._request_sequence,
                 provider=provider,
                 started_at=time.monotonic(),
                 started_wall_at=time.time(),
+                session_provider_id=override_id,
             )
+            self._active_request_details[snapshot.request_id] = ActiveRequest(
+                request_id=snapshot.request_id,
+                provider_id=provider.provider_id,
+                thread_id=thread_id,
+                started_wall_at=snapshot.started_wall_at,
+            )
+            return snapshot
+
+    def update_request_model(self, snapshot: RouteSnapshot, model: str) -> None:
+        with self._lock:
+            detail = self._active_request_details.get(snapshot.request_id)
+            if detail is None:
+                return
+            self._active_request_details[snapshot.request_id] = ActiveRequest(
+                request_id=detail.request_id,
+                provider_id=detail.provider_id,
+                thread_id=detail.thread_id,
+                started_wall_at=detail.started_wall_at,
+                model=str(model or "unknown")[:240],
+            )
+
+    def session_provider_override(self, thread_id: str | None) -> str | None:
+        if not thread_id:
+            return None
+        with self._lock:
+            return self._session_provider_overrides.get(thread_id)
+
+    def set_session_provider_override(
+        self,
+        thread_id: str,
+        provider_id: str | None,
+    ) -> None:
+        with self._lock:
+            if provider_id is None:
+                self._session_provider_overrides.pop(thread_id, None)
+                return
+            if provider_id not in self._providers:
+                raise KeyError(provider_id)
+            self._session_provider_overrides[thread_id] = provider_id
+
+    def session_provider_overrides(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._session_provider_overrides)
+
+    def thread_id_for_session_key(self, session_key: str) -> str | None:
+        with self._lock:
+            for detail in self._active_request_details.values():
+                if _session_key(detail.thread_id) == session_key:
+                    return detail.thread_id
+        return None
 
     def route_retry_to_current(
         self,
         snapshot: RouteSnapshot,
     ) -> tuple[RouteSnapshot, bool]:
         with self._lock:
-            provider = self.current_provider()
+            detail = self._active_request_details.get(snapshot.request_id)
+            override_id = snapshot.session_provider_id
+            provider = (
+                self._providers.get(override_id)
+                if override_id is not None
+                else self.current_provider()
+            )
             if provider is None or provider.provider_id == snapshot.provider.provider_id:
                 return snapshot, False
 
@@ -1171,6 +1520,15 @@ class ProviderRouter:
             else:
                 self._active.pop(previous_id, None)
             self._active[provider.provider_id] = self._active.get(provider.provider_id, 0) + 1
+            detail = self._active_request_details.get(snapshot.request_id)
+            if detail is not None:
+                self._active_request_details[snapshot.request_id] = ActiveRequest(
+                    request_id=detail.request_id,
+                    provider_id=provider.provider_id,
+                    thread_id=detail.thread_id,
+                    started_wall_at=detail.started_wall_at,
+                    model=detail.model,
+                )
 
             progress = self._retrying.get(snapshot.request_id)
             if progress is not None:
@@ -1189,6 +1547,7 @@ class ProviderRouter:
                     provider=provider,
                     started_at=snapshot.started_at,
                     started_wall_at=snapshot.started_wall_at,
+                    session_provider_id=snapshot.session_provider_id,
                 ),
                 True,
             )
@@ -1207,6 +1566,7 @@ class ProviderRouter:
                 self._active[provider_id] = remaining
             else:
                 self._active.pop(provider_id, None)
+            self._active_request_details.pop(snapshot.request_id, None)
             self._last_provider_id = provider_id
             self._last_status_code = status_code
             self._last_error = error
@@ -1274,6 +1634,7 @@ class ProviderRouter:
             return ProxyStatus(
                 current_provider_id=self._current_provider_id,
                 active_by_provider=dict(self._active),
+                active_request_details=tuple(self._active_request_details.values()),
                 total_requests=self._total_requests,
                 last_provider_id=self._last_provider_id,
                 last_status_code=self._last_status_code,
@@ -1346,7 +1707,7 @@ def _default_ui_config(service_name: str) -> dict[str, Any]:
         "shutdown_client_name": client_name,
         "provider_label": "Claude Code" if claude else "Codex API",
         "theme_storage_key": "local-proxy-theme",
-        "features": {"usage_history": True},
+        "features": {"usage_history": True, "session_routing": not claude},
     }
 
 
@@ -1358,6 +1719,7 @@ def create_proxy_app(
     protocol_adapter: Any | None = None,
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None,
     on_provider_selected: Callable[[str], None] | None = None,
+    on_session_provider_override_changed: Callable[[str, str | None], None] | None = None,
     hidden_provider_ids: Iterable[str] = (),
     provider_order: Iterable[str] = (),
     on_hidden_provider_ids_changed: Callable[[tuple[str, ...]], None] | None = None,
@@ -1381,6 +1743,7 @@ def create_proxy_app(
     allowed_proxy_paths: frozenset[str] | None = None,
     provider_selectable: Callable[[ProxyProvider], bool] | None = None,
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     config_endpoint_name: str = "codex-config",
     codex_profile: Any | None = None,
     claude_profile: Any | None = None,
@@ -1496,6 +1859,7 @@ def create_proxy_app(
             health_status_url=active_health_status_url_store.get(),
             service_name=service_name,
             provider_public_fields=provider_public_fields,
+            session_name_resolver=session_name_resolver,
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
@@ -1555,6 +1919,75 @@ def create_proxy_app(
         except (OSError, sqlite3.Error):
             return JSONResponse(status_code=503, content={"detail": "无法读取请求记录"})
         return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
+
+    @app.get("/control/api/requests", include_in_schema=False)
+    async def control_requests(request: Request):
+        if usage_store is None:
+            return JSONResponse(status_code=503, content={"detail": "请求记录功能不可用"})
+        window = request.query_params.get("window", "24h").strip().lower()
+        status_filter = request.query_params.get("status", "all").strip().lower()
+        provider_id = request.query_params.get("provider_id", "").strip() or None
+        query = request.query_params.get("query", "")
+        if provider_id and not any(
+            provider.provider_id == provider_id for provider in router.providers()
+        ):
+            return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+        try:
+            payload = _public_requests(
+                router,
+                usage_store,
+                window=window,
+                status_filter=status_filter,
+                provider_id=provider_id,
+                query=query,
+                cursor=request.query_params.get("cursor"),
+                session_name_resolver=session_name_resolver,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取本地请求记录"})
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+    @app.post("/control/api/session-routes/{session_key}", include_in_schema=False)
+    async def control_session_route(session_key: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if usage_store is None or not re.fullmatch(r"[0-9a-f]{24}", session_key):
+            return JSONResponse(status_code=404, content={"detail": "未找到该会话"})
+        try:
+            payload = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return JSONResponse(status_code=422, content={"detail": "会话路由格式无效"})
+        provider_id = payload.get("provider_id") if isinstance(payload, dict) else ...
+        if provider_id is not None and not isinstance(provider_id, str):
+            return JSONResponse(status_code=422, content={"detail": "provider_id 必须是字符串或 null"})
+        thread_id = router.thread_id_for_session_key(session_key)
+        if thread_id is None:
+            thread_id = usage_store.thread_id_for_session_key(session_key)
+        if thread_id is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到该会话"})
+        if provider_id is not None:
+            candidate = next(
+                (provider for provider in router.providers() if provider.provider_id == provider_id),
+                None,
+            )
+            if candidate is None:
+                return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+            if provider_selectable is not None and not provider_selectable(candidate):
+                return JSONResponse(status_code=409, content={"detail": "该供应商与当前协议不兼容"})
+        previous = router.session_provider_override(thread_id)
+        try:
+            router.set_session_provider_override(thread_id, provider_id)
+            if on_session_provider_override_changed is not None:
+                on_session_provider_override_changed(thread_id, provider_id)
+        except (OSError, ValueError, sqlite3.Error):
+            router.set_session_provider_override(thread_id, previous)
+            return JSONResponse(status_code=503, content={"detail": "无法保存会话路由"})
+        return JSONResponse(
+            content={"session_key": session_key, "provider_id": provider_id},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post("/control/api/retry-policy", include_in_schema=False)
     async def control_retry_policy(request: Request):
@@ -1764,6 +2197,7 @@ def create_proxy_app(
             usage_store=usage_store,
             recovery_history_store=recovery_history_store,
             protocol_adapter=protocol_adapter,
+            session_name_resolver=session_name_resolver,
         )
 
     return app
@@ -1771,6 +2205,30 @@ def create_proxy_app(
 
 def _valid_control_request(request: Request) -> bool:
     return request.headers.get("X-Local-Proxy-Control") == "1"
+
+
+def _codex_thread_id(headers: Mapping[str, str]) -> str | None:
+    raw = headers.get(CODEX_TURN_METADATA_HEADER)
+    if not isinstance(raw, str) or not raw or len(raw) > MAX_CODEX_TURN_METADATA_CHARS:
+        return None
+    try:
+        metadata = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    thread_id = metadata.get("thread_id")
+    if not isinstance(thread_id, str) or not 1 <= len(thread_id) <= 256:
+        return None
+    if any(ord(character) < 32 for character in thread_id):
+        return None
+    return thread_id
+
+
+def _session_key(thread_id: str | None) -> str | None:
+    if not thread_id:
+        return None
+    return hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:24]
 
 
 def _public_control_status(
@@ -1783,6 +2241,7 @@ def _public_control_status(
     health_status_url: str | None = None,
     service_name: str = "codex-local-proxy",
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     status = router.status()
     policy = retry_policy or RetryPolicy()
@@ -1810,6 +2269,29 @@ def _public_control_status(
         "truncated": False,
         "items": recent_errors,
     }
+    active_thread_ids = {
+        detail.thread_id
+        for detail in status.active_request_details
+        if detail.thread_id is not None
+    }
+    session_names: Mapping[str, str] = {}
+    if session_name_resolver is not None and active_thread_ids:
+        try:
+            session_names = session_name_resolver(active_thread_ids)
+        except (OSError, ValueError, TypeError):
+            session_names = {}
+
+    def active_sessions(provider_id: str) -> list[dict[str, str]]:
+        return [
+            {
+                "name": session_names.get(detail.thread_id, "未知会话")
+                if detail.thread_id is not None
+                else "未知会话"
+            }
+            for detail in status.active_request_details
+            if detail.provider_id == provider_id
+        ]
+
     return {
         "service": service_name,
         "current_provider_id": current_id,
@@ -1857,6 +2339,7 @@ def _public_control_status(
                 "has_credentials": provider.has_credentials,
                 "wire_api": provider.wire_api,
                 "active_requests": status.active_by_provider.get(provider.provider_id, 0),
+                "active_sessions": active_sessions(provider.provider_id),
                 "hidden": provider.provider_id in hidden,
                 **(
                     dict(provider_public_fields(provider))
@@ -1866,6 +2349,120 @@ def _public_control_status(
             }
             for provider in router.providers()
         ],
+    }
+
+
+def _public_requests(
+    router: ProviderRouter,
+    usage_store: UsageStore,
+    *,
+    window: str = "24h",
+    status_filter: str = "all",
+    provider_id: str | None = None,
+    query: str = "",
+    cursor: str | None = None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
+) -> dict[str, Any]:
+    normalized_status = status_filter.strip().lower()
+    if normalized_status not in {"all", "running", "succeeded", "failed"}:
+        raise ValueError("请求记录状态无效")
+    providers = {provider.provider_id: provider for provider in router.providers()}
+    router_status = router.status()
+    active_details = list(router_status.active_request_details)
+    thread_ids = {
+        detail.thread_id for detail in active_details if detail.thread_id is not None
+    }
+    resolved_names: Mapping[str, str] = {}
+    if session_name_resolver is not None and thread_ids:
+        try:
+            resolved_names = session_name_resolver(thread_ids)
+        except (OSError, TypeError, ValueError):
+            resolved_names = {}
+    normalized_query = query.strip().casefold()[:100]
+    active: list[dict[str, Any]] = []
+    if normalized_status in {"all", "running"} and cursor is None:
+        for detail in active_details:
+            if provider_id and detail.provider_id != provider_id:
+                continue
+            session_name = (
+                resolved_names.get(detail.thread_id, "未知会话")
+                if detail.thread_id is not None
+                else "未知会话"
+            )
+            provider = providers.get(detail.provider_id)
+            searchable = " ".join(
+                (session_name, detail.model, detail.provider_id, provider.name if provider else "")
+            ).casefold()
+            if normalized_query and normalized_query not in searchable:
+                continue
+            retry = router_status.retrying_by_request.get(detail.request_id)
+            route_provider_id = router.session_provider_override(detail.thread_id)
+            active.append(
+                {
+                    "state": "running",
+                    "started_at": round(detail.started_wall_at * 1000),
+                    "finished_at": None,
+                    "provider_id": detail.provider_id,
+                    "provider_name": provider.name if provider else detail.provider_id,
+                    "session_key": _session_key(detail.thread_id),
+                    "session_name": session_name,
+                    "route_provider_id": route_provider_id,
+                    "model": detail.model,
+                    "status_code": None,
+                    "succeeded": None,
+                    "outcome": "retrying" if retry is not None else "receiving",
+                    "duration_ms": None,
+                    "retry_count": max(0, (retry.attempt - 1) if retry else 0),
+                    "error_kind": retry.kind if retry else None,
+                    "error_summary": retry.summary if retry else None,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "cached_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "usage_source": None,
+                    "estimate_method": None,
+                }
+            )
+        active.sort(key=lambda item: item["started_at"], reverse=True)
+
+    if normalized_status == "running":
+        history = {
+            "window": window,
+            "total_count": 0,
+            "items": [],
+            "next_cursor": None,
+        }
+    else:
+        history = usage_store.request_history(
+            window=window,
+            status=normalized_status,
+            provider_id=provider_id,
+            query=query,
+            cursor=cursor,
+        )
+    items: list[dict[str, Any]] = []
+    for raw in history["items"]:
+        item = dict(raw)
+        thread_id = item.pop("_thread_id", None)
+        if thread_id is not None and session_name_resolver is not None:
+            try:
+                current_name = session_name_resolver((thread_id,)).get(thread_id)
+            except (OSError, TypeError, ValueError):
+                current_name = None
+            if current_name:
+                item["session_name"] = current_name
+        provider = providers.get(item["provider_id"])
+        item["provider_name"] = provider.name if provider else item["provider_id"]
+        item["route_provider_id"] = router.session_provider_override(thread_id)
+        item["state"] = "succeeded" if item["succeeded"] else "failed"
+        items.append(item)
+    return {
+        "window": history["window"],
+        "active": active,
+        "items": items,
+        "next_cursor": history["next_cursor"],
+        "total_count": len(active) + int(history["total_count"]),
     }
 
 
@@ -1910,6 +2507,53 @@ def _record_recovery_event(
         pass
 
 
+def _record_request_event(
+    store: UsageStore | None,
+    *,
+    snapshot: RouteSnapshot,
+    thread_id: str | None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None,
+    model: str,
+    status_code: int | None,
+    successful: bool,
+    outcome: str,
+    retry_count: int,
+    error_kind: str | None = None,
+    error_summary: str | None = None,
+    usage: TokenUsage | None = None,
+    usage_id: int | None = None,
+) -> None:
+    if store is None:
+        return
+    session_name = "未知会话"
+    if thread_id is not None and session_name_resolver is not None:
+        try:
+            session_name = session_name_resolver((thread_id,)).get(
+                thread_id,
+                session_name,
+            )
+        except (OSError, TypeError, ValueError):
+            pass
+    try:
+        store.record_request(
+            started_at=snapshot.started_wall_at,
+            provider_id=snapshot.provider.provider_id,
+            thread_id=thread_id,
+            session_name=session_name,
+            model=model,
+            status_code=status_code,
+            successful=successful,
+            outcome=outcome,
+            retry_count=retry_count,
+            error_kind=error_kind,
+            error_summary=error_summary,
+            usage=usage,
+            usage_id=usage_id,
+        )
+    except (OSError, sqlite3.Error):
+        pass
+
+
 async def _forward_request(
     router: ProviderRouter,
     client: httpx.AsyncClient,
@@ -1921,9 +2565,11 @@ async def _forward_request(
     usage_store: UsageStore | None = None,
     recovery_history_store: RecoveryHistoryStore | None = None,
     protocol_adapter: Any | None = None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
 ):
+    thread_id = _codex_thread_id(request.headers)
     try:
-        snapshot = router.begin_request()
+        snapshot = router.begin_request(thread_id=thread_id)
     except ProviderCircuitOpenError as exc:
         return JSONResponse(
             status_code=503,
@@ -1937,6 +2583,19 @@ async def _forward_request(
         )
     provider = snapshot.provider
     if not provider.has_credentials:
+        _record_request_event(
+            usage_store,
+            snapshot=snapshot,
+            thread_id=thread_id,
+            session_name_resolver=session_name_resolver,
+            model="unknown",
+            status_code=503,
+            successful=False,
+            outcome="rejected",
+            retry_count=0,
+            error_kind="credential_missing",
+            error_summary="当前供应商没有可用认证配置",
+        )
         router.finish_request(snapshot, status_code=503, error="credential_missing")
         return JSONResponse(
             status_code=503,
@@ -1944,6 +2603,19 @@ async def _forward_request(
         )
 
     if _would_proxy_to_itself(provider, request):
+        _record_request_event(
+            usage_store,
+            snapshot=snapshot,
+            thread_id=thread_id,
+            session_name_resolver=session_name_resolver,
+            model="unknown",
+            status_code=508,
+            successful=False,
+            outcome="rejected",
+            retry_count=0,
+            error_kind="proxy_loop",
+            error_summary="当前供应商地址指向本地中转自身",
+        )
         router.finish_request(snapshot, status_code=508, error="proxy_loop")
         return JSONResponse(
             status_code=508,
@@ -1953,15 +2625,31 @@ async def _forward_request(
     try:
         request_body = await _read_request_body(request)
     except ValueError:
+        _record_request_event(
+            usage_store,
+            snapshot=snapshot,
+            thread_id=thread_id,
+            session_name_resolver=session_name_resolver,
+            model="unknown",
+            status_code=413,
+            successful=False,
+            outcome="rejected",
+            retry_count=0,
+            error_kind="request_too_large",
+            error_summary="请求体超过本地中转允许的大小",
+        )
         router.finish_request(snapshot, status_code=413, error="request_too_large")
         return JSONResponse(
             status_code=413,
             content={"error": {"message": "请求体超过本地中转允许的大小"}},
         )
+    model = _request_model(request_body)
+    router.update_request_model(snapshot, model)
     upstream_response: httpx.Response | None = None
     first_chunk: bytes | None = None
     stream: AsyncIterator[bytes] | None = None
     final_error = "upstream_unavailable"
+    final_summary: str | None = None
     attempt = 1
     while True:
         if attempt > 1:
@@ -2101,6 +2789,8 @@ async def _forward_request(
         )
         if retry_kind is not None and retry_summary is None and upstream_response is not None:
             retry_summary = await _response_retry_summary(upstream_response)
+        if retry_summary is not None:
+            final_summary = retry_summary
         if upstream_response is not None:
             await upstream_response.aclose()
             upstream_response = None
@@ -2153,6 +2843,19 @@ async def _forward_request(
 
     if upstream_response is None or stream is None:
         router.record_outcome(snapshot, transient_failure=True, policy=retry_policy)
+        _record_request_event(
+            usage_store,
+            snapshot=snapshot,
+            thread_id=thread_id,
+            session_name_resolver=session_name_resolver,
+            model=model,
+            status_code=502,
+            successful=False,
+            outcome="exhausted",
+            retry_count=max(0, attempt - 1),
+            error_kind=final_error,
+            error_summary=final_summary or _retry_kind_summary(final_error),
+        )
         router.finish_request(snapshot, status_code=502, error=final_error)
         return JSONResponse(
             status_code=502,
@@ -2189,6 +2892,7 @@ async def _forward_request(
     async def response_body() -> AsyncIterator[bytes]:
         stream_failure: tuple[str, str] | None = None
         stream_completed = False
+        history_kind: str | None = None
         try:
             if first_chunk is not None:
                 if usage_capture is not None:
@@ -2230,11 +2934,13 @@ async def _forward_request(
                         stage="after_output",
                         outcome="passed_through",
                     )
+                usage: TokenUsage | None = None
+                usage_id: int | None = None
                 if usage_capture is not None and usage_store is not None:
                     usage = usage_capture.finalize(upstream_response.status_code)
                     if usage is not None:
                         try:
-                            usage_store.record(
+                            usage_id = usage_store.record(
                                 provider_id=snapshot.provider.provider_id,
                                 model=usage_capture.model,
                                 usage=usage,
@@ -2247,6 +2953,35 @@ async def _forward_request(
                             )
                         except (OSError, sqlite3.Error):
                             pass
+                successful = (
+                    stream_completed
+                    and stream_failure is None
+                    and 200 <= upstream_response.status_code < 300
+                )
+                history_kind = stream_failure[0] if stream_failure else None
+                history_summary = stream_failure[1] if stream_failure else None
+                if not successful and history_kind is None:
+                    if not stream_completed:
+                        history_kind = "client_disconnected"
+                        history_summary = "客户端在响应完成前断开连接"
+                    else:
+                        history_kind = f"http_{upstream_response.status_code}"
+                        history_summary = f"HTTP {upstream_response.status_code}"
+                _record_request_event(
+                    usage_store,
+                    snapshot=snapshot,
+                    thread_id=thread_id,
+                    session_name_resolver=session_name_resolver,
+                    model=usage_capture.model if usage_capture is not None else model,
+                    status_code=upstream_response.status_code,
+                    successful=successful,
+                    outcome="succeeded" if successful else "failed",
+                    retry_count=max(0, attempt - 1),
+                    error_kind=history_kind,
+                    error_summary=history_summary,
+                    usage=usage,
+                    usage_id=usage_id,
+                )
             finally:
                 try:
                     await upstream_response.aclose()
@@ -2254,6 +2989,7 @@ async def _forward_request(
                     router.finish_request(
                         snapshot,
                         status_code=upstream_response.status_code,
+                        error=history_kind,
                     )
 
     return StreamingResponse(
