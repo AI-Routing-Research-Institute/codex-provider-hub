@@ -42,6 +42,19 @@ let usageHistoryLoading = false;
 let usageHistoryRequestSequence = 0;
 let usageHistoryWindow = "today";
 let usageHistoryError = null;
+let activeSessionsButton = null;
+let activeSessionsProviderId = null;
+let requestActiveItems = [];
+let requestHistoryItems = [];
+let requestNextCursor = null;
+let requestTotalCount = 0;
+let requestLoading = false;
+let requestLoadedMore = false;
+let requestError = null;
+let requestSequence = 0;
+let requestSearchTimer = null;
+let requestRenderPending = false;
+let requestRouteSelectActive = false;
 let uiConfig = {
   display_name: "本地中转",
   brand_mark: "LP",
@@ -62,7 +75,7 @@ let uiConfig = {
   shutdown_client_name: "客户端",
   provider_label: "客户端",
   theme_storage_key: "local-proxy-theme",
-  features: { usage_history: true },
+  features: { usage_history: true, session_routing: false },
 };
 
 const providerList = document.querySelector("#provider-list");
@@ -88,6 +101,7 @@ const recoveryPopover = document.querySelector("#recovery-popover");
 const recoveryErrorList = document.querySelector("#recovery-error-list");
 const recoveryHistoryMeta = document.querySelector("#recovery-history-meta");
 const providerHealthPopover = document.querySelector("#provider-health-popover");
+const activeSessionsPopover = document.querySelector("#active-sessions-popover");
 const usageHistoryPopover = document.querySelector("#usage-history-popover");
 const usageHistoryTitle = document.querySelector("#usage-history-title");
 const usageHistoryMeta = document.querySelector("#usage-history-meta");
@@ -96,6 +110,12 @@ const usageHistoryList = document.querySelector("#usage-history-list");
 const usageHistoryMore = document.querySelector("#usage-history-more");
 const usageHistoryClose = document.querySelector("#usage-history-close");
 const historyDetailPopover = document.querySelector("#history-detail-popover");
+const requestList = document.querySelector("#request-list");
+const requestsEmpty = document.querySelector("#requests-empty");
+const requestWindow = document.querySelector("#request-window");
+const requestStatus = document.querySelector("#request-status");
+const requestProvider = document.querySelector("#request-provider");
+const requestQuery = document.querySelector("#request-query");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 let themeStorageKey = "local-proxy-theme";
 const RECOVERY_HISTORY_PAGE_SIZE = 50;
@@ -132,6 +152,10 @@ function applyUiConfig(config) {
   text("#copy-config", uiConfig.config_button_label);
   text("#footer-message", "Key 不会显示，也不会写入页面或日志");
   document.querySelector("#usage-history-popover")?.toggleAttribute(
+    "hidden",
+    uiConfig.features.usage_history === false,
+  );
+  document.querySelector('[data-view="requests"]')?.toggleAttribute(
     "hidden",
     uiConfig.features.usage_history === false,
   );
@@ -205,6 +229,7 @@ function positionRecoveryPopover() {
 
 function showRecoveryDetails({ pinned = false } = {}) {
   if (!recovery.classList.contains("has-details")) return;
+  closeActiveSessionsPopover();
   closeUsageHistoryPopover();
   const wasOpen = recoveryPopover.classList.contains("show");
   window.clearTimeout(recoveryHideTimer);
@@ -228,6 +253,70 @@ function hideRecoveryDetails({ force = false } = {}) {
 function scheduleRecoveryDetailsHide() {
   window.clearTimeout(recoveryHideTimer);
   recoveryHideTimer = window.setTimeout(() => hideRecoveryDetails(), 140);
+}
+
+function positionActiveSessionsPopover() {
+  if (!activeSessionsButton) return;
+  const anchorRect = activeSessionsButton.getBoundingClientRect();
+  const popoverRect = activeSessionsPopover.getBoundingClientRect();
+  const margin = 12;
+  const gap = 8;
+  const left = Math.min(
+    window.innerWidth - popoverRect.width - margin,
+    Math.max(margin, anchorRect.left),
+  );
+  const below = anchorRect.bottom + gap;
+  const above = anchorRect.top - popoverRect.height - gap;
+  const top = below + popoverRect.height <= window.innerHeight - margin
+    ? below
+    : Math.max(margin, above);
+  activeSessionsPopover.style.left = `${Math.round(left)}px`;
+  activeSessionsPopover.style.top = `${Math.round(top)}px`;
+}
+
+function renderActiveSessionsPopover(provider) {
+  const sessions = Array.isArray(provider?.active_sessions) ? provider.active_sessions : [];
+  const heading = document.createElement("div");
+  heading.className = "active-sessions-heading";
+  const title = document.createElement("strong");
+  title.textContent = provider?.name || "活动会话";
+  const count = document.createElement("span");
+  count.textContent = `${sessions.length} 个活动请求`;
+  heading.append(title, count);
+
+  const list = document.createElement("ol");
+  list.className = "active-sessions-list";
+  for (const session of sessions) {
+    const item = document.createElement("li");
+    const dot = document.createElement("span");
+    dot.className = "active-session-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.textContent = session?.name || "未知会话";
+    item.append(dot, name);
+    list.append(item);
+  }
+  activeSessionsPopover.replaceChildren(heading, list);
+}
+
+function openActiveSessionsPopover(button, provider) {
+  hideRecoveryDetails({ force: true });
+  closeProviderHealthPopover();
+  closeUsageHistoryPopover();
+  activeSessionsButton?.setAttribute("aria-expanded", "false");
+  activeSessionsButton = button;
+  activeSessionsProviderId = provider.provider_id;
+  renderActiveSessionsPopover(provider);
+  activeSessionsPopover.classList.add("show");
+  button.setAttribute("aria-expanded", "true");
+  positionActiveSessionsPopover();
+}
+
+function closeActiveSessionsPopover() {
+  activeSessionsPopover.classList.remove("show");
+  activeSessionsButton?.setAttribute("aria-expanded", "false");
+  activeSessionsButton = null;
+  activeSessionsProviderId = null;
 }
 
 function formatRetryTime(value) {
@@ -554,6 +643,296 @@ async function readRuntimeSettings({ quiet = false } = {}) {
   }
 }
 
+function requestRecordKey(item) {
+  return [
+    item?.started_at,
+    item?.finished_at,
+    item?.provider_id,
+    item?.session_key,
+    item?.model,
+    item?.duration_ms,
+    item?.outcome,
+  ].join("|");
+}
+
+function formatRequestDuration(milliseconds) {
+  const value = Math.max(0, Number(milliseconds || 0));
+  if (value < 1000) return `${Math.round(value)}ms`;
+  if (value < 60000) return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
+  const minutes = Math.floor(value / 60000);
+  const seconds = Math.floor((value % 60000) / 1000);
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function requestResultLabel(item) {
+  if (item?.state === "running") {
+    return item.outcome === "retrying"
+      ? `第 ${Number(item.retry_count || 0) + 1} 次尝试`
+      : "接收中";
+  }
+  if (item?.succeeded === true) {
+    return `HTTP ${Number(item.status_code || 200)}`;
+  }
+  if (item?.error_summary) return item.error_summary;
+  const statusCode = Number(item?.status_code || 0);
+  return statusCode > 0 ? `HTTP ${statusCode} 失败` : "请求失败";
+}
+
+function populateRequestProviders() {
+  if (!requestProvider || !latestStatus?.providers) return;
+  const selected = requestProvider.value;
+  const signature = latestStatus.providers
+    .map((provider) => `${provider.provider_id}:${provider.name}`)
+    .join("|");
+  if (requestProvider.dataset.signature === signature) return;
+  requestProvider.dataset.signature = signature;
+  requestProvider.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "全部供应商";
+  requestProvider.append(all);
+  for (const provider of latestStatus.providers) {
+    const option = document.createElement("option");
+    option.value = provider.provider_id;
+    option.textContent = provider.name;
+    requestProvider.append(option);
+  }
+  requestProvider.value = latestStatus.providers.some(
+    (provider) => provider.provider_id === selected,
+  ) ? selected : "";
+}
+
+function createRequestRouteControl(item) {
+  if (
+    uiConfig.features.session_routing !== true
+    || !item.session_key
+    || !latestStatus?.providers?.length
+  ) {
+    const value = document.createElement("span");
+    value.className = "request-result";
+    value.textContent = item.provider_name || item.provider_id || "—";
+    value.title = value.textContent;
+    return value;
+  }
+  const select = document.createElement("select");
+  select.className = `request-route-select${item.route_provider_id ? "" : " following"}`;
+  select.setAttribute("aria-label", `设置 ${item.session_name || "当前会话"} 的供应商`);
+  const current = currentProvider(latestStatus);
+  const following = document.createElement("option");
+  following.value = "";
+  following.textContent = `跟随当前 · ${current?.name || "未选择"}`;
+  select.append(following);
+  for (const provider of latestStatus.providers) {
+    const option = document.createElement("option");
+    option.value = provider.provider_id;
+    option.textContent = provider.provider_id === item.route_provider_id
+      ? `${provider.name} · 已指定`
+      : provider.name;
+    select.append(option);
+  }
+  if (
+    item.route_provider_id
+    && !latestStatus.providers.some(
+      (provider) => provider.provider_id === item.route_provider_id,
+    )
+  ) {
+    const unavailable = document.createElement("option");
+    unavailable.value = item.route_provider_id;
+    unavailable.textContent = "已指定供应商不可用";
+    select.append(unavailable);
+  }
+  select.value = item.route_provider_id || "";
+  select.addEventListener("change", () => void updateSessionRoute(item, select));
+  return select;
+}
+
+function requestRouteSelectIsFocused() {
+  return requestRouteSelectActive
+    || document.activeElement?.classList?.contains("request-route-select") === true;
+}
+
+function renderRequests({ force = false } = {}) {
+  if (!requestList) return;
+  if (!force && requestRouteSelectIsFocused()) {
+    requestRenderPending = true;
+    return;
+  }
+  requestRenderPending = false;
+  const previousScrollTop = requestList.scrollTop;
+  const combined = [...requestActiveItems, ...requestHistoryItems];
+  requestList.replaceChildren();
+  for (const item of combined) {
+    const state = item.state === "running"
+      ? "running"
+      : item.succeeded === true ? "succeeded" : "failed";
+    const row = document.createElement("div");
+    row.className = `request-row ${state}`;
+
+    const status = document.createElement("span");
+    status.className = "request-state";
+    const dot = document.createElement("span");
+    dot.className = "request-state-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const statusText = document.createElement("span");
+    statusText.textContent = state === "running" ? "运行中" : state === "succeeded" ? "成功" : "失败";
+    status.append(dot, statusText);
+
+    const startedAt = document.createElement("time");
+    startedAt.className = "request-time";
+    startedAt.dateTime = new Date(Number(item.started_at)).toISOString();
+    startedAt.textContent = formatRetryTime(item.started_at);
+
+    const session = document.createElement("strong");
+    session.className = "request-session";
+    session.textContent = item.session_name || "未知会话";
+    session.title = session.textContent;
+
+    const route = createRequestRouteControl(item);
+
+    const model = document.createElement("span");
+    model.className = "request-model";
+    model.textContent = item.model || "unknown";
+    model.title = model.textContent;
+
+    const duration = document.createElement("span");
+    duration.className = "request-duration";
+    duration.textContent = state === "running"
+      ? formatRequestDuration(Date.now() - Number(item.started_at))
+      : item.duration_ms == null ? "—" : formatRequestDuration(item.duration_ms);
+
+    const token = document.createElement("span");
+    token.className = "request-token";
+    token.textContent = item.usage_source == null && Number(item.total_tokens || 0) === 0
+      ? "—"
+      : formatTokenCount(item.total_tokens);
+    token.title = item.usage_source === "estimated" ? "估算 Token" : "Token";
+
+    const result = document.createElement("span");
+    result.className = "request-result";
+    result.textContent = requestResultLabel(item);
+    result.title = result.textContent;
+    row.append(status, startedAt, session, route, model, duration, token, result);
+    requestList.append(row);
+  }
+  requestList.scrollTop = previousScrollTop;
+  requestsEmpty.hidden = combined.length > 0;
+  requestsEmpty.textContent = requestError
+    ? requestError
+    : requestLoading ? "正在读取请求记录…" : "当前筛选范围内没有请求记录";
+  const count = document.querySelector("#request-tab-count");
+  const activeCount = requestActiveItems.length;
+  const globalActiveCount = Number(latestStatus?.active_requests || 0);
+  count.hidden = globalActiveCount === 0;
+  count.textContent = String(globalActiveCount);
+  document.querySelector("#requests-meta").textContent = requestError
+    ? requestError
+    : `${requestTotalCount} 条记录 · 运行中 ${activeCount} 条 · 最多保留 24 小时`;
+}
+
+async function readRequests({ reset = false, loadMore = false, refresh = false, quiet = false } = {}) {
+  if (!requestList || (requestLoading && !reset)) return;
+  if (loadMore && !requestNextCursor) return;
+  if (reset) {
+    requestActiveItems = [];
+    requestHistoryItems = [];
+    requestNextCursor = null;
+    requestTotalCount = 0;
+    requestLoadedMore = false;
+    requestError = null;
+  }
+  requestLoading = true;
+  renderRequests();
+  const sequence = ++requestSequence;
+  const params = new URLSearchParams({
+    window: requestWindow.value,
+    status: requestStatus.value,
+  });
+  if (requestProvider.value) params.set("provider_id", requestProvider.value);
+  if (requestQuery.value.trim()) params.set("query", requestQuery.value.trim());
+  if (loadMore && requestNextCursor) params.set("cursor", requestNextCursor);
+  try {
+    const response = await fetch(`${controlUrl("/api/requests")}?${params}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(await responseDetail(response, `HTTP ${response.status}`));
+    const payload = await response.json();
+    if (sequence !== requestSequence) return;
+    requestActiveItems = Array.isArray(payload.active) ? payload.active : [];
+    const incoming = Array.isArray(payload.items) ? payload.items : [];
+    if (loadMore) {
+      const seen = new Set(requestHistoryItems.map(requestRecordKey));
+      requestHistoryItems.push(...incoming.filter((item) => !seen.has(requestRecordKey(item))));
+      requestNextCursor = payload.next_cursor || null;
+      requestLoadedMore = true;
+    } else if (refresh && requestHistoryItems.length > 0) {
+      const merged = [...incoming, ...requestHistoryItems];
+      const seen = new Set();
+      requestHistoryItems = merged.filter((item) => {
+        const key = requestRecordKey(item);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).sort((left, right) => Number(right.finished_at) - Number(left.finished_at));
+      if (!requestLoadedMore) requestNextCursor = payload.next_cursor || null;
+    } else {
+      requestHistoryItems = incoming;
+      requestNextCursor = payload.next_cursor || null;
+    }
+    if (!loadMore) requestTotalCount = Number(payload.total_count || 0);
+    requestError = null;
+  } catch (error) {
+    if (sequence !== requestSequence) return;
+    requestError = error?.message || "无法读取请求记录";
+    if (!quiet) showToast("请求记录读取失败", requestError, "error");
+  } finally {
+    if (sequence === requestSequence) {
+      requestLoading = false;
+      renderRequests();
+    }
+  }
+}
+
+async function updateSessionRoute(item, select) {
+  const previous = item.route_provider_id || "";
+  const selected = select.value || null;
+  select.disabled = true;
+  try {
+    const response = await fetch(
+      controlUrl(`/api/session-routes/${encodeURIComponent(item.session_key)}`),
+      {
+        method: "POST",
+        headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({ provider_id: selected }),
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) throw new Error(await responseDetail(response, `HTTP ${response.status}`));
+    for (const requestItem of [...requestActiveItems, ...requestHistoryItems]) {
+      if (requestItem.session_key === item.session_key) requestItem.route_provider_id = selected;
+    }
+    select.disabled = false;
+    renderRequests();
+    const provider = latestStatus?.providers?.find((candidate) => candidate.provider_id === selected);
+    showToast(
+      "会话路由已保存",
+      selected
+        ? `后续请求固定使用 ${provider?.name || selected}；当前请求不会中断。`
+        : "后续请求恢复跟随当前供应商；当前请求不会中断。",
+    );
+  } catch (error) {
+    select.value = previous;
+    select.disabled = false;
+    showToast("会话路由保存失败", error?.message || "本地中转没有接受这次修改。", "error");
+  }
+}
+
+function openRequestsForProvider(provider) {
+  populateRequestProviders();
+  requestProvider.value = provider.provider_id;
+  requestStatus.value = "running";
+  requestQuery.value = "";
+  switchView("requests");
+  void readRequests({ reset: true });
+}
+
 function switchView(viewName) {
   closeUsageHistoryPopover();
   for (const button of document.querySelectorAll(".view-tab")) {
@@ -562,10 +941,14 @@ function switchView(viewName) {
     button.setAttribute("aria-selected", String(active));
   }
   document.querySelector("#providers-view").hidden = viewName !== "providers";
+  document.querySelector("#requests-view").hidden = viewName !== "requests";
   document.querySelector("#settings-view").hidden = viewName !== "settings";
   document.querySelector("#runtime-view").hidden = viewName !== "runtime";
   if (viewName === "runtime" && latestRuntimeSettings === null) {
     readRuntimeSettings();
+  }
+  if (viewName === "requests" && requestHistoryItems.length === 0 && !requestLoading) {
+    readRequests({ reset: true });
   }
 }
 
@@ -819,6 +1202,7 @@ function closeUsageHistoryPopover() {
 }
 
 function openUsageHistoryPopover(button, provider) {
+  closeActiveSessionsPopover();
   if (
     usageHistoryProvider?.provider_id === provider.provider_id
     && usageHistoryPopover.classList.contains("show")
@@ -1250,6 +1634,7 @@ function positionProviderHealthPopover() {
 }
 
 function openProviderHealthPopover(button, provider, providerHealth) {
+  closeActiveSessionsPopover();
   closeUsageHistoryPopover();
   hideHistoryDetail({ force: true });
   if (healthDetailButton === button && providerHealthPopover.classList.contains("show")) {
@@ -1334,6 +1719,7 @@ function renderProviderList() {
       provider.current,
       provider.has_credentials,
       provider.active_requests,
+      (provider.active_sessions || []).map((session) => session.name),
       provider.hidden,
       providerUsage(provider.provider_id).request_count,
       providerUsage(provider.provider_id).total_tokens,
@@ -1349,6 +1735,7 @@ function renderProviderList() {
   closeProviderHealthPopover();
   const openUsageProviderId = usageHistoryProvider?.provider_id || null;
   usageHistoryButton = null;
+  activeSessionsButton = null;
   const providers = latestStatus.providers.filter((provider) => {
     if (provider.hidden && !manageProvidersMode) return false;
     return `${provider.name} ${provider.endpoint}`.toLocaleLowerCase().includes(query);
@@ -1374,24 +1761,34 @@ function renderProviderList() {
     state.append(Object.assign(document.createElement("span"), { className: "dot" }));
     state.append(provider.hidden ? "已隐藏" : provider.current ? "当前使用" : "可切换");
 
-    const copy = document.createElement("button");
-    copy.type = "button";
+    const copy = document.createElement("div");
     copy.className = "provider-copy";
-    copy.disabled = manageProvidersMode;
-    copy.setAttribute(
+    const providerSelect = document.createElement("button");
+    providerSelect.type = "button";
+    providerSelect.className = "provider-select";
+    providerSelect.disabled = manageProvidersMode;
+    providerSelect.setAttribute(
       "aria-label",
       (provider.current ? "当前供应商 " : "切换到 ") + provider.name,
     );
-    copy.setAttribute("aria-pressed", String(provider.current));
+    providerSelect.setAttribute("aria-pressed", String(provider.current));
     const title = document.createElement("span");
     title.className = "provider-title";
     const name = document.createElement("strong");
     name.textContent = escapeText(provider.name);
-    title.append(name);
+    providerSelect.append(name);
+    title.append(providerSelect);
     if (provider.active_requests > 0) {
-      const active = document.createElement("span");
+      const active = document.createElement("button");
+      active.type = "button";
       active.className = "active-badge";
       active.textContent = `${provider.active_requests} 个请求`;
+      active.title = "在请求页查看运行中的请求";
+      active.setAttribute("aria-label", `查看 ${provider.name} 正在运行的请求`);
+      active.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openRequestsForProvider(provider);
+      });
       title.append(active);
     }
     const endpoint = document.createElement("code");
@@ -1494,7 +1891,7 @@ function renderProviderList() {
       meta.append(visibility);
     }
     row.append(state, copy, healthCell, tokenCell, meta);
-    copy.addEventListener("click", (event) => {
+    providerSelect.addEventListener("click", (event) => {
       event.stopPropagation();
       if (!manageProvidersMode) selectProvider(provider);
     });
@@ -1529,6 +1926,18 @@ function renderProviderList() {
       saveProviderOrder([...providerList.children].map((item) => item.dataset.providerId));
     });
     providerList.append(row);
+  }
+  if (activeSessionsPopover.classList.contains("show")) {
+    const activeProvider = latestStatus.providers.find(
+      (provider) => provider.provider_id === activeSessionsProviderId,
+    );
+    if (!activeSessionsButton || !activeProvider) {
+      closeActiveSessionsPopover();
+    } else {
+      renderActiveSessionsPopover(activeProvider);
+      activeSessionsButton.setAttribute("aria-expanded", "true");
+      positionActiveSessionsPopover();
+    }
   }
   if (usageHistoryPopover.classList.contains("show")) {
     if (!usageHistoryButton) {
@@ -1575,6 +1984,10 @@ function renderStatus(status) {
   document.querySelector("#current-name").textContent = current?.name || "尚未选择";
   document.querySelector("#current-endpoint").textContent = current?.endpoint || "—";
   document.querySelector("#active-requests").textContent = String(status.active_requests);
+  const requestTabCount = document.querySelector("#request-tab-count");
+  requestTabCount.hidden = Number(status.active_requests || 0) === 0;
+  requestTabCount.textContent = String(status.active_requests || 0);
+  populateRequestProviders();
   document.querySelector("#auth-state").textContent = current?.has_credentials ? "已安全读取" : "缺失";
   document.querySelector("#wire-api").textContent = current?.wire_api
     ? (current.wire_api === "responses" ? "Responses · SSE" : current.wire_api === "anthropic_messages" ? "Messages · SSE" : escapeText(current.wire_api))
@@ -1641,6 +2054,7 @@ function renderStatus(status) {
     drainingDetail.textContent = "切换不会中断已经开始的流式响应。";
   }
   renderProviderList();
+  if (!document.querySelector("#requests-view").hidden) renderRequests();
 }
 
 async function readStatus({ quiet = false } = {}) {
@@ -1653,7 +2067,12 @@ async function readStatus({ quiet = false } = {}) {
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const status = await response.json();
-    if (requestSequence === statusRequestSequence) renderStatus(status);
+    if (requestSequence === statusRequestSequence) {
+      renderStatus(status);
+      if (!document.querySelector("#requests-view").hidden) {
+        void readRequests({ refresh: true, quiet: true });
+      }
+    }
   } catch (error) {
     footerMessage.textContent = "无法连接本地中转，服务可能已经退出";
     if (!quiet) showToast("连接失败", "无法读取本地中转状态。", "error");
@@ -2038,7 +2457,43 @@ usageHistoryList.addEventListener("scroll", () => {
     void readUsageHistory();
   }
 });
+for (const control of [requestWindow, requestStatus, requestProvider]) {
+  control.addEventListener("change", () => void readRequests({ reset: true }));
+}
+requestQuery.addEventListener("input", () => {
+  window.clearTimeout(requestSearchTimer);
+  requestSearchTimer = window.setTimeout(
+    () => void readRequests({ reset: true }),
+    240,
+  );
+});
+document.querySelector("#requests-refresh").addEventListener(
+  "click",
+  () => void readRequests({ reset: true }),
+);
+requestList.addEventListener("scroll", () => {
+  const remaining = requestList.scrollHeight
+    - requestList.scrollTop
+    - requestList.clientHeight;
+  if (remaining < 64 && requestNextCursor && !requestLoading) {
+    void readRequests({ loadMore: true });
+  }
+});
+requestList.addEventListener("focusout", () => {
+  requestRouteSelectActive = false;
+  window.setTimeout(() => {
+    if (requestRenderPending && !requestRouteSelectIsFocused()) {
+      renderRequests({ force: true });
+    }
+  }, 0);
+});
+requestList.addEventListener("focusin", (event) => {
+  if (event.target?.classList?.contains("request-route-select")) {
+    requestRouteSelectActive = true;
+  }
+});
 providerList.addEventListener("scroll", () => {
+  if (activeSessionsPopover.classList.contains("show")) positionActiveSessionsPopover();
   if (usageHistoryPopover.classList.contains("show")) positionUsageHistoryPopover();
 }, { passive: true });
 recoveryDetailsButton.addEventListener("click", () => {
@@ -2084,6 +2539,9 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest("#provider-health-popover") && !event.target.closest(".provider-health-toggle")) {
     closeProviderHealthPopover();
   }
+  if (!event.target.closest("#active-sessions-popover") && !event.target.closest(".active-badge")) {
+    closeActiveSessionsPopover();
+  }
   if (!event.target.closest("#usage-history-popover") && !event.target.closest(".provider-token-cell")) {
     closeUsageHistoryPopover();
   }
@@ -2102,6 +2560,10 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape" && historyDetailPopover.classList.contains("show")) {
     hideHistoryDetail({ force: true });
+  } else if (event.key === "Escape" && activeSessionsPopover.classList.contains("show")) {
+    const button = activeSessionsButton;
+    closeActiveSessionsPopover();
+    button?.focus();
   } else if (event.key === "Escape" && usageHistoryPopover.classList.contains("show")) {
     const button = usageHistoryButton;
     closeUsageHistoryPopover();
@@ -2113,6 +2575,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 window.addEventListener("resize", () => {
+  if (activeSessionsPopover.classList.contains("show")) positionActiveSessionsPopover();
   if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
   if (providerHealthPopover.classList.contains("show")) positionProviderHealthPopover();
   if (usageHistoryPopover.classList.contains("show")) positionUsageHistoryPopover();

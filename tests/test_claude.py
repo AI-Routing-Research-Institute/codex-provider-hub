@@ -790,9 +790,11 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("本地中转", page.text)
         self.assertNotIn("Claude Code 本地中转", page.text)
         self.assertIn('id="usage-history-popover"', page.text)
+        self.assertIn('id="active-sessions-popover"', page.text)
         self.assertIn('controlUrl("/api/ui-config")', script.text)
         self.assertIn('controlUrl("/api/usage-history")', script.text)
         self.assertIn(".usage-history-popover", styles.text)
+        self.assertIn(".active-sessions-popover", styles.text)
         self.assertEqual(ui_config.json()["service_id"], "claude")
         self.assertEqual(ui_config.json()["proxy_url"], "http://127.0.0.1:17890")
         self.assertEqual(

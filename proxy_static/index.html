@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="./static/styles.css?v=18">
+  <link rel="stylesheet" href="./static/styles.css?v=20">
 </head>
 <body>
   <main class="stage">
@@ -58,6 +58,7 @@
 
       <nav class="view-tabs" aria-label="控制台页面">
         <button class="view-tab active" type="button" data-view="providers" aria-selected="true">供应商</button>
+        <button class="view-tab" type="button" data-view="requests" aria-selected="false">请求 <span id="request-tab-count" class="view-tab-count" hidden>0</span></button>
         <button class="view-tab" type="button" data-view="settings" aria-selected="false">重试设置</button>
         <button class="view-tab" type="button" data-view="runtime" aria-selected="false">运行设置</button>
       </nav>
@@ -137,6 +138,27 @@
           <div id="draining" class="draining"><strong>没有旧请求正在处理</strong><span>切换不会中断已经开始的流式响应。</span></div>
         </aside>
       </div>
+
+      <section id="requests-view" class="requests-view view-panel" aria-labelledby="requests-title" hidden>
+        <div class="requests-heading">
+          <div>
+            <h2 id="requests-title">请求记录</h2>
+            <p id="requests-meta">保留最近 24 小时，正在运行的请求置顶显示</p>
+          </div>
+          <button id="requests-refresh" class="icon-button" type="button" title="刷新请求记录" aria-label="刷新请求记录">↻</button>
+        </div>
+        <div class="request-filters" aria-label="请求筛选">
+          <label><span class="visually-hidden">时间范围</span><select id="request-window"><option value="1h">近 1 小时</option><option value="6h">近 6 小时</option><option value="24h" selected>近 24 小时</option></select></label>
+          <label><span class="visually-hidden">请求状态</span><select id="request-status"><option value="all">全部状态</option><option value="running">运行中</option><option value="succeeded">成功</option><option value="failed">失败</option></select></label>
+          <label><span class="visually-hidden">供应商</span><select id="request-provider"><option value="">全部供应商</option></select></label>
+          <label class="request-search"><span class="search-icon" aria-hidden="true">⌕</span><input id="request-query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off"></label>
+        </div>
+        <div class="request-table-shell">
+          <div class="request-table-header" aria-hidden="true"><span>状态</span><span>开始时间</span><span>会话</span><span>供应商路由</span><span>模型</span><span>耗时</span><span>Token</span><span>结果</span></div>
+          <div id="request-list" class="request-list" aria-live="polite"></div>
+          <div id="requests-empty" class="requests-empty" hidden>当前筛选范围内没有请求记录</div>
+        </div>
+      </section>
 
       <section id="settings-view" class="settings-view view-panel" aria-labelledby="settings-title" hidden>
         <div class="settings-heading">
@@ -272,6 +294,7 @@
   </div>
 
   <div id="provider-health-popover" class="provider-health-popover" role="dialog" aria-modal="false" aria-label="服务器检测详情"></div>
+  <div id="active-sessions-popover" class="active-sessions-popover" role="dialog" aria-modal="false" aria-label="活动会话"></div>
   <div id="usage-history-popover" class="usage-history-popover" role="dialog" aria-modal="false" aria-label="请求记录">
     <div class="usage-history-heading">
       <div><strong id="usage-history-title">请求记录</strong><span id="usage-history-meta"></span></div>
@@ -283,6 +306,6 @@
   </div>
   <div id="history-detail-popover" class="history-detail-popover" role="tooltip"></div>
 
-  <script src="./static/app.js?v=21" defer></script>
+  <script src="./static/app.js?v=23" defer></script>
 </body>
 </html>

@@ -46,7 +46,6 @@ class LocalProxySettingsTests(unittest.TestCase):
             settings["health_status_url"] = (
                 "https://status.example.test/api/status?window=24h"
             )
-
             save_settings(settings, path)
 
             self.assertEqual(load_settings(path)["port"], 18888)
@@ -86,6 +85,9 @@ class LocalProxySettingsTests(unittest.TestCase):
                     {
                         "provider_order": [" second ", "first", "second", 1],
                         "hidden_provider_ids": [" hidden ", "", "hidden"],
+                        "session_provider_overrides": {
+                            "thread-fixture": " provider-b ",
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -95,6 +97,10 @@ class LocalProxySettingsTests(unittest.TestCase):
 
             self.assertEqual(settings["provider_order"], ["second", "first"])
             self.assertEqual(settings["hidden_provider_ids"], ["hidden"])
+            self.assertEqual(
+                settings["session_provider_overrides"],
+                {"thread-fixture": "provider-b"},
+            )
 
     def test_default_data_files_use_fixed_home_directory(self) -> None:
         self.assertEqual(data_directory().name, ".codex-local-proxy")
