@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+if command -v python3 >/dev/null 2>&1; then PYTHON=python3; elif command -v python >/dev/null 2>&1; then PYTHON=python; else echo "policy error: Python 3 is required" >&2; exit 1; fi
+exec "$PYTHON" scripts/team_policy.py pre-commit

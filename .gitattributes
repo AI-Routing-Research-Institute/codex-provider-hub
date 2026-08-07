@@ -1,3 +1,4 @@
 *.sh text eol=lf
+.githooks/* text eol=lf
 deploy/systemd/*.service text eol=lf
 deploy/nginx/*.conf text eol=lf

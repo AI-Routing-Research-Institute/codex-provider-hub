@@ -93,6 +93,16 @@ jobs:
             -PassThru
           if ($smokeCheck.ExitCode -ne 0) { throw "Packaged smoke test failed" }
 
+      - name: Generate release notes from verified change records
+        shell: pwsh
+        run: |
+          $previous = git describe --tags --match "v*" --exclude $env:RELEASE_TAG --abbrev=0
+          New-Item -ItemType Directory -Force -Path .build | Out-Null
+          python scripts\team_policy.py release-notes `
+            --base-tag $previous `
+            --head $env:RELEASE_TAG `
+            --output .build\release-notes.md
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -120,6 +130,6 @@ jobs:
               dist\CodexLocalProxy-win-x64.exe.sha256 `
               --verify-tag `
               --title "Codex 本地中转 $env:RELEASE_TAG" `
-              --notes-file packaging\release-notes.md
+              --notes-file .build\release-notes.md
           }
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release publish failed" }
