@@ -487,6 +487,39 @@ class UsageStore:
             ).fetchone()
         return None if row is None else str(row[0])
 
+    def recent_sessions(self, since: float) -> tuple[dict[str, Any], ...]:
+        """Return sessions represented by recent request history.
+
+        The Codex session index is authoritative for names when available, but
+        requests can arrive before that index is updated. Keep this fallback
+        small and internal: only thread IDs, names, and last activity are
+        returned to the profile merger.
+        """
+        cutoff = float(since)
+        with self._lock, closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT thread_id, session_name, finished_at
+                FROM request_history
+                WHERE finished_at >= ? AND thread_id IS NOT NULL
+                ORDER BY finished_at DESC, id DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+
+        sessions: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            thread_id = str(row["thread_id"])
+            if thread_id in sessions:
+                continue
+            sessions[thread_id] = {
+                "thread_id": thread_id,
+                "name": str(row["session_name"] or "未知会话").strip() or "未知会话",
+                "updated_at": float(row["finished_at"]),
+            }
+        return tuple(sessions.values())
+
     def summary(self, window: str, *, now: float | None = None) -> dict[str, Any]:
         normalized = window.strip().lower()
         if normalized not in USAGE_WINDOWS:
@@ -2268,6 +2301,15 @@ def _public_control_status(
     status = router.status()
     policy = retry_policy or RetryPolicy()
     current_id = status.current_provider_id
+    session_overrides = router.session_provider_overrides()
+    draining_by_provider: dict[str, int] = {}
+    for detail in status.active_request_details:
+        expected_provider_id = session_overrides.get(detail.thread_id or "", current_id)
+        if expected_provider_id == detail.provider_id:
+            continue
+        draining_by_provider[detail.provider_id] = (
+            draining_by_provider.get(detail.provider_id, 0) + 1
+        )
     hidden = set(hidden_provider_ids)
     recent_errors = [
         {
@@ -2361,6 +2403,7 @@ def _public_control_status(
                 "has_credentials": provider.has_credentials,
                 "wire_api": provider.wire_api,
                 "active_requests": status.active_by_provider.get(provider.provider_id, 0),
+                "draining_requests": draining_by_provider.get(provider.provider_id, 0),
                 "active_sessions": active_sessions(provider.provider_id),
                 "hidden": provider.provider_id in hidden,
                 **(
@@ -2561,6 +2604,7 @@ def _public_sessions(
             not item["active"],
             -int(item["updated_at"]),
             str(item["name"]).casefold(),
+            str(item["session_key"]),
         )
     )
     return {

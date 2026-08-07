@@ -150,6 +150,41 @@ class ProviderRouterTests(unittest.TestCase):
         self.assertEqual(following.provider.provider_id, "first")
         router.finish_request(following, status_code=200)
 
+    def test_draining_requests_respect_each_sessions_effective_provider(self) -> None:
+        router = ProviderRouter(
+            (provider("first", current=True), provider("second")),
+            session_provider_overrides={"thread-a": "second"},
+        )
+        request = router.begin_request(thread_id="thread-a")
+
+        active_payload = _public_control_status(router)
+        active_by_id = {
+            item["provider_id"]: item for item in active_payload["providers"]
+        }
+        self.assertEqual(active_by_id["second"]["active_requests"], 1)
+        self.assertEqual(active_by_id["second"]["draining_requests"], 0)
+
+        router.set_session_provider_override("thread-a", "first")
+        changed_payload = _public_control_status(router)
+        changed_by_id = {
+            item["provider_id"]: item for item in changed_payload["providers"]
+        }
+        self.assertEqual(changed_by_id["second"]["draining_requests"], 1)
+        router.finish_request(request, status_code=200)
+
+    def test_global_provider_switch_marks_only_unrouted_old_requests_draining(self) -> None:
+        router = ProviderRouter((provider("first", current=True), provider("second")))
+        request = router.begin_request()
+        router.select("second")
+
+        payload = _public_control_status(router)
+        by_id = {item["provider_id"]: item for item in payload["providers"]}
+
+        self.assertEqual(by_id["first"]["active_requests"], 1)
+        self.assertEqual(by_id["first"]["draining_requests"], 1)
+        self.assertEqual(by_id["second"]["draining_requests"], 0)
+        router.finish_request(request, status_code=200)
+
     def test_refresh_preserves_selection_and_falls_back_safely(self) -> None:
         router = ProviderRouter((provider("first"), provider("second", current=True)))
         router.select("first")
@@ -394,6 +429,53 @@ class UsageTests(unittest.TestCase):
                 cursor="invalid",
                 now=now,
             )
+
+    def test_recent_sessions_uses_latest_request_name_and_activity(self) -> None:
+        now = 2_000_000.0
+        self.store.record_request(
+            started_at=now - 20,
+            finished_at=now - 10,
+            provider_id="provider-a",
+            thread_id="thread-a",
+            session_name="old-service",
+            model="gpt-5",
+            status_code=200,
+            successful=True,
+            outcome="succeeded",
+            retry_count=0,
+        )
+        self.store.record_request(
+            started_at=now - 5,
+            finished_at=now - 1,
+            provider_id="provider-a",
+            thread_id="thread-a",
+            session_name="latest-service",
+            model="gpt-5",
+            status_code=200,
+            successful=True,
+            outcome="succeeded",
+            retry_count=0,
+        )
+        self.store.record_request(
+            started_at=now - 3,
+            finished_at=now - 2,
+            provider_id="provider-b",
+            thread_id="thread-b",
+            session_name="another-session",
+            model="gpt-5",
+            status_code=200,
+            successful=True,
+            outcome="succeeded",
+            retry_count=0,
+        )
+
+        sessions = self.store.recent_sessions(now - 24 * 3600)
+
+        self.assertEqual(
+            [(item["thread_id"], item["name"]) for item in sessions],
+            [("thread-a", "latest-service"), ("thread-b", "another-session")],
+        )
+        self.assertEqual(sessions[0]["updated_at"], now - 1)
 
     def test_existing_usage_database_adds_success_marker(self) -> None:
         old_path = Path(self.temp_context.name) / "old-usage.sqlite3"
@@ -2548,7 +2630,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
         self.assertIn("styles.css?v=22", page.text)
-        self.assertIn("app.js?v=26", page.text)
+        self.assertIn("app.js?v=27", page.text)
         self.assertIn("<span>请求</span><span>服务器检测</span>", page.text)
         self.assertIn("供应商", page.text)
         self.assertIn("设置会话路由", page.text)

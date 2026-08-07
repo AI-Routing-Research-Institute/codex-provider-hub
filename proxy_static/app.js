@@ -1,6 +1,7 @@
 "use strict";
 
 const CONTROL_HEADER = { "X-Local-Proxy-Control": "1" };
+const SESSION_ROUTE_CACHE_MS = 60_000;
 const CONTROL_BASE = (() => {
   const pathname = window.location?.pathname || "/control/codex/";
   const match = pathname.match(/^\/control\/(codex|claude)(?:\/|$)/);
@@ -59,6 +60,7 @@ let sessionRouteSelectedKey = "";
 let sessionRouteLoading = false;
 let sessionRouteSequence = 0;
 let sessionRouteError = null;
+let sessionRouteLastReadAt = 0;
 let uiConfig = {
   display_name: "本地中转",
   brand_mark: "LP",
@@ -738,6 +740,12 @@ function selectedSessionRouteItem() {
   return sessionRouteItems.find((item) => item.session_key === sessionRouteSelectedKey) || null;
 }
 
+function sessionRouteOptionLabel(item, duplicateRank = null, duplicateCount = 0) {
+  const name = item?.name || "未知会话";
+  const suffix = duplicateCount > 1 ? ` · 会话 ${duplicateRank}/${duplicateCount}` : "";
+  return `${item?.active ? "● " : ""}${name}${suffix} · ${formatRetryTime(item?.updated_at)}`;
+}
+
 function renderSessionRouteProviders() {
   if (!sessionRouteProviderSelect) return;
   const session = selectedSessionRouteItem();
@@ -779,28 +787,50 @@ function renderSessionRouteSettings() {
     if (!sessionRouteItems.some((item) => item.session_key === previous)) {
       sessionRouteSelectedKey = sessionRouteItems[0].session_key;
     }
+    const duplicateGroups = new Map();
+    for (const item of sessionRouteItems) {
+      const key = String(item.name || "未知会话").trim().toLocaleLowerCase();
+      const group = duplicateGroups.get(key) || [];
+      group.push(item);
+      duplicateGroups.set(key, group);
+    }
+    const duplicateRanks = new Map();
+    for (const group of duplicateGroups.values()) {
+      if (group.length < 2) continue;
+      [...group]
+        .sort((left, right) => String(left.session_key).localeCompare(String(right.session_key)))
+        .forEach((item, index) => duplicateRanks.set(item.session_key, [index + 1, group.length]));
+    }
     for (const item of sessionRouteItems) {
       const option = document.createElement("option");
       option.value = item.session_key;
-      const activePrefix = item.active ? "● " : "";
-      option.textContent = `${activePrefix}${item.name || "未知会话"} · ${formatRetryTime(item.updated_at)}`;
+      const [duplicateRank, duplicateCount] = duplicateRanks.get(item.session_key) || [null, 0];
+      option.textContent = sessionRouteOptionLabel(item, duplicateRank, duplicateCount);
       option.title = item.name || "未知会话";
       sessionRouteSessionSelect.append(option);
     }
     sessionRouteSessionSelect.value = sessionRouteSelectedKey;
   }
   renderSessionRouteProviders();
+  const initialLoading = sessionRouteLoading && sessionRouteItems.length === 0;
   sessionRouteMeta.textContent = sessionRouteError
-    || (sessionRouteLoading
+    || (initialLoading
       ? "正在读取最近 7 天会话…"
       : `最近 7 天 ${sessionRouteItems.length} 个会话，活跃会话优先`);
 }
 
-async function readSessionRoutes({ quiet = false } = {}) {
+async function readSessionRoutes({ quiet = false, force = false } = {}) {
   if (!sessionRouteSettingsButton || sessionRouteSettingsButton.hidden) return;
+  if (sessionRouteLoading) return;
+  if (
+    !force
+    && sessionRouteLastReadAt > 0
+    && Date.now() - sessionRouteLastReadAt < SESSION_ROUTE_CACHE_MS
+  ) return;
   const sequence = ++sessionRouteSequence;
+  const hadItems = sessionRouteItems.length > 0;
   sessionRouteLoading = true;
-  sessionRouteError = null;
+  if (!hadItems) sessionRouteError = null;
   renderSessionRouteSettings();
   try {
     const response = await fetch(controlUrl("/api/sessions"), { cache: "no-store" });
@@ -812,12 +842,15 @@ async function readSessionRoutes({ quiet = false } = {}) {
     renderSessionRouteSettings();
   } catch (error) {
     if (sequence !== sessionRouteSequence) return;
-    sessionRouteItems = [];
-    sessionRouteError = error?.message || "无法读取最近 7 天会话";
+    if (!hadItems) sessionRouteItems = [];
+    sessionRouteError = hadItems && quiet
+      ? null
+      : error?.message || "无法读取最近 7 天会话";
     renderSessionRouteSettings();
     if (!quiet) showToast("会话列表读取失败", sessionRouteError, "error");
   } finally {
     if (sequence === sessionRouteSequence) {
+      sessionRouteLastReadAt = Date.now();
       sessionRouteLoading = false;
       renderSessionRouteSettings();
     }
@@ -2191,7 +2224,7 @@ function renderStatus(status) {
   if (!retryFormLoaded) populateRetryForm(retry);
 
   const drainingProviders = status.providers.filter(
-    (provider) => !provider.current && provider.active_requests > 0,
+    (provider) => Number(provider.draining_requests || 0) > 0,
   );
   const draining = document.querySelector("#draining");
   const drainingTitle = draining.querySelector("strong");
@@ -2199,7 +2232,7 @@ function renderStatus(status) {
   if (drainingProviders.length > 0) {
     drainingTitle.textContent = "旧请求仍在完成";
     drainingDetail.textContent = drainingProviders
-      .map((provider) => `${provider.name}：${provider.active_requests} 个`)
+      .map((provider) => `${provider.name}：${provider.draining_requests} 个`)
       .join("，");
   } else {
     drainingTitle.textContent = "没有旧请求正在处理";
@@ -2648,7 +2681,7 @@ document.querySelector("#requests-refresh").addEventListener(
   "click",
   () => {
     void readRequests({ reset: true });
-    if (!sessionRoutePopover.hidden) void readSessionRoutes({ quiet: true });
+    if (!sessionRoutePopover.hidden) void readSessionRoutes({ quiet: true, force: true });
   },
 );
 sessionRouteSettingsButton.addEventListener("click", () => {

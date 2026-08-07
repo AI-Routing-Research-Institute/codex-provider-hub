@@ -69,6 +69,54 @@ test("opens the request page without provider or status filters", () => {
   assert.match(openSource, /requestStatus\.value = "all"/);
   assert.doesNotMatch(source, /悬停查看会话，点击进入请求页/);
 });
+test("labels duplicate routed sessions without exposing thread ids", () => {
+  const start = source.indexOf("function sessionRouteOptionLabel");
+  const end = source.indexOf("function renderSessionRouteProviders");
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const routeContext = vm.createContext({});
+  vm.runInContext(
+    `function formatRetryTime() { return "16:55:57"; }\n${source.slice(start, end)}\nthis.label = sessionRouteOptionLabel;`,
+    routeContext,
+    { filename: sourcePath },
+  );
+
+  assert.equal(
+    routeContext.label({ name: "设备打卡", active: false, updated_at: 1 }, 2, 2),
+    "设备打卡 · 会话 2/2 · 16:55:57",
+  );
+  assert.doesNotMatch(
+    routeContext.label({ name: "设备打卡", active: false, updated_at: 1 }, 1, 1),
+    /thread|session_key/i,
+  );
+});
+
+test("throttles session route refreshes and keeps cached items while refreshing", () => {
+  const start = source.indexOf("async function readSessionRoutes");
+  const end = source.indexOf("function openSessionRoutePopover");
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const readSource = source.slice(start, end);
+
+  assert.match(source, /const SESSION_ROUTE_CACHE_MS = 60_000/);
+  assert.match(readSource, /if \(sessionRouteLoading\) return/);
+  assert.match(readSource, /Date\.now\(\) - sessionRouteLastReadAt < SESSION_ROUTE_CACHE_MS/);
+  assert.match(readSource, /if \(!hadItems\) sessionRouteItems = \[\]/);
+  assert.match(source, /readSessionRoutes\(\{ quiet: true, force: true \}\)/);
+});
+
+test("uses route-aware draining request counts", () => {
+  const start = source.indexOf("const drainingProviders");
+  const end = source.indexOf("renderProviderList();", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const drainingSource = source.slice(start, end);
+
+  assert.match(drainingSource, /provider\.draining_requests/);
+  assert.doesNotMatch(drainingSource, /!provider\.current/);
+  assert.doesNotMatch(drainingSource, /provider\.active_requests/);
+});
+
 test("deduplicates active session names for the provider hover list", () => {
   const activeStart = source.indexOf("function activeSessionNames");
   const activeEnd = source.indexOf("function renderActiveSessionsPopover");

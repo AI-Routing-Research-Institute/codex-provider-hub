@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 import httpx
 
@@ -34,6 +34,34 @@ from local_proxy.shared_settings import (
 
 
 SETTINGS_VERSION = PROTOCOL_SETTINGS_VERSION
+
+
+def _merge_session_catalogs(
+    *catalogs: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    merged: dict[str, dict[str, Any]] = {}
+    for catalog in catalogs:
+        for item in catalog:
+            thread_id = item.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id:
+                continue
+            try:
+                updated_at = float(item.get("updated_at"))
+            except (TypeError, ValueError):
+                continue
+            current = merged.get(thread_id)
+            if current is None:
+                current = {
+                    "thread_id": thread_id,
+                    "name": "未知会话",
+                    "updated_at": updated_at,
+                }
+                merged[thread_id] = current
+            current_name = item.get("name")
+            if isinstance(current_name, str) and current_name.strip():
+                current["name"] = current_name.strip()
+            current["updated_at"] = max(float(current["updated_at"]), updated_at)
+    return tuple(merged.values())
 
 
 def settings_path() -> Path:
@@ -138,6 +166,13 @@ def build_codex_profile(
         session_provider_overrides=settings.get("session_provider_overrides", {}),
     )
     session_name_index = CodexSessionNameIndex()
+    usage_store = UsageStore(active_usage_path)
+
+    def session_catalog(since: float) -> tuple[dict[str, Any], ...]:
+        return _merge_session_catalogs(
+            usage_store.recent_sessions(since),
+            session_name_index.recent(since),
+        )
 
     def persist(**changes: Any) -> None:
         with settings_lock:
@@ -202,7 +237,7 @@ def build_codex_profile(
         config_fragment=lambda: codex_config_fragment(port),
         provider_launch_command=codex_cli_launch_command,
         retry_policy_store=retry_policy_store or RetryPolicyStore(),
-        usage_store=UsageStore(active_usage_path),
+        usage_store=usage_store,
         recovery_history_store=RecoveryHistoryStore(active_usage_path),
         health_status_url_store=health_status_url_store or HealthStatusUrlStore(),
         load_runtime_database=load_prepared_providers,
@@ -216,7 +251,7 @@ def build_codex_profile(
         runtime_metadata=runtime_metadata,
         ui_config=lambda: codex_ui_config(port, root),
         session_name_resolver=session_name_index.resolve,
-        session_catalog=session_name_index.recent,
+        session_catalog=session_catalog,
         session_key_resolver=session_name_index.thread_id_for_session_key,
         config_endpoint_name="codex-config",
     )

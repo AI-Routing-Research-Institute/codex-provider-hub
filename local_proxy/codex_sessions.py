@@ -110,13 +110,10 @@ class CodexSessionNameIndex:
                     thread_name = record.get("thread_name")
                     if not isinstance(thread_id, str) or not thread_id:
                         continue
-                    if not isinstance(thread_name, str) or not thread_name.strip():
-                        continue
-                    names[thread_id] = thread_name.strip()
+                    if isinstance(thread_name, str) and thread_name.strip():
+                        names[thread_id] = thread_name.strip()
                     timestamp = _updated_at_timestamp(record.get("updated_at"))
-                    if timestamp is None:
-                        updated_at.pop(thread_id, None)
-                    else:
+                    if timestamp is not None and timestamp >= updated_at.get(thread_id, float("-inf")):
                         updated_at[thread_id] = timestamp
         except OSError:
             self._stamp = None
