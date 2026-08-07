@@ -170,6 +170,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 
 在控制台点击“复制 Codex 配置”，将生成的片段合并到 Codex `config.toml`，重启一次 Codex 后即可通过控制台切换供应商。
 
+Codex 供应商列表中的“复制临时启动命令”会生成一条直接使用该供应商启动 Codex CLI 的单次命令，不修改 `config.toml`。Windows 使用 PowerShell 命令，macOS/Linux 使用 POSIX shell 命令；命令包含供应商地址和认证信息，应按密钥处理，避免保存到公共脚本或共享终端历史。
+
 完整说明见 [Codex 本地中转文档](docs/codex-local-proxy.md)。
 
 ### 3. 使用供应商探测工具
@@ -264,7 +266,7 @@ node --test tests/theme_runtime.test.js
 
 - 本地中转只允许监听回环地址。
 - CC Switch SQLite 数据库使用只读连接。
-- 上游 Key 不会返回控制 API、进入浏览器或写入访问日志。
+- 普通状态、统计和配置 API 不返回上游 Key；只有用户点击 Codex 供应商的“复制临时启动命令”时，受本地控制请求保护且禁止缓存的接口会把 Key 写入剪贴板。Key 不会渲染到页面或写入访问日志。
 - 转发前移除客户端认证头，再应用当前供应商认证配置。
 - Token 统计不保存请求正文和回答正文。
 - 私有配置、数据库、日志、探测报告、虚拟环境、证书和密钥默认忽略。

@@ -21,6 +21,8 @@ from local_proxy.application import (
     save_settings,
     settings_path,
 )
+from local_proxy.codex import codex_cli_launch_command
+from local_proxy.core import ProviderConfigurationError, ProxyProvider
 from local_proxy.codex_profile import load_settings as load_codex_settings
 from local_proxy.shared_settings import (
     migrate_runtime_data,
@@ -35,6 +37,7 @@ class LocalProxySettingsTests(unittest.TestCase):
         self.assertEqual(config["proxy_url"], "http://127.0.0.1:19000/v1")
         self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/claude/")
         self.assertEqual(config["config_endpoint"], "/control/codex/api/codex-config")
+        self.assertTrue(config["features"]["provider_launch_command"])
 
     def test_shared_settings_round_trip_and_corrupt_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -171,6 +174,41 @@ class CodexConfigTests(unittest.TestCase):
         self.assertIn('wire_api = "responses"', fragment)
         self.assertIn("requires_openai_auth = true", fragment)
         self.assertNotIn("api_key", fragment.casefold())
+
+    def test_cli_command_preserves_provider_values_for_supported_shells(self) -> None:
+        provider = ProxyProvider(
+            provider_id="quoted",
+            name="A 'quoted' provider",
+            base_url="https://api.example.test/v1",
+            is_cc_switch_current=True,
+            api_key="secret ' value",
+            configured_headers={"X-Trace": 'a"b'},
+            default_query={"mode": "fast"},
+        )
+
+        powershell = codex_cli_launch_command(provider, platform="win32")
+        shell = codex_cli_launch_command(provider, platform="linux")
+
+        self.assertEqual(powershell["shell"], "powershell")
+        self.assertIn("$env:CODEX_PROVIDER_API_KEY = 'secret '' value'", powershell["command"])
+        self.assertIn("model_provider=\"custom\"", powershell["command"])
+        self.assertIn("model_providers.custom.base_url=\"https://api.example.test/v1\"", powershell["command"])
+        self.assertIn("model_providers.custom.http_headers={\"X-Trace\"=\"a\\\"b\"}", powershell["command"])
+        self.assertIn("Remove-Item Env:CODEX_PROVIDER_API_KEY", powershell["command"])
+        self.assertEqual(shell["shell"], "shell")
+        self.assertTrue(shell["command"].startswith("CODEX_PROVIDER_API_KEY="))
+        self.assertIn("model_providers.custom.query_params={\"mode\"=\"fast\"}", shell["command"])
+
+    def test_cli_command_rejects_provider_without_credentials(self) -> None:
+        provider = ProxyProvider(
+            provider_id="missing",
+            name="Missing",
+            base_url="https://api.example.test",
+            is_cc_switch_current=False,
+        )
+
+        with self.assertRaises(ProviderConfigurationError):
+            codex_cli_launch_command(provider, platform="linux")
 
     def test_auto_start_commands_always_disable_browser_opening(self) -> None:
         executable = str(Path(sys.executable).resolve())
