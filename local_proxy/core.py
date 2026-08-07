@@ -44,7 +44,9 @@ RECOVERY_HISTORY_HOURS = 24
 RECOVERY_HISTORY_API_LIMIT = 500
 RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 USAGE_HISTORY_PAGE_LIMIT = 50
-SSE_RETRY_PREFLIGHT_BYTES = 256 * 1024
+SSE_RETRY_EVENT_PARSE_BYTES = 256 * 1024
+SSE_RETRY_PREFLIGHT_BYTES = 8 * 1024 * 1024
+SSE_RETRY_MARKER_TAIL_BYTES = 512
 USAGE_RESPONSE_BUFFER_BYTES = 8 * 1024 * 1024
 USAGE_WINDOWS = {"today", "24h", "7d", "30d", "all"}
 HOP_BY_HOP_HEADERS = {
@@ -73,6 +75,22 @@ SECRET_QUERY_RE = re.compile(
     r"(?i)([?&](?:api[-_]?key|access[-_]?token|token|key|secret)=)[^&\s]+"
 )
 OPENAI_STYLE_KEY_RE = re.compile(r"\bsk-[a-zA-Z0-9_-]{8,}\b")
+SSE_FAILURE_MARKER_RE = re.compile(
+    rb"(?:\bevent\s*:\s*(?:response\.)?failed\b|"
+    rb'(?<!\\)"type"\s*:\s*"(?:response\.)?failed"|'
+    rb'(?<!\\)"status"\s*:\s*"failed"|'
+    rb'(?<!\\)"error"\s*:\s*(?:\{|"))',
+    re.IGNORECASE,
+)
+SSE_MODEL_CAPACITY_CODE_RE = re.compile(
+    rb"\bmodel(?:_at)?_capacity(?:_error)?\b",
+    re.IGNORECASE,
+)
+SSE_MODEL_CAPACITY_MESSAGE_RE = re.compile(
+    rb"\b(?:selected|requested|this)\s+model\s+is\s+"
+    rb"(?:currently\s+)?at\s+capacity\b",
+    re.IGNORECASE,
+)
 
 
 class ProviderConfigurationError(ValueError):
@@ -2369,14 +2387,30 @@ async def _inspect_sse_before_output(
 ) -> tuple[bytes | None, str | None, str | None]:
     decide = decision or _sse_preflight_decision
     buffered = bytearray(first_chunk)
+    marker_capture = SSECapacityFailureCapture()
+    raw_failure = marker_capture.feed(first_chunk)
+    boundary_tail = first_chunk[-3:]
+    decision_required = _sse_chunk_completes_event(b"", first_chunk)
     while True:
-        action, retry_kind, retry_summary = decide(bytes(buffered))
+        action, retry_kind, retry_summary = (
+            decide(bytes(buffered))
+            if decision_required
+            else ("wait", None, None)
+        )
         if action == "retry":
             return None, retry_kind, retry_summary
-        if action == "commit" or len(buffered) >= SSE_RETRY_PREFLIGHT_BYTES:
+        if action == "commit":
+            return bytes(buffered), None, None
+        if raw_failure is not None:
+            return None, raw_failure[0], raw_failure[1]
+        if len(buffered) >= SSE_RETRY_PREFLIGHT_BYTES:
             return bytes(buffered), None, None
         try:
-            buffered.extend(await anext(stream))
+            chunk = await anext(stream)
+            raw_failure = marker_capture.feed(chunk)
+            decision_required = _sse_chunk_completes_event(boundary_tail, chunk)
+            boundary_tail = (boundary_tail + chunk)[-3:]
+            buffered.extend(chunk)
         except StopAsyncIteration:
             action, retry_kind, retry_summary = decide(
                 bytes(buffered),
@@ -2385,6 +2419,12 @@ async def _inspect_sse_before_output(
             if action == "retry":
                 return None, retry_kind, retry_summary
             return bytes(buffered) or None, None, None
+
+
+def _sse_chunk_completes_event(previous_tail: bytes, chunk: bytes) -> bool:
+    boundary_window = previous_tail + chunk
+    normalized = boundary_window.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return b"\n\n" in normalized
 
 
 def _sse_preflight_decision(
@@ -2396,6 +2436,9 @@ def _sse_preflight_decision(
     events = normalized.split(b"\n\n")
     complete_events = events if end_of_stream else events[:-1]
     for event in complete_events:
+        raw_failure = _raw_model_capacity_failure(event)
+        if raw_failure is not None:
+            return "retry", raw_failure[0], raw_failure[1]
         event_name, payload = _sse_event_payload(event)
         if payload is None:
             continue
@@ -2412,6 +2455,74 @@ def _sse_preflight_decision(
     return "wait", None, None
 
 
+class SSECapacityFailureCapture:
+    """Recognize model-capacity failures without buffering a complete SSE event."""
+
+    def __init__(self) -> None:
+        self._tail = b""
+        self._line_has_content = False
+        self._failed_event = False
+        self._capacity_code = False
+        self._capacity_message = False
+        self._failure: tuple[str, str] | None = None
+
+    def feed(self, chunk: bytes) -> tuple[str, str] | None:
+        if self._failure is not None or not chunk:
+            return self._failure
+        offset = 0
+        while offset < len(chunk):
+            newline = chunk.find(b"\n", offset)
+            line_end = len(chunk) if newline < 0 else newline
+            segment = chunk[offset:line_end]
+            self._scan_segment(segment)
+            if segment.strip(b"\r"):
+                self._line_has_content = True
+            if self._failed_event and (
+                self._capacity_code or self._capacity_message
+            ):
+                summary = (
+                    "模型容量已满：Selected model is at capacity. "
+                    "Please try a different model."
+                    if self._capacity_message
+                    else _retry_kind_summary("model_capacity")
+                )
+                self._failure = (
+                    "model_capacity",
+                    _sanitize_retry_summary(summary),
+                )
+                return self._failure
+            if newline < 0:
+                break
+            if not self._line_has_content:
+                self._reset_event()
+            self._line_has_content = False
+            self._tail = b""
+            offset = newline + 1
+        return self._failure
+
+    def _scan_segment(self, segment: bytes) -> None:
+        if not segment:
+            return
+        window = self._tail + segment
+        if SSE_FAILURE_MARKER_RE.search(window):
+            self._failed_event = True
+        if SSE_MODEL_CAPACITY_CODE_RE.search(window):
+            self._capacity_code = True
+        if SSE_MODEL_CAPACITY_MESSAGE_RE.search(window):
+            self._capacity_message = True
+        self._tail = window[-SSE_RETRY_MARKER_TAIL_BYTES:]
+
+    def _reset_event(self) -> None:
+        self._tail = b""
+        self._failed_event = False
+        self._capacity_code = False
+        self._capacity_message = False
+
+
+def _raw_model_capacity_failure(event: bytes) -> tuple[str, str] | None:
+    return SSECapacityFailureCapture().feed(event)
+
+
 class SSEFailureCapture:
     """Capture one retryable failure after a streamed response is committed."""
 
@@ -2421,9 +2532,14 @@ class SSEFailureCapture:
         self._event_size = 0
         self._discard_event = False
         self._failure: tuple[str, str] | None = None
+        self._capacity_capture = SSECapacityFailureCapture()
 
     def feed(self, chunk: bytes) -> None:
         if self._failure is not None or not chunk:
+            return
+        raw_failure = self._capacity_capture.feed(chunk)
+        if raw_failure is not None:
+            self._failure = raw_failure
             return
         self._line_buffer.extend(chunk)
         while True:
@@ -2435,7 +2551,7 @@ class SSEFailureCapture:
             self._feed_line(line)
             if self._failure is not None:
                 return
-        if len(self._line_buffer) > SSE_RETRY_PREFLIGHT_BYTES:
+        if len(self._line_buffer) > SSE_RETRY_EVENT_PARSE_BYTES:
             self._line_buffer.clear()
             self._event_lines.clear()
             self._event_size = 0
@@ -2461,7 +2577,7 @@ class SSEFailureCapture:
         if self._discard_event:
             return
         self._event_size += len(line) + 1
-        if self._event_size > SSE_RETRY_PREFLIGHT_BYTES:
+        if self._event_size > SSE_RETRY_EVENT_PARSE_BYTES:
             self._event_lines.clear()
             self._discard_event = True
             return
