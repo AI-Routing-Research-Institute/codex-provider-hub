@@ -75,7 +75,11 @@ let uiConfig = {
   shutdown_client_name: "客户端",
   provider_label: "客户端",
   theme_storage_key: "local-proxy-theme",
-  features: { usage_history: true, session_routing: false },
+  features: {
+    usage_history: true,
+    session_routing: false,
+    provider_launch_command: false,
+  },
 };
 
 const providerList = document.querySelector("#provider-list");
@@ -150,7 +154,12 @@ function applyUiConfig(config) {
   text("#runtime-port-hint", `只监听 127.0.0.1；修改后需要重启并重新复制 ${uiConfig.client_name} 配置`);
   text("#runtime-restart-notice", uiConfig.restart_config_text);
   text("#copy-config", uiConfig.config_button_label);
-  text("#footer-message", "Key 不会显示，也不会写入页面或日志");
+  text(
+    "#footer-message",
+    uiConfig.features.provider_launch_command
+      ? "Key 仅在复制临时启动命令时写入剪贴板，不会显示或写入日志"
+      : "Key 不会显示，也不会写入页面或日志",
+  );
   document.querySelector("#usage-history-popover")?.toggleAttribute(
     "hidden",
     uiConfig.features.usage_history === false,
@@ -1778,6 +1787,22 @@ function renderProviderList() {
     name.textContent = escapeText(provider.name);
     providerSelect.append(name);
     title.append(providerSelect);
+    if (uiConfig.features.provider_launch_command) {
+      const launchButton = document.createElement("button");
+      launchButton.type = "button";
+      launchButton.className = "copy-command";
+      launchButton.textContent = "复制临时启动命令";
+      launchButton.disabled = !provider.has_credentials;
+      launchButton.title = provider.has_credentials
+        ? "复制使用此供应商临时启动 Codex CLI 的命令"
+        : "该供应商没有可用 Key";
+      launchButton.setAttribute("aria-label", `复制 ${provider.name} 的 Codex CLI 临时启动命令`);
+      launchButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (provider.has_credentials) void copyProviderCommand(provider, launchButton);
+      });
+      title.append(launchButton);
+    }
     if (provider.active_requests > 0) {
       const active = document.createElement("button");
       active.type = "button";
@@ -2399,6 +2424,30 @@ async function copyConfig() {
     showToast(uiConfig.copy_config_success_title, uiConfig.copy_config_success_detail);
   } catch (error) {
     showToast("复制失败", "浏览器没有允许写入剪贴板。", "error");
+  }
+}
+
+async function copyProviderCommand(provider, button) {
+  button.disabled = true;
+  try {
+    const response = await fetch(
+      controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/launch-command`),
+      { method: "POST", headers: CONTROL_HEADER, cache: "no-store" },
+    );
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    if (!payload || typeof payload.command !== "string" || !payload.command.trim()) {
+      throw new Error("命令格式无效");
+    }
+    await navigator.clipboard.writeText(payload.command);
+    showToast("临时启动命令已复制", `已为 ${provider.name} 生成 Codex CLI 临时启动命令。`);
+  } catch (error) {
+    showToast("复制临时启动命令失败", error?.message || "浏览器没有允许写入剪贴板。", "error");
+  } finally {
+    button.disabled = !provider.has_credentials;
   }
 }
 
