@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Commit Helper"
+  short_description: "执行本仓库受控的提交、PR、自动合并和交付流程"
+  default_prompt: "Use $git-commit-helper to deliver the current change through a feature branch, permanent change record, compliant commits, required PR checks, and auto-merge."
