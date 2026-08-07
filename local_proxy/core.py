@@ -139,6 +139,7 @@ class UsageStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=5.0)
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
@@ -1337,7 +1338,7 @@ def _default_ui_config(service_name: str) -> dict[str, Any]:
         "config_button_label": f"复制 {client_name} 配置",
         "config_location_label": "Claude Code 配置位置" if claude else "Codex 配置文件",
         "config_location_hint": "配置片段用于启动 Claude Code" if claude else "配置片段需要合并到 Codex 配置文件",
-        "data_directory": "~/.claude-local-proxy" if claude else "~/.codex-local-proxy",
+        "data_directory": "~/.codex-local-proxy",
         "config_location": "~/.claude/settings.json" if claude else "~/.codex/config.toml",
         "restart_config_text": f"端口将在退出并重新启动本地中转后生效；届时需要重新复制 {client_name} 配置。",
         "copy_config_success_title": f"{client_name} 配置已复制",

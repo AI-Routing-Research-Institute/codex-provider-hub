@@ -60,7 +60,7 @@ UI_CONFIG_FIELDS = frozenset(
         "features",
     }
 )
-UI_FEATURE_FIELDS = frozenset({"usage_history", "shared_port"})
+UI_FEATURE_FIELDS = frozenset({"usage_history"})
 
 
 @dataclass
@@ -87,6 +87,10 @@ class ProxyProfile:
     runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None
     on_runtime_settings_changed: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     validate_runtime_database: Callable[[str], dict[str, Any]] | None = None
+    load_runtime_database: Callable[[Path], tuple[ProxyProvider, ...]] | None = None
+    apply_runtime_database: Callable[[Path, tuple[ProxyProvider, ...]], None] | None = None
+    database_validation_summary: Callable[[tuple[ProxyProvider, ...]], Mapping[str, Any]] | None = None
+    runtime_metadata: Callable[[], Mapping[str, Any]] | None = None
     ui_config: Callable[[], Mapping[str, Any]] | None = None
     provider_selectable: Callable[[ProxyProvider], bool] | None = None
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None

@@ -62,7 +62,7 @@ let uiConfig = {
   shutdown_client_name: "客户端",
   provider_label: "客户端",
   theme_storage_key: "local-proxy-theme",
-  features: { usage_history: true, shared_port: false },
+  features: { usage_history: true },
 };
 
 const providerList = document.querySelector("#provider-list");
@@ -128,11 +128,6 @@ function applyUiConfig(config) {
   text("#runtime-data-directory", uiConfig.data_directory);
   text("#runtime-config-location", uiConfig.config_location);
   text("#runtime-port-hint", `只监听 127.0.0.1；修改后需要重启并重新复制 ${uiConfig.client_name} 配置`);
-  const runtimePort = document.querySelector("#runtime-port");
-  if (runtimePort) runtimePort.disabled = uiConfig.features.shared_port === true;
-  if (uiConfig.features.shared_port === true) {
-    text("#runtime-port-hint", "统一端口由 Codex 控制台管理");
-  }
   text("#runtime-restart-notice", uiConfig.restart_config_text);
   text("#copy-config", uiConfig.config_button_label);
   text("#footer-message", "Key 不会显示，也不会写入页面或日志");

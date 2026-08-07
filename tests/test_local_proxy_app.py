@@ -20,7 +20,12 @@ from local_proxy.application import (
     migrate_legacy_data_directory,
     save_settings,
     settings_path,
-    usage_database_path,
+)
+from local_proxy.codex_profile import load_settings as load_codex_settings
+from local_proxy.shared_settings import (
+    migrate_runtime_data,
+    protocol_settings_path,
+    protocol_usage_database_path,
 )
 
 
@@ -31,32 +36,25 @@ class LocalProxySettingsTests(unittest.TestCase):
         self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/claude/")
         self.assertEqual(config["config_endpoint"], "/control/codex/api/codex-config")
 
-    def test_settings_round_trip_and_corrupt_fallback(self) -> None:
+    def test_shared_settings_round_trip_and_corrupt_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "settings.json"
+            path = Path(temp_dir) / "shared-settings.json"
             settings = default_settings()
-            settings.update(selected_provider_id="provider-a", port=18888)
+            settings["port"] = 18888
             settings["database_path"] = str(Path(temp_dir) / "cc-switch.db")
             settings["retry"]["max_attempts"] = -1
-            settings["provider_order"] = ["provider-b", "provider-a"]
-            settings["hidden_provider_ids"] = ["provider-c"]
             settings["health_status_url"] = (
                 "https://status.example.test/api/status?window=24h"
             )
 
             save_settings(settings, path)
 
-            self.assertEqual(load_settings(path)["selected_provider_id"], "provider-a")
             self.assertEqual(load_settings(path)["port"], 18888)
             self.assertEqual(
                 load_settings(path)["database_path"],
                 display_path(Path(temp_dir) / "cc-switch.db"),
             )
             self.assertEqual(load_settings(path)["retry"]["max_attempts"], -1)
-            self.assertEqual(
-                load_settings(path)["provider_order"], ["provider-b", "provider-a"]
-            )
-            self.assertEqual(load_settings(path)["hidden_provider_ids"], ["provider-c"])
             self.assertEqual(
                 load_settings(path)["health_status_url"],
                 "https://status.example.test/api/status?window=24h",
@@ -80,7 +78,7 @@ class LocalProxySettingsTests(unittest.TestCase):
 
             self.assertEqual(load_settings(path), default_settings())
 
-    def test_provider_preferences_are_trimmed_and_deduplicated(self) -> None:
+    def test_codex_provider_preferences_are_trimmed_and_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "settings.json"
             path.write_text(
@@ -93,24 +91,34 @@ class LocalProxySettingsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            settings = load_settings(path)
+            settings = load_codex_settings(path)
 
             self.assertEqual(settings["provider_order"], ["second", "first"])
             self.assertEqual(settings["hidden_provider_ids"], ["hidden"])
 
     def test_default_data_files_use_fixed_home_directory(self) -> None:
         self.assertEqual(data_directory().name, ".codex-local-proxy")
-        self.assertEqual(settings_path(), data_directory() / "settings.json")
-        self.assertEqual(usage_database_path(), data_directory() / "usage.sqlite3")
+        self.assertEqual(settings_path(), data_directory() / "shared-settings.json")
+        for service_id in ("codex", "claude"):
+            self.assertEqual(
+                protocol_settings_path(service_id),
+                data_directory() / f"{service_id}-settings.json",
+            )
+            self.assertEqual(
+                protocol_usage_database_path(service_id),
+                data_directory() / f"{service_id}-usage.sqlite3",
+            )
 
-    def test_legacy_settings_and_usage_are_copied_without_removing_source(self) -> None:
+    def test_fallback_legacy_data_is_split_and_removed_after_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             legacy = root / "legacy"
             destination = root / ".codex-local-proxy"
+            claude_legacy = root / ".claude-local-proxy"
             legacy.mkdir()
+            claude_legacy.mkdir()
             (legacy / "settings.json").write_text(
-                json.dumps({"port": 18888}),
+                json.dumps({"port": 18888, "selected_provider_id": "codex-a"}),
                 encoding="utf-8",
             )
             with closing(sqlite3.connect(legacy / "usage.sqlite3")) as connection:
@@ -118,13 +126,30 @@ class LocalProxySettingsTests(unittest.TestCase):
                 connection.execute("INSERT INTO marker VALUES ('preserved')")
                 connection.commit()
 
-            migrated = migrate_legacy_data_directory(legacy, destination)
+            migrated = migrate_runtime_data(
+                target=destination,
+                codex_source=destination,
+                claude_source=claude_legacy,
+                fallback_codex_source=legacy,
+            )
 
-            self.assertEqual(set(migrated), {"settings.json", "usage.sqlite3"})
-            self.assertTrue((legacy / "settings.json").is_file())
-            self.assertTrue((legacy / "usage.sqlite3").is_file())
-            self.assertEqual(load_settings(destination / "settings.json")["port"], 18888)
-            with closing(sqlite3.connect(destination / "usage.sqlite3")) as connection:
+            self.assertEqual(
+                set(migrated),
+                {
+                    "shared-settings.json",
+                    "codex-settings.json",
+                    "claude-settings.json",
+                    "codex-usage.sqlite3",
+                },
+            )
+            self.assertFalse((legacy / "settings.json").exists())
+            self.assertFalse((legacy / "usage.sqlite3").exists())
+            self.assertEqual(load_settings(destination / "shared-settings.json")["port"], 18888)
+            self.assertEqual(
+                load_codex_settings(destination / "codex-settings.json")["selected_provider_id"],
+                "codex-a",
+            )
+            with closing(sqlite3.connect(destination / "codex-usage.sqlite3")) as connection:
                 self.assertEqual(
                     connection.execute("SELECT value FROM marker").fetchone()[0],
                     "preserved",
@@ -385,21 +410,41 @@ class CodexConfigTests(unittest.TestCase):
         server = mock.Mock()
         codex_profile_instance = mock.Mock()
         claude_profile_instance = mock.Mock()
-        settings = default_settings()
+        shared_settings = default_settings()
+        codex_settings = {"selected_provider_id": "codex-a"}
+        claude_settings = {"selected_provider_id": "claude-a"}
+        shared_store = mock.Mock()
+        shared_store.retry_policy_store = object()
+        shared_store.health_status_url_store = object()
         with (
             mock.patch.object(local_proxy_app, "existing_proxy_url", return_value=None),
-            mock.patch.object(local_proxy_app, "load_settings", return_value=settings),
+            mock.patch.object(local_proxy_app, "load_settings", return_value=shared_settings),
+            mock.patch.object(
+                local_proxy_app,
+                "load_codex_settings",
+                return_value=codex_settings,
+            ),
+            mock.patch.object(
+                local_proxy_app,
+                "SharedSettingsStore",
+                return_value=shared_store,
+            ),
+            mock.patch.object(local_proxy_app, "SharedRuntimeCoordinator") as coordinator,
             mock.patch.object(
                 local_proxy_app,
                 "build_codex_profile",
                 return_value=codex_profile_instance,
             ) as codex_profile_builder,
-            mock.patch.object(claude_profile, "load_settings", return_value={}),
+            mock.patch.object(
+                claude_profile,
+                "load_settings",
+                return_value=claude_settings,
+            ),
             mock.patch.object(
                 claude_profile,
                 "build_claude_profile",
                 return_value=claude_profile_instance,
-            ),
+            ) as claude_profile_builder,
             mock.patch.object(local_proxy_app, "create_proxy_app", return_value=object()) as app_factory,
             mock.patch.object(
                 local_proxy_app,
@@ -423,7 +468,21 @@ class CodexConfigTests(unittest.TestCase):
         codex_profile_builder.assert_called_once_with(
             database=Path("cc-switch.db"),
             port=17890,
-            settings_data=settings,
+            settings_data=codex_settings,
+            retry_policy_store=shared_store.retry_policy_store,
+            health_status_url_store=shared_store.health_status_url_store,
+        )
+        claude_profile_builder.assert_called_once_with(
+            database=Path("cc-switch.db"),
+            port=17890,
+            settings_data=claude_settings,
+            retry_policy_store=shared_store.retry_policy_store,
+            health_status_url_store=shared_store.health_status_url_store,
+        )
+        coordinator.assert_called_once_with(
+            shared_store,
+            (codex_profile_instance, claude_profile_instance),
+            active_port=17890,
         )
         app_factory.assert_called_once_with(
             codex_profile=codex_profile_instance,

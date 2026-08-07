@@ -93,7 +93,7 @@ Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-
 - [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
 - [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
 
-下载后直接双击 EXE，程序会静默启动并常驻 Windows 通知区域，不会自动打开网页。右键托盘图标可分别打开 Codex 和 Claude Code 控制台，也可开启当前用户的“开机自启”。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。Codex 数据保存在 `~/.codex-local-proxy/`，Claude Code 数据保存在 `~/.claude-local-proxy/`。
+下载后直接双击 EXE，程序会静默启动并常驻 Windows 通知区域，不会自动打开网页。右键托盘图标可分别打开 Codex 和 Claude Code 控制台，也可开启当前用户的“开机自启”。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。共享配置与 Codex/Claude Code 的独立状态均保存在 `~/.codex-local-proxy/`。
 
 ### macOS 便携版
 
@@ -108,7 +108,7 @@ Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://g
 2. 将其拖入「应用程序」文件夹（可选）。
 3. **首次打开**：右键点击 `.app` → 选择「打开」→ 在弹出的「无法验证开发者」对话框中点击「打开」。由于当前版本未经 Apple 代码签名与公证，双击会被 Gatekeeper 拦截，必须通过右键打开一次；之后即可正常双击启动。
    - 命令行等价方式：`xattr -dr com.apple.quarantine /路径/到/CodexLocalProxy-macos-arm64.app`
-4. 程序会静默启动并常驻 macOS 菜单栏，不会自动打开网页；需要时从菜单栏手动打开 Codex 或 Claude Code 控制台。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。Codex 数据保存在 `~/.codex-local-proxy/`，Claude Code 数据保存在 `~/.claude-local-proxy/`。
+4. 程序会静默启动并常驻 macOS 菜单栏，不会自动打开网页；需要时从菜单栏手动打开 Codex 或 Claude Code 控制台。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。共享配置与 Codex/Claude Code 的独立状态均保存在 `~/.codex-local-proxy/`。
 
 > 说明：当前仅提供 ARM64 包，覆盖 Apple Silicon 机型；Intel Mac 暂不支持便携版，可从源码运行。
 
@@ -226,6 +226,7 @@ cp config/providers.example.toml config/providers.toml
 │   ├── application.py         统一服务生命周期和托盘
 │   ├── server.py              一个 FastAPI 应用和一个 LocalProxyServer
 │   ├── core.py                公共路由、重试、存储和转发基础能力
+│   ├── shared_settings.py     共享运行设置与旧数据迁移
 │   ├── codex.py / claude.py   两套平级供应商实现
 │   ├── codex_profile.py       Codex 配置与 Profile 装配
 │   ├── claude_profile.py      Claude 配置与 Profile 装配

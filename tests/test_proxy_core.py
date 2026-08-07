@@ -181,6 +181,15 @@ class UsageTests(unittest.TestCase):
         self.addCleanup(self.temp_context.cleanup)
         self.store = UsageStore(Path(self.temp_context.name) / "usage.sqlite3")
 
+    def test_creates_missing_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "missing" / "nested" / "usage.sqlite3"
+
+            store = UsageStore(database)
+
+            self.assertTrue(database.is_file())
+            self.assertEqual(store.summary("today")["total"]["request_count"], 0)
+
     def test_upstream_usage_wins_over_local_estimate(self) -> None:
         capture = UsageCapture(
             b'{"model":"gpt-5","input":"this would be estimated"}',

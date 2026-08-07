@@ -23,11 +23,11 @@ class ClaudeLocalProxySettingsTests(unittest.TestCase):
         self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/codex/")
         self.assertEqual(config["config_endpoint"], "/control/claude/api/claude-config")
 
-    def test_defaults_use_independent_data_directory_without_port(self) -> None:
+    def test_defaults_use_shared_data_directory_and_protocol_files(self) -> None:
         self.assertNotIn("port", default_settings())
-        self.assertEqual(data_directory().name, ".claude-local-proxy")
-        self.assertEqual(settings_path(), data_directory() / "settings.json")
-        self.assertEqual(usage_database_path(), data_directory() / "usage.sqlite3")
+        self.assertEqual(data_directory().name, ".codex-local-proxy")
+        self.assertEqual(settings_path(), data_directory() / "claude-settings.json")
+        self.assertEqual(usage_database_path(), data_directory() / "claude-usage.sqlite3")
 
     def test_settings_round_trip_ignores_legacy_port(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
