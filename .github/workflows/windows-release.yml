@@ -9,7 +9,7 @@ on:
       tag:
         description: "Existing v-prefixed tag to publish"
         required: true
-        default: "v0.1.1"
+        default: "v0.1.7"
 
 permissions:
   contents: write
@@ -37,13 +37,16 @@ jobs:
           if ($version -notmatch '^\d+\.\d+\.\d+$') {
             throw "Release tag must be 'v<major>.<minor>.<patch>': $env:RELEASE_TAG"
           }
-          $appPath = 'codex_local_proxy_app.py'
+          $appPath = 'local_proxy/application.py'
+          $pattern = '(?m)^APP_VERSION = ".*?"'
           $content = Get-Content -LiteralPath $appPath -Raw
-          $updated = $content -replace '(?m)^APP_VERSION = ".*?"', "APP_VERSION = `"$version`""
-          if ($updated -eq $content) {
+          if ($content -notmatch $pattern) {
             throw "Could not inject version $version into APP_VERSION"
           }
-          Set-Content -LiteralPath $appPath -Value $updated -NoNewline -Encoding utf8
+          $updated = $content -replace $pattern, "APP_VERSION = `"$version`""
+          if ($updated -ne $content) {
+            Set-Content -LiteralPath $appPath -Value $updated -NoNewline -Encoding utf8
+          }
           Write-Host "APP_VERSION synced to $version from tag $env:RELEASE_TAG"
 
       - name: Set up Python
