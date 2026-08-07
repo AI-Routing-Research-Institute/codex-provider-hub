@@ -18,7 +18,7 @@
 - Create: `scripts/team_policy.py`
 - Create: `tests/test_team_policy.py`
 
-- [ ] **Step 1: Add failing parser and semantic-version tests**
+- [x] **Step 1: Add failing parser and semantic-version tests**
 
 Test these public interfaces:
 
@@ -41,13 +41,13 @@ self.assertEqual(bump_version("v0.1.7", "major"), "v1.0.0")
 
 Also assert malformed delimiters, missing metadata, invalid enums, empty required sections, and status below the required state raise `PolicyError` with the missing field or section in the message.
 
-- [ ] **Step 2: Run focused tests and confirm import failure**
+- [x] **Step 2: Run focused tests and confirm import failure**
 
 Run: `.venv-ci\Scripts\python.exe -m unittest tests.test_team_policy -v`
 
 Expected: FAIL because `scripts.team_policy` does not exist.
 
-- [ ] **Step 3: Implement the record parser and SemVer core**
+- [x] **Step 3: Implement the record parser and SemVer core**
 
 Define:
 
@@ -69,13 +69,13 @@ def bump_version(tag: str, bump: str) -> str: ...
 
 Parse text between the first pair of `+++` delimiters with `tomllib.loads`. Require metadata keys `id`, `type`, `release_bump`, and `status`; require the ten exact Markdown sections from the design. Use status ordering `planned < implemented < verified` and bump ordering `none < patch < minor < major`.
 
-- [ ] **Step 4: Add this feature's permanent record and template**
+- [x] **Step 4: Add this feature's permanent record and template**
 
 Create the current record with `type = "build"`, `release_bump = "none"`, and `status = "planned"`. Complete target, current state, scope, non-goals, compatibility, risks, and test plan. Leave actual changes, verification, and PR explicitly marked as pending while the status is planned.
 
 Create `docs/changes/template.md` with the same metadata and section structure, using safe example values rather than parser placeholders.
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 5: Run focused tests**
 
 Run: `.venv-ci\Scripts\python.exe -m unittest tests.test_team_policy -v`
 
@@ -91,7 +91,7 @@ Expected: parser and SemVer tests PASS.
 - Create: `.githooks/pre-push`
 - Modify: `.gitattributes`
 
-- [ ] **Step 1: Add failing policy tests**
+- [x] **Step 1: Add failing policy tests**
 
 Cover:
 
@@ -111,13 +111,13 @@ with self.assertRaisesRegex(PolicyError, "生成产物"):
 
 Assert valid titles match `emoji type(scope): 简体中文描述`, exact body headings are non-empty, product changes require a `docs/changes/*.md` path in the branch diff, and sensitive/generated path patterns are rejected.
 
-- [ ] **Step 2: Run tests and confirm missing-function failures**
+- [x] **Step 2: Run tests and confirm missing-function failures**
 
 Run: `.venv-ci\Scripts\python.exe -m unittest tests.test_team_policy -v`
 
 Expected: FAIL for undefined validators.
 
-- [ ] **Step 3: Implement Git-backed CLI commands**
+- [x] **Step 3: Implement Git-backed CLI commands**
 
 Add helpers `run_git`, `changed_paths`, `added_change_records`, `validate_commit_message`, `validate_branch_name`, `validate_staged_paths`, and commands:
 
@@ -131,13 +131,13 @@ python scripts/team_policy.py validate-pr --base <sha> --head <sha>
 
 `pre-commit` uses `git diff --cached --name-only`; `validate-pr` uses `git diff --name-only <base>...<head>` and validates every commit message in that range. `pre-push` rejects main and tag refs from stdin, fetches `origin/main`, verifies the branch contains it, requires verified records, and invokes full verification.
 
-- [ ] **Step 4: Add hook wrappers**
+- [x] **Step 4: Add hook wrappers**
 
 Each LF-only wrapper uses `#!/bin/sh`, resolves the repository root with `git rev-parse --show-toplevel`, chooses `python3` then `python`, and exits nonzero when no interpreter exists. `commit-msg` forwards `$1`; `pre-push` preserves stdin for ref validation.
 
 Add `.githooks/* text eol=lf` to `.gitattributes`.
 
-- [ ] **Step 5: Verify hooks and policy tests**
+- [x] **Step 5: Verify hooks and policy tests**
 
 Run:
 
@@ -157,25 +157,25 @@ Expected: tests PASS and hooks path is `.githooks`.
 - Modify: `AGENTS.md`
 - Modify: `tests/test_team_policy.py`
 
-- [ ] **Step 1: Add failing repository-asset tests**
+- [x] **Step 1: Add failing repository-asset tests**
 
 Assert the repository skill frontmatter name is `git-commit-helper`, its description triggers for commit/push/PR work, the body prohibits main/tag pushes, and `agents/openai.yaml` references `$git-commit-helper`. Assert `AGENTS.md` requires direct reading of the repository skill, feature branches, records, auto-merge, dual-platform checks, and automatic releases without human approval.
 
-- [ ] **Step 2: Run tests and confirm missing repository skill failure**
+- [x] **Step 2: Run tests and confirm missing repository skill failure**
 
 Run: `.venv-ci\Scripts\python.exe -m unittest tests.test_team_policy -v`
 
 Expected: FAIL because `.agents/skills/git-commit-helper` is absent.
 
-- [ ] **Step 3: Vendor and tighten the skill**
+- [x] **Step 3: Vendor and tighten the skill**
 
 Use the local skill as the source, preserving emoji/Chinese commit conventions and explicit staging. Replace generic push behavior with the nine repository-specific steps from the design. Require feature record lifecycle, policy commands, PR creation/update, auto-merge, CI inspection, and no direct main/tag push.
 
-- [ ] **Step 4: Rewrite AGENTS workflow**
+- [x] **Step 4: Rewrite AGENTS workflow**
 
 Replace the old user-approved tagging flow. Require bootstrap hooks, current-main fetch, feature branch creation before file edits, planned/implemented/verified record transitions, repository skill usage for all Git delivery operations, no direct main push, zero-human-approval PR auto-merge, and Agent-selected automatic release bumps.
 
-- [ ] **Step 5: Validate skill and focused tests**
+- [x] **Step 5: Validate skill and focused tests**
 
 Run the system skill validator against `.agents/skills/git-commit-helper`, then run `tests.test_team_policy`. Expected: both PASS.
 
@@ -185,15 +185,15 @@ Run the system skill validator against `.agents/skills/git-commit-helper`, then 
 - Create: `.github/workflows/pr-policy.yml`
 - Modify: `tests/test_team_policy.py`
 
-- [ ] **Step 1: Add failing workflow contract tests**
+- [x] **Step 1: Add failing workflow contract tests**
 
 Assert workflow trigger `pull_request`, permissions `contents: read`, stable jobs `policy`, `tests-windows`, and `tests-macos`, full checkout history, Python 3.13, policy validation with base/head SHAs, Python unittest discovery, JS syntax checks, and all `tests/*.test.js` files.
 
-- [ ] **Step 2: Implement workflow**
+- [x] **Step 2: Implement workflow**
 
 Use Ubuntu for policy, `windows-latest` for Windows tests, and `macos-latest` for macOS tests. Install `requirements-status.txt` on both test platforms. Do not use `pull_request_target` and do not expose write permissions.
 
-- [ ] **Step 3: Run focused workflow tests**
+- [x] **Step 3: Run focused workflow tests**
 
 Run: `.venv-ci\Scripts\python.exe -m unittest tests.test_team_policy -v`
 
@@ -205,11 +205,11 @@ Expected: PASS.
 - Modify: `scripts/team_policy.py`
 - Modify: `tests/test_team_policy.py`
 
-- [ ] **Step 1: Add failing payload tests**
+- [x] **Step 1: Add failing payload tests**
 
 Test `build_ruleset_payload()` includes `refs/heads/main`, enforcement `active`, pull requests with zero approvals, required checks `policy`, `tests-windows`, `tests-macos`, and non-fast-forward/deletion protections. Test dry-run JSON contains no token.
 
-- [ ] **Step 2: Implement configuration commands**
+- [x] **Step 2: Implement configuration commands**
 
 Add:
 
@@ -221,7 +221,7 @@ python scripts/team_policy.py verify-ruleset --repo OWNER/REPO
 
 Use `urllib.request` and `GITHUB_TOKEN`. Create or update a ruleset named `agent-delivery-main`; read it back and compare enforcement, target, conditions, and required checks. Never print the token.
 
-- [ ] **Step 3: Run focused tests**
+- [x] **Step 3: Run focused tests**
 
 Run: `.venv-ci\Scripts\python.exe -m unittest tests.test_team_policy -v`
 
@@ -237,15 +237,15 @@ Expected: PASS without network access.
 - Modify: `tests/test_windows_release.py`
 - Modify: `tests/test_macos_release.py`
 
-- [ ] **Step 1: Add failing release-plan and workflow tests**
+- [x] **Step 1: Add failing release-plan and workflow tests**
 
 Test highest bump selection, records added since a base tag, `none` no-release behavior, release-note grouping, tag collision failure, and JSON output containing `release`, `tag`, and `notes_path`. Assert auto-release uses main push, concurrency `release-main`, `contents: write`, `actions: write`, exact tag push, and explicit dispatch of both existing workflows.
 
-- [ ] **Step 2: Implement release commands**
+- [x] **Step 2: Implement release commands**
 
 Add `release-plan` and `release-notes` commands. Select only records added by `git diff --diff-filter=A --name-only <tag>..<head> -- docs/changes`; require verified status; choose the maximum bump; render title, summary, compatibility, risks, and verification from each record.
 
-- [ ] **Step 3: Implement auto-release workflow**
+- [x] **Step 3: Implement auto-release workflow**
 
 On main push, fetch all tags, call `release-plan`, skip safely for `release=false`, check local and remote tag absence, create/push one lightweight tag, and run:
 
@@ -254,11 +254,11 @@ gh workflow run windows-release.yml -f tag="$TAG"
 gh workflow run macos-release.yml -f tag="$TAG"
 ```
 
-- [ ] **Step 4: Generate Windows release notes from records**
+- [x] **Step 4: Generate Windows release notes from records**
 
 Before `gh release create`, run `team_policy.py release-notes` against the prior tag and current release tag, write `.build/release-notes.md`, and pass it to `--notes-file`. Keep `packaging/release-notes.md` only as the recovery fallback when no record can be selected.
 
-- [ ] **Step 5: Run release and policy tests**
+- [x] **Step 5: Run release and policy tests**
 
 Run:
 
@@ -274,11 +274,11 @@ Expected: PASS.
 - Modify: `docs/changes/2026-08-07-agent-delivery-pipeline.md`
 - Modify: `docs/superpowers/plans/2026-08-07-agent-delivery-pipeline.md`
 
-- [ ] **Step 1: Complete the feature record**
+- [x] **Step 1: Complete the feature record**
 
 Set status to `implemented`, list every changed file and behavior, then run the complete suite. After success set status to `verified`, record exact commands/results, and leave PR as `pending` until creation.
 
-- [ ] **Step 2: Run complete verification**
+- [x] **Step 2: Run complete verification**
 
 Run:
 

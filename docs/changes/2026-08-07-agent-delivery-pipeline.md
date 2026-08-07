@@ -2,7 +2,7 @@
 id = "2026-08-07-agent-delivery-pipeline"
 type = "build"
 release_bump = "none"
-status = "planned"
+status = "verified"
 +++
 
 # Agent 自驱交付流水线
@@ -37,11 +37,23 @@ status = "planned"
 
 ## 实际改动
 
-等待实施完成后记录。
+- 新增 `scripts/team_policy.py`，提供变更记录、commit、分支、敏感路径、Ruleset、版本计划和 release notes 校验。
+- 新增 `.githooks/pre-commit`、`.githooks/commit-msg`、`.githooks/pre-push` 和 `.agents/skills/git-commit-helper/`。
+- 更新 `AGENTS.md`，要求功能分支、永久变更说明、PR auto-merge 和自动发版。
+- 新增 `.github/workflows/pr-policy.yml` 和 `.github/workflows/auto-release.yml`，并更新 Windows release notes 生成。
+- 新增策略单元测试、功能说明模板和实施计划。
 
 ## 验证结果
 
-等待完整验证。
+- `.venv-ci\\Scripts\\python.exe -m unittest discover -s tests -p test_*.py`：356 项通过。
+- `node --check proxy_static/app.js`：通过。
+- `node --check provider_status/static/app.js`：通过。
+- 5 组 `node --test`：16 项通过。
+- `.venv-ci\\Scripts\\python.exe -m py_compile scripts\\team_policy.py`：通过。
+- skill validator（`-X utf8`）：通过。
+- Ruleset dry-run：通过。
+- `git diff --check`：通过。
+- 已知警告：Starlette 使用 httpx 测试客户端的弃用警告，不影响测试结果。
 
 ## PR
 

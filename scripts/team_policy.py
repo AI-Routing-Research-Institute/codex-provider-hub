@@ -230,9 +230,9 @@ def build_ruleset_payload() -> dict[str, object]:
                     "strict_required_status_checks_policy": True,
                     "do_not_enforce_on_create": False,
                     "required_status_checks": [
-                        {"context": "policy", "integration_id": None},
-                        {"context": "tests-windows", "integration_id": None},
-                        {"context": "tests-macos", "integration_id": None},
+                        {"context": "policy"},
+                        {"context": "tests-windows"},
+                        {"context": "tests-macos"},
                     ],
                 },
             },
