@@ -20,6 +20,7 @@ from local_proxy.core import (
     RECOVERY_HISTORY_API_LIMIT,
     USAGE_WINDOWS,
     HealthStatusUrlStore,
+    ProviderConfigurationError,
     ProviderRouter,
     ProxyProvider,
     RecoveryHistoryStore,
@@ -62,7 +63,7 @@ UI_CONFIG_FIELDS = frozenset(
         "features",
     }
 )
-UI_FEATURE_FIELDS = frozenset({"usage_history", "session_routing"})
+UI_FEATURE_FIELDS = frozenset({"usage_history", "session_routing", "provider_launch_command"})
 
 
 @dataclass
@@ -97,6 +98,7 @@ class ProxyProfile:
     ui_config: Callable[[], Mapping[str, Any]] | None = None
     provider_selectable: Callable[[ProxyProvider], bool] | None = None
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None
+    provider_launch_command: Callable[[ProxyProvider], Mapping[str, str]] | None = None
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None
     config_endpoint_name: str = "config"
     owns_client: bool = True
@@ -560,6 +562,32 @@ def _register_control_routes(
             return JSONResponse(status_code=503, content={"detail": "配置生成功能不可用"})
         return PlainTextResponse(profile.config_fragment(), headers={"Cache-Control": "no-store"})
 
+    async def control_provider_launch_command(provider_id: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.provider_launch_command is None:
+            return JSONResponse(status_code=404, content={"detail": "复制临时启动命令功能不可用"})
+        provider = next(
+            (item for item in profile.router.providers() if item.provider_id == provider_id),
+            None,
+        )
+        if provider is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到该供应商"})
+        try:
+            command = dict(profile.provider_launch_command(provider))
+        except (ProviderConfigurationError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=409, content={"detail": str(exc)})
+        if not isinstance(command.get("command"), str) or not command["command"].strip():
+            return JSONResponse(status_code=503, content={"detail": "复制临时启动命令功能不可用"})
+        return JSONResponse(
+            content={
+                "provider_id": provider.provider_id,
+                "command": command["command"],
+                "shell": str(command.get("shell") or "shell"),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def control_shutdown(request: Request):
         if not _valid_control_request(request):
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
@@ -610,6 +638,12 @@ def _register_control_routes(
         f"{prefix}/api/{profile.config_endpoint_name}",
         control_config,
         methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers/{{provider_id}}/launch-command",
+        control_provider_launch_command,
+        methods=["POST"],
         include_in_schema=False,
     )
     app.add_api_route(f"{prefix}/api/shutdown", control_shutdown, methods=["POST"], include_in_schema=False)

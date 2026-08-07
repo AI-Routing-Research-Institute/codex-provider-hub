@@ -1707,7 +1707,11 @@ def _default_ui_config(service_name: str) -> dict[str, Any]:
         "shutdown_client_name": client_name,
         "provider_label": "Claude Code" if claude else "Codex API",
         "theme_storage_key": "local-proxy-theme",
-        "features": {"usage_history": True, "session_routing": not claude},
+        "features": {
+            "usage_history": True,
+            "session_routing": not claude,
+            "provider_launch_command": False,
+        },
     }
 
 

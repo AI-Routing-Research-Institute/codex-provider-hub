@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
+import sys
 import tomllib
 from contextlib import closing
 from pathlib import Path
@@ -52,6 +54,93 @@ def load_proxy_providers(db_path: Path = DEFAULT_DATABASE) -> tuple[ProxyProvide
     if not providers and errors:
         raise ProviderConfigurationError("；".join(errors))
     return tuple(providers)
+
+
+def codex_cli_launch_command(
+    provider: ProxyProvider,
+    *,
+    platform: str | None = None,
+) -> dict[str, str]:
+    """Build a one-shot Codex CLI command for an upstream provider."""
+    if not provider.has_credentials:
+        raise ProviderConfigurationError("该供应商没有可用于启动 Codex CLI 的凭据")
+
+    provider_id = "custom"
+    settings = [
+        f"model_provider={_toml_string(provider_id)}",
+        f"model_providers.{provider_id}.name={_toml_string(provider.name)}",
+        f"model_providers.{provider_id}.base_url={_toml_string(provider.base_url)}",
+        f"model_providers.{provider_id}.wire_api={_toml_string('responses')}",
+    ]
+    environment_name = "CODEX_PROVIDER_API_KEY"
+    if provider.api_key:
+        settings.append(
+            f"model_providers.{provider_id}.env_key={_toml_string(environment_name)}"
+        )
+    if provider.configured_headers:
+        settings.append(
+            f"model_providers.{provider_id}.http_headers={_toml_table(provider.configured_headers)}"
+        )
+    if provider.default_query:
+        settings.append(
+            f"model_providers.{provider_id}.query_params={_toml_table(provider.default_query)}"
+        )
+
+    arguments = ["codex"]
+    for setting in settings:
+        arguments.extend(("-c", setting))
+    target_platform = platform or sys.platform
+    if provider.api_key:
+        if target_platform == "win32":
+            return {
+                "shell": "powershell",
+                "command": _powershell_launch(arguments, environment_name, provider.api_key),
+            }
+        return {
+            "shell": "shell",
+            "command": (
+                f"{environment_name}={shlex.quote(provider.api_key)} "
+                f"{shlex.join(arguments)}"
+            ),
+        }
+    if target_platform == "win32":
+        return {"shell": "powershell", "command": _powershell_join(arguments)}
+    return {"shell": "shell", "command": shlex.join(arguments)}
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_table(values: Mapping[str, str]) -> str:
+    return "{" + ", ".join(
+        f"{_toml_string(key)}={_toml_string(value)}" for key, value in values.items()
+    ) + "}"
+
+
+def _powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _powershell_join(arguments: list[str]) -> str:
+    return " ".join(
+        arguments[:1] + [_powershell_quote(argument) for argument in arguments[1:]]
+    )
+
+
+def _powershell_launch(arguments: list[str], environment_name: str, api_key: str) -> str:
+    command = _powershell_join(arguments)
+    quoted_name = _powershell_quote(environment_name)
+    quoted_key = _powershell_quote(api_key)
+    return (
+        "& { "
+        f"$codexProviderKeyBefore = [Environment]::GetEnvironmentVariable({quoted_name}, 'Process'); "
+        f"$env:{environment_name} = {quoted_key}; "
+        f"try {{ {command} }} finally {{ "
+        f"if ($null -eq $codexProviderKeyBefore) {{ Remove-Item Env:{environment_name} -ErrorAction SilentlyContinue }} "
+        f"else {{ $env:{environment_name} = $codexProviderKeyBefore }} }} "
+        "}"
+    )
 
 
 def _record_from_row(row: sqlite3.Row) -> cc_switch.ProviderRecord:
