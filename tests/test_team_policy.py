@@ -197,6 +197,22 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
         self.assertIn("自动发版", agents)
         self.assertNotIn("只有用户针对具体版本号", agents)
 
+    def test_clean_auto_merge_fallback_is_strictly_bounded(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        skill = (ROOT / ".agents/skills/git-commit-helper/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        for content in (agents, skill):
+            self.assertIn("clean", content)
+            self.assertIn("准确 head SHA", content)
+            self.assertIn("policy", content)
+            self.assertIn("tests-windows", content)
+            self.assertIn("tests-macos", content)
+            self.assertIn("squash merge", content)
+            self.assertIn("其他错误", content)
+            self.assertIn("禁止", content)
+
     def test_hook_wrappers_are_versioned_and_call_policy(self) -> None:
         for hook_name in ("pre-commit", "commit-msg", "pre-push"):
             content = (ROOT / ".githooks" / hook_name).read_text(encoding="utf-8")

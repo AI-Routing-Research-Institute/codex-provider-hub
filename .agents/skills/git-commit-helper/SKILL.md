@@ -19,8 +19,8 @@ All repository delivery goes through a feature branch, a permanent change record
 6. After implementation and focused tests, update the record to `implemented`. After fresh full verification, update it to `verified` and record exact commands/results.
 7. Commit with `emoji type(scope): 简体中文描述`. Every body must contain non-empty `功能修改`, `影响范围`, and `验证结果` headings. Never add AI attribution or `Co-authored-by`.
 8. Rebase on current `origin/main`, rerun full verification, and push only the feature branch.
-9. Create or update the PR with the record summary, risks, and verification. Enable `auto-merge`; do not request human approval. Monitor `policy`, `tests-windows`, and `tests-macos`, fixing failures instead of bypassing them.
-10. Never create or push tags manually. The main-branch release coordinator selects SemVer from verified change records and dispatches both release workflows.
+9. Create or update the PR with the record summary, risks, and verification. Attempt to enable `auto-merge`; do not request human approval. The required checks `policy`, `tests-windows`, and `tests-macos` must all succeed before merging. If enabling auto-merge fails, only an explicit GitHub error stating that the PR is already `clean` permits a fallback. Before that fallback, re-query the PR 的准确 head SHA (exact PR head SHA) and independently verify all three checks are successful for that SHA. Only then may the Agent squash merge that exact head SHA and verify the resulting merge commit. 其他错误、缺少检查、检查非成功状态或 SHA 变化都是 hard stop; never merge by branch name, stale SHA, ambiguous ref, or an unverified state.
+10. Never create or push tags manually. The main-branch release coordinator selects SemVer from verified change records and dispatches both release workflows. Report the PR URL, check URLs and states, auto-merge or `clean` fallback result, release workflow URL, and both platform workflow results.
 
 ## Commit Types
 
