@@ -444,6 +444,19 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .provider-select:focus-visible { border-radius: 3px; outline: 2px solid var(--teal); outline-offset: 3px; }
 .provider-select:disabled { cursor: default; opacity: 1; }
 .provider-title strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.copy-command {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.copy-command:hover, .copy-command:focus-visible { border-color: var(--teal); color: var(--teal); outline: none; }
+.copy-command:disabled { cursor: not-allowed; opacity: .5; }
 .provider-copy code { display: block; margin-top: 5px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .provider-health-cell {
   min-width: 0;

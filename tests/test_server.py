@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 
 from local_proxy.claude import ClaudeProxyProvider
+from local_proxy.codex import codex_cli_launch_command
 from local_proxy.core import ProviderRouter, ProxyProvider, RetryPolicy, TokenUsage, UsageStore, create_proxy_app
 from local_proxy.protocols.claude_messages import ClaudeMessagesProtocol
 from local_proxy.server import ProxyProfile
@@ -75,6 +76,7 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
                 "api_key": "must-not-leak",
             },
             config_fragment=lambda: "codex-config",
+            provider_launch_command=codex_cli_launch_command,
             config_endpoint_name="codex-config",
         )
         claude = ProxyProfile(
@@ -135,6 +137,17 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         claude_fragment = await self.client.get("/control/claude/api/claude-config")
         codex_status = await self.client.get("/control/codex/api/status")
         claude_status = await self.client.get("/control/claude/api/status")
+        missing_header = await self.client.post(
+            "/control/codex/api/providers/codex-a/launch-command",
+        )
+        codex_command = await self.client.post(
+            "/control/codex/api/providers/codex-a/launch-command",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
+        claude_command = await self.client.post(
+            "/control/claude/api/providers/claude-a/launch-command",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
 
         self.assertEqual(root.status_code, 307)
         self.assertEqual(root.headers["location"], "/control/codex/")
@@ -150,6 +163,13 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(claude_fragment.status_code, 200)
         self.assertEqual(codex_status.json()["current_provider_id"], "codex-a")
         self.assertEqual(claude_status.json()["current_provider_id"], "claude-a")
+        self.assertEqual(missing_header.status_code, 403)
+        self.assertEqual(codex_command.status_code, 200)
+        self.assertEqual(codex_command.headers["cache-control"], "no-store")
+        self.assertEqual(codex_command.json()["provider_id"], "codex-a")
+        self.assertIn("codex-secret", codex_command.json()["command"])
+        self.assertIn("https://codex.example.test/v1", codex_command.json()["command"])
+        self.assertEqual(claude_command.status_code, 404)
 
     async def test_usage_history_is_kept_separate_by_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

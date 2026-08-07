@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from local_proxy.codex import load_proxy_providers
+from local_proxy.codex import codex_cli_launch_command, load_proxy_providers
 from local_proxy.codex_sessions import CodexSessionNameIndex
 from local_proxy.core import (
     DEFAULT_PORT,
@@ -95,6 +95,7 @@ def codex_ui_config(port: int, root: Path | None = None) -> dict[str, Any]:
         "features": {
             "usage_history": True,
             "session_routing": True,
+            "provider_launch_command": True,
         },
     }
 
@@ -199,6 +200,7 @@ def build_codex_profile(
         on_hidden_provider_ids_changed=lambda ids: persist(hidden_provider_ids=list(ids)),
         on_provider_order_changed=lambda ids: persist(provider_order=list(ids)),
         config_fragment=lambda: codex_config_fragment(port),
+        provider_launch_command=codex_cli_launch_command,
         retry_policy_store=retry_policy_store or RetryPolicyStore(),
         usage_store=UsageStore(active_usage_path),
         recovery_history_store=RecoveryHistoryStore(active_usage_path),

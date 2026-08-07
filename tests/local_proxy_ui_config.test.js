@@ -66,4 +66,6 @@ test("applies service-specific UI configuration to the shared page", () => {
   assert.equal(elements[".console-link"].href, "http://127.0.0.1:19000/control/");
   assert.equal(elements["#copy-config"].textContent, "复制 Claude 配置");
   assert.equal(elements["#usage-history-popover"].attributes.hidden, false);
+  assert.equal(source.includes("copyProviderCommand"), true);
+  assert.equal(source.includes("launch-command"), true);
 });
