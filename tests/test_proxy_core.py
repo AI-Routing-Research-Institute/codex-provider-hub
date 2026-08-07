@@ -1732,6 +1732,100 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api_history["total_count"], 1)
         self.assertEqual(api_history["items"][0]["kind"], "model_capacity")
 
+    async def test_oversized_nested_model_capacity_before_output_is_retried(self) -> None:
+        attempts = 0
+
+        class OversizedCapacityStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (
+                    b'data: {"type":"response.failed","response":'
+                    b'{"status":"failed","metadata":{"padding":"'
+                )
+                padding = b"x" * (320 * 1024)
+                for offset in range(0, len(padding), 32 * 1024):
+                    yield padding[offset : offset + 32 * 1024]
+                yield (
+                    b'"},"diagnostic":{"nested":{"message":'
+                    b'"Selected model is at cap'
+                )
+                yield b'acity. Please try a different model."}}}}\n\n'
+
+        class RecoveredStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n'
+                yield b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            stream = OversizedCapacityStream() if attempts == 1 else RecoveredStream()
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client, retry_sleep=no_wait)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertIn(b"recovered", response.content)
+        self.assertNotIn(b"at capacity", response.content)
+        self.assertEqual(router.status().total_retries, 1)
+        self.assertEqual(router.status().last_retry_kind, "model_capacity")
+
+    async def test_capacity_words_in_visible_output_do_not_trigger_retry(self) -> None:
+        attempts = 0
+
+        class ExplanationStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                text = (
+                    'Example {"type":"response.failed"}: '
+                    "Selected model is at capacity. Please try a different model."
+                )
+                event = {
+                    "type": "response.output_text.delta",
+                    "delta": text,
+                }
+                yield b"data: " + json.dumps(event).encode() + b"\n\n"
+                yield b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=ExplanationStream(),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(attempts, 1)
+        self.assertIn(b"at capacity", response.content)
+        self.assertEqual(router.status().total_retries, 0)
+
     async def test_embedded_model_capacity_after_output_is_not_replayed(self) -> None:
         attempts = 0
 
@@ -1792,6 +1886,64 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(usage_history["total_count"], 1)
         self.assertFalse(usage_history["items"][0]["succeeded"])
         self.assertEqual(usage_history["items"][0]["status_code"], 200)
+
+    async def test_oversized_model_capacity_after_output_is_recorded(self) -> None:
+        attempts = 0
+
+        class OutputThenOversizedCapacity(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                yield (
+                    b'data: {"type":"response.failed","response":'
+                    b'{"status":"failed","metadata":{"padding":"'
+                )
+                padding = b"x" * (320 * 1024)
+                for offset in range(0, len(padding), 32 * 1024):
+                    yield padding[offset : offset + 32 * 1024]
+                yield (
+                    b'"},"error":{"details":{"message":'
+                    b'"Selected model is at cap'
+                )
+                yield b'acity. Please try a different model."}}}}\n\n'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=OutputThenOversizedCapacity(),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "usage.sqlite3"
+        )
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(attempts, 1)
+        self.assertIn(b"partial", response.content)
+        self.assertIn(b"at capacity", response.content)
+        self.assertEqual(router.status().total_retries, 0)
+        history = history_store.history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["kind"], "model_capacity")
+        self.assertEqual(history["items"][0]["stage"], "after_output")
+        self.assertEqual(history["items"][0]["outcome"], "passed_through")
 
     async def test_embedded_upstream_failure_before_output_is_retried(self) -> None:
         attempts = 0
