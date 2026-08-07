@@ -15,7 +15,11 @@ assert.notEqual(end, -1);
 
 const context = vm.createContext({});
 vm.runInContext(
-  `${source.slice(start, end)}\nthis.api = { formatRequestDuration, requestResultLabel };`,
+  `${source.slice(start, end)}\nthis.api = {
+    formatRequestDuration,
+    requestResultLabel,
+    requestActualProviderLabel,
+  };`,
   context,
   { filename: sourcePath },
 );
@@ -44,29 +48,95 @@ test("labels running, successful, and failed request results", () => {
     "响应流中断",
   );
 });
-
-test("defers list replacement while a provider route select is focused", () => {
-  const renderStart = source.indexOf("function requestRouteSelectIsFocused");
-  const renderEnd = source.indexOf("async function readRequests");
-  assert.notEqual(renderStart, -1);
-  assert.notEqual(renderEnd, -1);
-  const renderContext = vm.createContext({
-    document: {
-      activeElement: {
-        classList: { contains: (name) => name === "request-route-select" },
-      },
-    },
-  });
+test("keeps the actual provider visible in each request row", () => {
+  assert.equal(
+    context.api.requestActualProviderLabel({ state: "running", provider_name: "公司" }),
+    "正在使用 · 公司",
+  );
+  assert.equal(
+    context.api.requestActualProviderLabel({ state: "failed", provider_name: "zzzcoding" }),
+    "本次使用 · zzzcoding",
+  );
+  assert.doesNotMatch(source, /request-route-select|claimRequestRouteControl/);
+});
+test("opens the request page without provider or status filters", () => {
+  const openStart = source.indexOf("function openAllRequests");
+  const openEnd = source.indexOf("function switchView");
+  assert.notEqual(openStart, -1);
+  assert.notEqual(openEnd, -1);
+  const openSource = source.slice(openStart, openEnd);
+  assert.match(openSource, /requestProvider\.value = ""/);
+  assert.match(openSource, /requestStatus\.value = "all"/);
+  assert.doesNotMatch(source, /悬停查看会话，点击进入请求页/);
+});
+test("labels duplicate routed sessions without exposing thread ids", () => {
+  const start = source.indexOf("function sessionRouteOptionLabel");
+  const end = source.indexOf("function renderSessionRouteProviders");
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const routeContext = vm.createContext({});
   vm.runInContext(
-    `let requestRouteSelectActive = false;
-     let requestRenderPending = false;
-     const requestList = {};
-     ${source.slice(renderStart, renderEnd)}
-     renderRequests();
-     this.wasDeferred = requestRenderPending;`,
-    renderContext,
+    `function formatRetryTime() { return "16:55:57"; }\n${source.slice(start, end)}\nthis.label = sessionRouteOptionLabel;`,
+    routeContext,
     { filename: sourcePath },
   );
 
-  assert.equal(renderContext.wasDeferred, true);
+  assert.equal(
+    routeContext.label({ name: "设备打卡", active: false, updated_at: 1 }, 2, 2),
+    "设备打卡 · 会话 2/2 · 16:55:57",
+  );
+  assert.doesNotMatch(
+    routeContext.label({ name: "设备打卡", active: false, updated_at: 1 }, 1, 1),
+    /thread|session_key/i,
+  );
+});
+
+test("throttles session route refreshes and keeps cached items while refreshing", () => {
+  const start = source.indexOf("async function readSessionRoutes");
+  const end = source.indexOf("function openSessionRoutePopover");
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const readSource = source.slice(start, end);
+
+  assert.match(source, /const SESSION_ROUTE_CACHE_MS = 60_000/);
+  assert.match(readSource, /if \(sessionRouteLoading\) return/);
+  assert.match(readSource, /Date\.now\(\) - sessionRouteLastReadAt < SESSION_ROUTE_CACHE_MS/);
+  assert.match(readSource, /if \(!hadItems\) sessionRouteItems = \[\]/);
+  assert.match(source, /readSessionRoutes\(\{ quiet: true, force: true \}\)/);
+});
+
+test("uses route-aware draining request counts", () => {
+  const start = source.indexOf("const drainingProviders");
+  const end = source.indexOf("renderProviderList();", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const drainingSource = source.slice(start, end);
+
+  assert.match(drainingSource, /provider\.draining_requests/);
+  assert.doesNotMatch(drainingSource, /!provider\.current/);
+  assert.doesNotMatch(drainingSource, /provider\.active_requests/);
+});
+
+test("deduplicates active session names for the provider hover list", () => {
+  const activeStart = source.indexOf("function activeSessionNames");
+  const activeEnd = source.indexOf("function renderActiveSessionsPopover");
+  assert.notEqual(activeStart, -1);
+  assert.notEqual(activeEnd, -1);
+  const activeContext = vm.createContext({});
+  vm.runInContext(
+    `${source.slice(activeStart, activeEnd)}\nthis.activeSessionNames = activeSessionNames;`,
+    activeContext,
+    { filename: sourcePath },
+  );
+
+  assert.deepEqual(
+    Array.from(activeContext.activeSessionNames({
+      active_sessions: [
+        { name: "设备打卡" },
+        { name: "设备打卡" },
+        { name: "Codex服务可用检测" },
+      ],
+    })),
+    ["设备打卡", "Codex服务可用检测"],
+  );
 });
