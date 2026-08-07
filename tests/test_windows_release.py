@@ -65,6 +65,9 @@ class WindowsReleaseTests(unittest.TestCase):
         # source constant. Hard-coded versions are intentionally NOT asserted,
         # since they drift with every release and previously caused build failures.
         self.assertIn("Sync source version to release tag", workflow)
+        self.assertIn("$appPath = 'local_proxy/application.py'", workflow)
+        self.assertIn("if ($content -notmatch $pattern)", workflow)
+        self.assertIn("if ($updated -ne $content)", workflow)
         self.assertNotIn("does not match build version", build_script)
 
     def test_release_dependencies_include_claude_transport(self) -> None:

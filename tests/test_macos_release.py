@@ -68,6 +68,9 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertIn('python-version: "3.13"', workflow)
         self.assertIn("python -m unittest discover", workflow)
         self.assertIn("Sync source version to release tag", workflow)
+        self.assertIn("$appPath = 'local_proxy/application.py'", workflow)
+        self.assertIn("if ($content -notmatch $pattern)", workflow)
+        self.assertIn("if ($updated -ne $content)", workflow)
         self.assertIn("create_local_proxy_smoke_db.py", workflow)
         # macOS only uploads to an existing Release (the Windows workflow
         # creates it with release notes); it must not race on `gh release create`.
