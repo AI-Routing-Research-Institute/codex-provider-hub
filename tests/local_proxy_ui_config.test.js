@@ -8,6 +8,8 @@ const vm = require("node:vm");
 
 const sourcePath = path.join(__dirname, "..", "proxy_static", "app.js");
 const source = fs.readFileSync(sourcePath, "utf8");
+assert.equal(source.includes("统一端口由 Codex 控制台管理"), false);
+assert.equal(source.includes("shared_port"), false);
 const start = source.indexOf("function text(");
 const end = source.indexOf("async function readUiConfig");
 assert.notEqual(start, -1);

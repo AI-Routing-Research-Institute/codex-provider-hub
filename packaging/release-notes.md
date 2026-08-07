@@ -36,5 +36,5 @@
 安全说明：
 
 - App 不包含供应商数据库、API Key、本机设置、检测地址或用量数据
-- Codex 设置和用量保存在 `~/.codex-local-proxy`，Claude Code 保存在 `~/.claude-local-proxy`
+- 共享设置与两套协议数据统一保存在 `~/.codex-local-proxy`，Codex 和 Claude Code 的选择与用量文件彼此独立
 - 可使用随附的 `.sha256` 文件验证下载完整性

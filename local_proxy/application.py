@@ -3,14 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import webbrowser
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -38,17 +36,22 @@ from local_proxy.codex_profile import (
     build_codex_profile,
     codex_config_fragment,
     codex_ui_config,
-    data_directory,
-    default_settings,
-    load_settings,
-    save_settings,
-    settings_path,
-    usage_database_path,
+    load_settings as load_codex_settings,
 )
 from local_proxy.paths import display_path, resolve_user_path
+from local_proxy.shared_settings import (
+    SharedRuntimeCoordinator,
+    SharedSettingsStore,
+    data_directory,
+    default_shared_settings as default_settings,
+    load_shared_settings as load_settings,
+    migrate_runtime_data,
+    save_shared_settings as save_settings,
+    shared_settings_path as settings_path,
+)
 
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.7"
 AUTO_START_VALUE_NAME = "CodexLocalProxy"
 AUTO_START_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -147,33 +150,13 @@ def migrate_legacy_data_directory(
     source: Path | None = None,
     target: Path | None = None,
 ) -> tuple[str, ...]:
-    legacy = (source or legacy_data_directory()).expanduser().resolve()
     destination = (target or data_directory()).expanduser().resolve()
-    if legacy == destination or not legacy.is_dir():
-        return ()
-
-    migrated: list[str] = []
-    for name in ("settings.json", "usage.sqlite3"):
-        legacy_file = legacy / name
-        destination_file = destination / name
-        if not legacy_file.is_file() or destination_file.exists():
-            continue
-        destination.mkdir(parents=True, exist_ok=True)
-        temporary = destination / f".{name}.migrating"
-        temporary.unlink(missing_ok=True)
-        try:
-            if name == "usage.sqlite3":
-                source_uri = legacy_file.resolve().as_uri() + "?mode=ro"
-                with closing(sqlite3.connect(source_uri, uri=True)) as source_db:
-                    with closing(sqlite3.connect(temporary)) as destination_db:
-                        source_db.backup(destination_db)
-            else:
-                shutil.copy2(legacy_file, temporary)
-            temporary.replace(destination_file)
-        finally:
-            temporary.unlink(missing_ok=True)
-        migrated.append(name)
-    return tuple(migrated)
+    return migrate_runtime_data(
+        target=destination,
+        codex_source=destination,
+        claude_source=Path.home() / ".claude-local-proxy",
+        fallback_codex_source=(source or legacy_data_directory()),
+    )
 
 
 def existing_proxy_url(
@@ -267,9 +250,8 @@ def run_application(
     port: int,
     open_browser: bool = False,
     tray: bool = False,
+    shared_settings_data: dict[str, Any] | None = None,
 ) -> int:
-    from local_proxy.claude_profile import load_settings as load_claude_settings
-    claude_settings = load_claude_settings()
     existing = existing_proxy_url(port)
     if existing is not None:
         if open_browser:
@@ -277,7 +259,13 @@ def run_application(
             webbrowser.open(f"http://127.0.0.1:{port}/control/claude/")
         return 0
 
-    settings = load_settings()
+    shared_settings = dict(shared_settings_data or load_settings())
+    shared_settings["database_path"] = display_path(database)
+    shared_store = SharedSettingsStore(settings=shared_settings)
+    from local_proxy.claude_profile import load_settings as load_claude_settings
+
+    codex_settings = load_codex_settings()
+    claude_settings = load_claude_settings()
     tray_holder: dict[str, Any] = {}
     server_holder: dict[str, LocalProxyServer] = {}
 
@@ -292,17 +280,23 @@ def run_application(
     codex_profile = build_codex_profile(
         database=database,
         port=port,
-        settings_data=settings,
-    )
-
-    claude_database = resolve_user_path(
-        claude_settings.get("database_path") or str(database)
+        settings_data=codex_settings,
+        retry_policy_store=shared_store.retry_policy_store,
+        health_status_url_store=shared_store.health_status_url_store,
     )
     from local_proxy.claude_profile import build_claude_profile
 
     claude_profile = build_claude_profile(
-        database=claude_database,
+        database=database,
         port=port,
+        settings_data=claude_settings,
+        retry_policy_store=shared_store.retry_policy_store,
+        health_status_url_store=shared_store.health_status_url_store,
+    )
+    SharedRuntimeCoordinator(
+        shared_store,
+        (codex_profile, claude_profile),
+        active_port=port,
     )
 
     application = create_proxy_app(
@@ -567,6 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             port=port,
             open_browser=args.open_browser,
             tray=args.tray or bool(getattr(sys, "frozen", False)),
+            shared_settings_data=settings,
         )
     except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
         show_startup_error(str(exc))

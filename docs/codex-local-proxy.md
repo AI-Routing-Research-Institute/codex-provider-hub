@@ -14,7 +14,7 @@ Claude Code: http://127.0.0.1:17890/control/claude/
 
 从 GitHub Releases 下载 `CodexLocalProxy-win-x64.exe` 后直接双击运行。便携版自带 Python 和运行依赖，通过一个图标常驻 Windows 通知区域，不需要安装项目虚拟环境。托盘菜单可以分别打开两个控制台视图。
 
-便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。Codex 数据保存在 `~/.codex-local-proxy/`，Claude Code 数据保存在 `~/.claude-local-proxy/`，两套选择、统计和恢复记录互不混用。
+便携版仍然从当前用户的 `~/.cc-switch/cc-switch.db` 读取供应商，因此需要先安装并配置 CC Switch。共享配置与两套协议数据统一放在 `~/.codex-local-proxy/`，Codex 和 Claude Code 的供应商选择、统计及恢复记录仍互不混用。
 
 ## Claude Code 接入
 
@@ -30,7 +30,7 @@ claude
 
 `meta.apiFormat = "openai_chat"` 的条目会在页面显示为协议不兼容。第一版不进行 OpenAI Chat Completions 到 Anthropic Messages 的转换。
 
-从旧版本首次启动时，程序会把 `%LOCALAPPDATA%\CodexLocalProxy` 中的 `settings.json` 和 `usage.sqlite3` 安全迁移到新目录，并保留旧文件作为备份。
+从旧版本首次启动时，程序会拆分 `~/.codex-local-proxy/settings.json`、`~/.codex-local-proxy/usage.sqlite3` 和旧 Claude 目录中的协议数据。SQLite 数据通过备份接口迁移，已存在的新文件不会被覆盖；确认新文件存在后会删除旧文件和空目录，不额外保留备份。更早版本位于 `%LOCALAPPDATA%\CodexLocalProxy` 的 Codex 数据也会作为兼容来源读取。
 
 可以使用同一 Release 中的 `.sha256` 文件校验下载内容。首个未签名版本可能触发 Windows SmartScreen 的“未知发布者”提示。
 
@@ -50,9 +50,20 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 
 ## 运行设置
 
-控制台的“运行设置”页可以修改供应商数据源和服务器检测地址；统一端口只在 Codex 控制台中配置。数据源保存前会以只读方式验证，保存后立即替换新请求使用的供应商列表；检测地址也会立即生效。端口修改需要退出并重新启动本地中转，随后重新复制 Codex 与 Claude Code 配置。
+Codex 和 Claude Code 控制台的“运行设置”页都可以修改统一端口、供应商数据源和服务器检测地址。数据源保存前会以只读方式同时验证两套加载器，保存后立即替换两种协议的新请求供应商列表；某一种协议没有供应商时，另一种协议仍可正常使用。检测地址和重试设置会立即对两种协议生效。端口修改需要退出并重新启动本地中转，随后重新复制 Codex 与 Claude Code 配置。
 
-本地数据目录固定为 `~/.codex-local-proxy/`，页面只展示该位置，不允许修改。`settings.json` 保存端口、数据源、检测地址、重试策略和供应商显示偏好，`usage.sqlite3` 保存 Token 聚合数据和最近 24 小时的脱敏恢复记录。Codex 自身的配置文件仍是 `~/.codex/config.toml`，本地中转不会自动覆盖它。
+本地数据目录固定为 `~/.codex-local-proxy/`，页面只展示该位置，不允许修改：
+
+```text
+~/.codex-local-proxy/
+├── shared-settings.json
+├── codex-settings.json
+├── codex-usage.sqlite3
+├── claude-settings.json
+└── claude-usage.sqlite3
+```
+
+`shared-settings.json` 保存端口、CC Switch 数据库路径、检测地址和重试策略。两个 `*-settings.json` 只保存各自的供应商选择、排序和隐藏状态，两个 `*-usage.sqlite3` 分别保存 Token 聚合数据与最近 24 小时的脱敏恢复记录。Codex 自身的配置文件仍是 `~/.codex/config.toml`，本地中转不会自动覆盖它。
 
 ## 首次接入 Codex
 
@@ -63,10 +74,10 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 ## 供应商列表与 Token 统计
 
 - “管理列表”模式可以拖动供应商调整顺序，也可以隐藏和恢复供应商。当前正在使用的供应商需要先切换后才能隐藏。
-- 排序和隐藏状态保存在 `~/.codex-local-proxy/settings.json`，不会修改 CC Switch 数据库。
+- Codex 与 Claude Code 的排序和隐藏状态分别保存在 `codex-settings.json` 和 `claude-settings.json`，不会修改 CC Switch 数据库。
 - 指向当前本地中转监听端口的回环供应商会在加载时排除，避免把“Codex 本地中转”自身显示为可选上游。
 - Token 数据优先读取上游 Responses 终止事件或非流式响应中的 `usage`；上游没有返回 `usage` 时，才使用与模型匹配的 `tiktoken` 编码估算输入和可见输出。
-- 用量保存在 `~/.codex-local-proxy/usage.sqlite3`。Token 记录只包含供应商 ID、模型、时间、状态和 Token 数值，不保存请求正文、回答正文或 Key。
+- 用量分别保存在 `codex-usage.sqlite3` 和 `claude-usage.sqlite3`。Token 记录只包含供应商 ID、模型、时间、状态和 Token 数值，不保存请求正文、回答正文或 Key。
 - 控制台支持今日、近 24 小时、近 7 日（严格 `7 × 24` 小时）、近 30 日和全部时间范围。
 
 ## 自动恢复
@@ -81,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_local_proxy_shortcut.ps
 - 供应商切换发生在重试前时，旧供应商的失败记录仍归属于旧供应商，活动请求计数会迁移到实际接管的新供应商。
 - 一旦响应内容已经转发给 Codex，中转不会重放整个请求，以免重复文本、工具调用或计费。
 - 同一供应商连续 3 个请求在重试后仍失败时会熔断 30 秒。
-- 最近 24 小时的恢复记录会持久化到 `usage.sqlite3`，包括等待重试、重试耗尽、客户端断开以及输出后失败未重放；过期记录会自动清理，控制台最多加载最新 500 条。
+- 最近 24 小时的恢复记录会持久化到对应协议的 `*-usage.sqlite3`，包括等待重试、重试耗尽、客户端断开以及输出后失败未重放；过期记录会自动清理，控制台最多加载最新 500 条。
 - 恢复记录只保存供应商、时间、尝试次数、阶段、结果和脱敏后的错误摘要，不保存请求正文、响应正文或认证信息。
 
 ## 安全边界

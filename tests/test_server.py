@@ -5,9 +5,10 @@ from pathlib import Path
 import httpx
 
 from local_proxy.claude import ClaudeProxyProvider
-from local_proxy.core import ProviderRouter, ProxyProvider, TokenUsage, UsageStore, create_proxy_app
+from local_proxy.core import ProviderRouter, ProxyProvider, RetryPolicy, TokenUsage, UsageStore, create_proxy_app
 from local_proxy.protocols.claude_messages import ClaudeMessagesProtocol
 from local_proxy.server import ProxyProfile
+from local_proxy.shared_settings import SharedRuntimeCoordinator, SharedSettingsStore
 
 
 def codex_provider() -> ProxyProvider:
@@ -184,6 +185,76 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(codex_history.json()["items"][0]["model"], "gpt-test")
         self.assertEqual(claude_history.json()["items"][0]["model"], "claude-test")
         self.assertEqual(crossed.status_code, 404)
+
+    async def test_both_control_views_update_the_same_runtime_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database = root / "cc-switch.db"
+            database.touch()
+            applied: list[str] = []
+            for profile in (self.codex_profile, self.claude_profile):
+                profile.load_runtime_database = (
+                    lambda path, current=profile: current.router.providers()
+                )
+                profile.apply_runtime_database = (
+                    lambda path, providers, current=profile: (
+                        applied.append(current.service_id),
+                        current.router.replace_providers(providers),
+                    )
+                )
+                profile.database_validation_summary = lambda providers: {
+                    "provider_count": len(providers),
+                }
+                profile.runtime_metadata = lambda current=profile: {
+                    "data_directory": str(root),
+                    "settings_file": str(root / f"{current.service_id}-settings.json"),
+                    "usage_database": str(root / f"{current.service_id}-usage.sqlite3"),
+                }
+            store = SharedSettingsStore(
+                path=root / "shared-settings.json",
+                settings={"port": 17890, "database_path": str(database)},
+            )
+            SharedRuntimeCoordinator(
+                store,
+                (self.codex_profile, self.claude_profile),
+                active_port=17890,
+            )
+            headers = {"X-Local-Proxy-Control": "1"}
+
+            codex_update = await self.client.post(
+                "/control/codex/api/runtime-settings",
+                headers=headers,
+                json={
+                    "port": 18888,
+                    "database_path": str(database),
+                    "health_status_url": "https://status.example.test/api",
+                },
+            )
+            claude_view = await self.client.get("/control/claude/api/runtime-settings")
+            claude_update = await self.client.post(
+                "/control/claude/api/runtime-settings",
+                headers=headers,
+                json={
+                    "port": 19999,
+                    "database_path": str(database),
+                    "health_status_url": None,
+                },
+            )
+            codex_view = await self.client.get("/control/codex/api/runtime-settings")
+            retry_update = await self.client.post(
+                "/control/claude/api/retry-policy",
+                headers=headers,
+                json=RetryPolicy(max_attempts=7).as_public_dict(),
+            )
+            codex_status = await self.client.get("/control/codex/api/status")
+
+        self.assertEqual(codex_update.status_code, 200)
+        self.assertEqual(claude_view.json()["configured_port"], 18888)
+        self.assertEqual(claude_update.status_code, 200)
+        self.assertEqual(codex_view.json()["configured_port"], 19999)
+        self.assertEqual(applied, ["codex", "claude", "codex", "claude"])
+        self.assertEqual(retry_update.status_code, 200)
+        self.assertEqual(codex_status.json()["retry"]["max_attempts"], 7)
 
     async def test_health_reports_one_service_with_two_protocol_profiles(self) -> None:
         response = await self.client.get("/healthz")
