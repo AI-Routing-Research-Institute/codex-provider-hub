@@ -41,7 +41,7 @@ test("labels running, successful, and failed request results", () => {
   );
   assert.equal(
     context.api.requestResultLabel({ succeeded: true, status_code: 200 }),
-    "HTTP 200",
+    "200",
   );
   assert.equal(
     context.api.requestResultLabel({ succeeded: false, error_summary: "响应流中断" }),
@@ -55,7 +55,7 @@ test("keeps the actual provider visible in each request row", () => {
   );
   assert.equal(
     context.api.requestActualProviderLabel({ state: "failed", provider_name: "zzzcoding" }),
-    "本次使用 · zzzcoding",
+    "zzzcoding",
   );
   assert.doesNotMatch(source, /request-route-select|claimRequestRouteControl/);
 });

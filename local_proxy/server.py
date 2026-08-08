@@ -97,6 +97,7 @@ class ProxyProfile:
     apply_runtime_database: Callable[[Path, tuple[ProxyProvider, ...]], None] | None = None
     database_validation_summary: Callable[[tuple[ProxyProvider, ...]], Mapping[str, Any]] | None = None
     runtime_metadata: Callable[[], Mapping[str, Any]] | None = None
+    apply_runtime_preferences: Callable[[Mapping[str, Any]], None] | None = None
     ui_config: Callable[[], Mapping[str, Any]] | None = None
     provider_selectable: Callable[[ProxyProvider], bool] | None = None
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None
