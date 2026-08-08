@@ -61,6 +61,11 @@ let sessionRouteLoading = false;
 let sessionRouteSequence = 0;
 let sessionRouteError = null;
 let sessionRouteLastReadAt = 0;
+let timeRangeTarget = null;
+let timeRangeAnchor = null;
+let timeRangesRestored = false;
+const customTimeRanges = { usage: null, requests: null };
+const appliedTimeWindows = { usage: "today", requests: "24h" };
 let uiConfig = {
   display_name: "本地中转",
   brand_mark: "LP",
@@ -132,6 +137,17 @@ const sessionRoutePopover = document.querySelector("#session-route-popover");
 const sessionRouteSessionSelect = document.querySelector("#session-route-session");
 const sessionRouteProviderSelect = document.querySelector("#session-route-provider");
 const sessionRouteMeta = document.querySelector("#session-route-meta");
+const timeRangePopover = document.querySelector("#time-range-popover");
+const timeRangeTitle = document.querySelector("#time-range-title");
+const timeRangeHint = document.querySelector("#time-range-hint");
+const timeRangeStartDate = document.querySelector("#time-range-start-date");
+const timeRangeStartTime = document.querySelector("#time-range-start-time");
+const timeRangeEndDate = document.querySelector("#time-range-end-date");
+const timeRangeEndTime = document.querySelector("#time-range-end-time");
+const timeRangeError = document.querySelector("#time-range-error");
+const timeRangeClose = document.querySelector("#time-range-close");
+const timeRangeCancel = document.querySelector("#time-range-cancel");
+const timeRangeApply = document.querySelector("#time-range-apply");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 let themeStorageKey = "local-proxy-theme";
 const RECOVERY_HISTORY_PAGE_SIZE = 50;
@@ -192,6 +208,201 @@ function applyUiConfig(config) {
   );
 }
 
+function padTimePart(value) {
+  return String(value).padStart(2, "0");
+}
+
+function localDateValue(milliseconds) {
+  const value = new Date(milliseconds);
+  return `${value.getFullYear()}-${padTimePart(value.getMonth() + 1)}-${padTimePart(value.getDate())}`;
+}
+
+function localTimeValue(milliseconds) {
+  const value = new Date(milliseconds);
+  return `${padTimePart(value.getHours())}:${padTimePart(value.getMinutes())}:${padTimePart(value.getSeconds())}`;
+}
+
+function parseLocalDateTime(dateValue, timeValue) {
+  if (!dateValue || !timeValue) return Number.NaN;
+  return new Date(`${dateValue}T${timeValue}`).getTime();
+}
+
+function formatCustomRange(range, { includeYear = false } = {}) {
+  if (!range) return "";
+  const format = (milliseconds) => {
+    const value = new Date(milliseconds);
+    const date = includeYear
+      ? `${value.getFullYear()}-${padTimePart(value.getMonth() + 1)}-${padTimePart(value.getDate())}`
+      : `${padTimePart(value.getMonth() + 1)}/${padTimePart(value.getDate())}`;
+    return `${date} ${localTimeValue(milliseconds)}`;
+  };
+  return `${format(range.start)} 至 ${format(range.end)}`;
+}
+
+function timeRangeSelect(target) {
+  return target === "usage" ? usageWindow : requestWindow;
+}
+
+function timeRangeStorageKey(target) {
+  return `local-proxy-time-range-${uiConfig.service_id || "local"}-${target}`;
+}
+
+function validStoredTimeRange(target, range) {
+  if (!range || !Number.isFinite(range.start) || !Number.isFinite(range.end)) return false;
+  if (range.start >= range.end) return false;
+  if (target === "requests") {
+    const now = Date.now();
+    return range.end <= now + 60_000
+      && range.start >= now - 7 * 24 * 3600_000
+      && range.end - range.start <= 7 * 24 * 3600_000;
+  }
+  return true;
+}
+
+function persistTimeRange(target) {
+  try {
+    localStorage.setItem(timeRangeStorageKey(target), JSON.stringify(customTimeRanges[target]));
+  } catch (error) {}
+}
+
+function restoreTimeRanges() {
+  if (timeRangesRestored) return;
+  timeRangesRestored = true;
+  for (const target of ["usage", "requests"]) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(timeRangeStorageKey(target)) || "null");
+      if (!validStoredTimeRange(target, stored)) continue;
+      customTimeRanges[target] = stored;
+      appliedTimeWindows[target] = "custom";
+      timeRangeSelect(target).value = "custom";
+    } catch (error) {}
+  }
+  updateTimeRangeDisplay();
+}
+
+function updateTimeRangeDisplay() {
+  for (const target of ["usage", "requests"]) {
+    document.querySelector(`[data-time-range-edit="${target}"]`)?.classList.toggle(
+      "active",
+      appliedTimeWindows[target] === "custom",
+    );
+  }
+  const usageLabel = document.querySelector("#usage-range-label");
+  const usageRange = appliedTimeWindows.usage === "custom" ? customTimeRanges.usage : null;
+  usageLabel.hidden = !usageRange;
+  usageLabel.textContent = usageRange ? formatCustomRange(usageRange) : "";
+  usageLabel.title = usageRange ? formatCustomRange(usageRange, { includeYear: true }) : "";
+}
+
+function timeRangeParams(target) {
+  const params = new URLSearchParams();
+  const windowName = appliedTimeWindows[target];
+  params.set(target === "usage" ? "usage_window" : "window", windowName);
+  const range = customTimeRanges[target];
+  if (windowName === "custom" && range) {
+    params.set("start_at", String(range.start));
+    params.set("end_at", String(range.end + 999));
+  }
+  return params;
+}
+
+function positionTimeRangePopover() {
+  if (!timeRangeAnchor || timeRangePopover.hidden) return;
+  const anchorRect = timeRangeAnchor.getBoundingClientRect();
+  const popoverRect = timeRangePopover.getBoundingClientRect();
+  const margin = 12;
+  const left = Math.min(
+    window.innerWidth - popoverRect.width - margin,
+    Math.max(margin, anchorRect.left),
+  );
+  const below = anchorRect.bottom + 8;
+  const above = anchorRect.top - popoverRect.height - 8;
+  const top = below + popoverRect.height <= window.innerHeight - margin
+    ? below
+    : Math.max(margin, above);
+  timeRangePopover.style.left = `${Math.round(left)}px`;
+  timeRangePopover.style.top = `${Math.round(top)}px`;
+}
+
+function openTimeRangePopover(target, anchor) {
+  timeRangeTarget = target;
+  timeRangeAnchor = anchor;
+  const now = Math.floor(Date.now() / 1000) * 1000;
+  const range = customTimeRanges[target] || { start: now - 3600_000, end: now };
+  timeRangeTitle.textContent = target === "usage" ? "自定义 Token 时间" : "自定义请求时间";
+  timeRangeHint.textContent = target === "requests"
+    ? "精确到秒 · 最多 7 天，仅查询本地已有记录"
+    : "精确到秒 · 查询本地已有 Token 记录";
+  timeRangeStartDate.value = localDateValue(range.start);
+  timeRangeStartTime.value = localTimeValue(range.start);
+  timeRangeEndDate.value = localDateValue(range.end);
+  timeRangeEndTime.value = localTimeValue(range.end);
+  timeRangeError.hidden = true;
+  timeRangeError.textContent = "";
+  timeRangePopover.hidden = false;
+  timeRangePopover.classList.add("show");
+  positionTimeRangePopover();
+  timeRangeStartDate.focus();
+}
+
+function closeTimeRangePopover({ restoreSelection = false } = {}) {
+  if (restoreSelection && timeRangeTarget) {
+    timeRangeSelect(timeRangeTarget).value = appliedTimeWindows[timeRangeTarget];
+  }
+  const anchor = timeRangeAnchor;
+  timeRangePopover.classList.remove("show");
+  timeRangePopover.hidden = true;
+  timeRangeTarget = null;
+  timeRangeAnchor = null;
+  anchor?.focus();
+}
+
+function refreshForTimeRange(target) {
+  updateTimeRangeDisplay();
+  if (target === "usage") {
+    closeUsageHistoryPopover();
+    renderedListSignature = null;
+    void readStatus();
+  } else {
+    void readRequests({ reset: true });
+  }
+}
+
+function applyCustomTimeRange() {
+  if (!timeRangeTarget) return;
+  const start = parseLocalDateTime(timeRangeStartDate.value, timeRangeStartTime.value);
+  const end = parseLocalDateTime(timeRangeEndDate.value, timeRangeEndTime.value);
+  const now = Date.now();
+  let message = "";
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    message = "请完整选择开始日期、时间和结束日期、时间。";
+  } else if (start >= end) {
+    message = "开始时间必须早于结束时间。";
+  } else if (end > now + 1000) {
+    message = "结束时间不能晚于当前时间。";
+  } else if (
+    timeRangeTarget === "requests"
+    && (end - start > 7 * 24 * 3600_000 || start < now - 7 * 24 * 3600_000)
+  ) {
+    message = "请求记录只保留最近 7 天，请在可用范围内选择。";
+  }
+  if (message) {
+    timeRangeError.textContent = message;
+    timeRangeError.hidden = false;
+    return;
+  }
+  const target = timeRangeTarget;
+  customTimeRanges[target] = {
+    start: Math.floor(start / 1000) * 1000,
+    end: Math.floor(end / 1000) * 1000,
+  };
+  appliedTimeWindows[target] = "custom";
+  timeRangeSelect(target).value = "custom";
+  persistTimeRange(target);
+  closeTimeRangePopover();
+  refreshForTimeRange(target);
+}
+
 async function readUiConfig() {
   try {
     const response = await fetch(controlUrl("/api/ui-config"), { cache: "no-store" });
@@ -200,6 +411,7 @@ async function readUiConfig() {
   } catch {
     applyUiConfig(uiConfig);
   }
+  restoreTimeRanges();
 }
 
 function themePreference() {
@@ -712,6 +924,7 @@ function requestResultLabel(item) {
   if (item?.succeeded === true) {
     return String(Number(item.status_code || 200));
   }
+  if (item?.error_kind === "client_disconnected") return "客户端取消";
   if (item?.error_summary) return item.error_summary;
   const statusCode = Number(item?.status_code || 0);
   return statusCode > 0 ? `HTTP ${statusCode} 失败` : "请求失败";
@@ -954,6 +1167,7 @@ function renderRequests() {
   for (const item of combined) {
     const state = item.state === "running"
       ? "running"
+      : item.error_kind === "client_disconnected" ? "cancelled"
       : item.succeeded === true ? "succeeded" : "failed";
     const row = document.createElement("div");
     row.className = `request-row ${state}`;
@@ -964,7 +1178,9 @@ function renderRequests() {
     dot.className = "request-state-dot";
     dot.setAttribute("aria-hidden", "true");
     const statusText = document.createElement("span");
-    statusText.textContent = state === "running" ? "运行中" : state === "succeeded" ? "成功" : "失败";
+    statusText.textContent = state === "running"
+      ? "运行中"
+      : state === "succeeded" ? "成功" : state === "cancelled" ? "取消" : "失败";
     status.append(dot, statusText);
 
     const startedAt = document.createElement("time");
@@ -1002,7 +1218,9 @@ function renderRequests() {
     result.textContent = requestResultLabel(item);
     result.title = state === "succeeded"
       ? `HTTP ${Number(item.status_code || 200)}`
-      : result.textContent;
+      : state === "cancelled"
+        ? "客户端在响应完成前结束连接"
+        : result.textContent;
     row.append(status, startedAt, session, route, model, duration, token, result);
     requestList.append(row);
   }
@@ -1016,9 +1234,12 @@ function renderRequests() {
   const globalActiveCount = Number(latestStatus?.active_requests || 0);
   count.hidden = globalActiveCount === 0;
   count.textContent = String(globalActiveCount);
+  const requestRange = appliedTimeWindows.requests === "custom"
+    ? formatCustomRange(customTimeRanges.requests)
+    : null;
   document.querySelector("#requests-meta").textContent = requestError
     ? requestError
-    : `${requestTotalCount} 条记录 · 运行中 ${activeCount} 条 · 最多保留 24 小时`;
+    : `${requestTotalCount} 条记录 · 运行中 ${activeCount} 条 · ${requestRange || "最多保留 7 天"}`;
 }
 
 async function readRequests({ reset = false, loadMore = false, refresh = false, quiet = false } = {}) {
@@ -1035,10 +1256,8 @@ async function readRequests({ reset = false, loadMore = false, refresh = false, 
   requestLoading = true;
   renderRequests();
   const sequence = ++requestSequence;
-  const params = new URLSearchParams({
-    window: requestWindow.value,
-    status: requestStatus.value,
-  });
+  const params = timeRangeParams("requests");
+  params.set("status", requestStatus.value);
   if (requestProvider.value) params.set("provider_id", requestProvider.value);
   if (requestQuery.value.trim()) params.set("query", requestQuery.value.trim());
   if (loadMore && requestNextCursor) params.set("cursor", requestNextCursor);
@@ -1312,10 +1531,8 @@ async function readUsageHistory({ reset = false } = {}) {
   }
   renderUsageHistoryPopover();
   try {
-    const params = new URLSearchParams({
-      provider_id: providerId,
-      usage_window: selectedWindow,
-    });
+    const params = timeRangeParams("usage");
+    params.set("provider_id", providerId);
     if (cursor) params.set("cursor", cursor);
     const response = await fetch(`${controlUrl("/api/usage-history")}?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(await responseDetail(response, "无法读取请求记录"));
@@ -1375,7 +1592,7 @@ function openUsageHistoryPopover(button, provider) {
   if (usageHistoryButton) usageHistoryButton.setAttribute("aria-expanded", "false");
   usageHistoryButton = button;
   usageHistoryProvider = provider;
-  usageHistoryWindow = usageWindow.value;
+  usageHistoryWindow = appliedTimeWindows.usage;
   usageHistoryItems = [];
   usageHistoryTotals = null;
   usageHistoryNextCursor = null;
@@ -2262,8 +2479,9 @@ async function readStatus({ quiet = false } = {}) {
   if (controlRequestActive) return;
   const requestSequence = ++statusRequestSequence;
   try {
+    const params = timeRangeParams("usage");
     const response = await fetch(
-      `${controlUrl("/api/status")}?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl("/api/status")}?${params}`,
       { cache: "no-store" },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2331,8 +2549,9 @@ async function readHealthStatus({ quiet = false } = {}) {
 async function setProviderHidden(provider, hidden) {
   controlRequestActive = true;
   try {
+    const params = timeRangeParams("usage");
     const response = await fetch(
-      `${controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/visibility`)}?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/visibility`)}?${params}`,
       {
         method: "POST",
         headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
@@ -2358,8 +2577,9 @@ async function saveProviderOrder(providerIds) {
   if (!Array.isArray(providerIds) || providerIds.length !== latestStatus?.providers?.length) return;
   controlRequestActive = true;
   try {
+    const params = timeRangeParams("usage");
     const response = await fetch(
-      `${controlUrl("/api/providers/order")}?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl("/api/providers/order")}?${params}`,
       {
         method: "POST",
         headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
@@ -2394,8 +2614,9 @@ async function selectProvider(provider) {
   controlRequestActive = true;
   const requestSequence = ++statusRequestSequence;
   try {
+    const params = timeRangeParams("usage");
     const response = await fetch(
-      `${controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/select`)}?usage_window=${encodeURIComponent(usageWindow.value)}`,
+      `${controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/select`)}?${params}`,
       { method: "POST", headers: CONTROL_HEADER, cache: "no-store" },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2418,7 +2639,8 @@ async function refreshProviders() {
   controlRequestActive = true;
   const requestSequence = ++statusRequestSequence;
   try {
-    const response = await fetch(`${controlUrl("/api/refresh")}?usage_window=${encodeURIComponent(usageWindow.value)}`, {
+    const params = timeRangeParams("usage");
+    const response = await fetch(`${controlUrl("/api/refresh")}?${params}`, {
       method: "POST",
       headers: CONTROL_HEADER,
       cache: "no-store",
@@ -2648,9 +2870,12 @@ async function shutdownProxy() {
 
 searchInput.addEventListener("input", renderProviderList);
 usageWindow.addEventListener("change", () => {
-  closeUsageHistoryPopover();
-  renderedListSignature = null;
-  readStatus();
+  if (usageWindow.value === "custom") {
+    openTimeRangePopover("usage", usageWindow);
+    return;
+  }
+  appliedTimeWindows.usage = usageWindow.value;
+  refreshForTimeRange("usage");
 });
 manageProvidersButton.addEventListener("click", toggleProviderManagement);
 healthRefreshButton.addEventListener("click", () => readHealthStatus());
@@ -2683,9 +2908,25 @@ usageHistoryList.addEventListener("scroll", () => {
     void readUsageHistory();
   }
 });
-for (const control of [requestWindow, requestStatus, requestProvider]) {
+requestWindow.addEventListener("change", () => {
+  if (requestWindow.value === "custom") {
+    openTimeRangePopover("requests", requestWindow);
+    return;
+  }
+  appliedTimeWindows.requests = requestWindow.value;
+  refreshForTimeRange("requests");
+});
+for (const control of [requestStatus, requestProvider]) {
   control.addEventListener("change", () => void readRequests({ reset: true }));
 }
+for (const button of document.querySelectorAll("[data-time-range-edit]")) {
+  button.addEventListener("click", () => {
+    openTimeRangePopover(button.dataset.timeRangeEdit, button);
+  });
+}
+timeRangeClose.addEventListener("click", () => closeTimeRangePopover({ restoreSelection: true }));
+timeRangeCancel.addEventListener("click", () => closeTimeRangePopover({ restoreSelection: true }));
+timeRangeApply.addEventListener("click", applyCustomTimeRange);
 requestQuery.addEventListener("input", () => {
   window.clearTimeout(requestSearchTimer);
   requestSearchTimer = window.setTimeout(
@@ -2765,6 +3006,15 @@ for (const item of themeMenu.querySelectorAll("[data-theme-value]")) {
   });
 }
 document.addEventListener("click", (event) => {
+  if (
+    !timeRangePopover.hidden
+    && !event.target.closest("#time-range-popover")
+    && !event.target.closest("[data-time-range-edit]")
+    && event.target !== usageWindow
+    && event.target !== requestWindow
+  ) {
+    closeTimeRangePopover({ restoreSelection: true });
+  }
   if (!event.target.closest(".theme-control")) setThemeMenuOpen(false);
   if (!event.target.closest("#recovery") && !event.target.closest("#recovery-popover")) {
     hideRecoveryDetails({ force: true });
@@ -2786,6 +3036,10 @@ document.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !timeRangePopover.hidden) {
+    closeTimeRangePopover({ restoreSelection: true });
+    return;
+  }
   if (event.key === "Escape" && !themeMenu.hidden) {
     setThemeMenuOpen(false);
     themeButton.focus();
@@ -2814,6 +3068,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 window.addEventListener("resize", () => {
+  if (!timeRangePopover.hidden) positionTimeRangePopover();
   if (!sessionRoutePopover.hidden) positionSessionRoutePopover();
   if (activeSessionsPopover.classList.contains("show")) positionActiveSessionsPopover();
   if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
