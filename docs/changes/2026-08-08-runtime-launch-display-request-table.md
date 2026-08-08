@@ -65,4 +65,4 @@ Codex 供应商卡片始终显示临时启动命令按钮，名称较长时会�
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/7
