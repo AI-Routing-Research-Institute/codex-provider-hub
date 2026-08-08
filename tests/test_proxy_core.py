@@ -342,6 +342,63 @@ class UsageTests(unittest.TestCase):
             round((now - 7 * 24 * 3600 + 1) * 1000),
         )
 
+    def test_custom_usage_range_filters_summary_and_history(self) -> None:
+        for recorded_at, tokens in ((100.0, 10), (101.0, 20), (102.0, 30)):
+            self.store.record(
+                provider_id="provider-a",
+                model="gpt-5",
+                usage=TokenUsage(tokens, 0, tokens),
+                status_code=200,
+                recorded_at=recorded_at,
+            )
+
+        summary = self.store.summary("custom", start_at=101.0, end_at=102.0)
+        history = self.store.history(
+            provider_id="provider-a",
+            window="custom",
+            start_at=101.0,
+            end_at=102.0,
+        )
+
+        self.assertEqual(summary["total"]["total_tokens"], 20)
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["total_tokens"], 20)
+        self.assertEqual(history["start_at"], 101000)
+        self.assertEqual(history["end_at"], 101999)
+
+    def test_custom_request_range_filters_and_enforces_seven_day_retention(self) -> None:
+        now = 2_000_000.0
+        for offset, name in ((-3.0, "inside"), (-1.0, "outside")):
+            self.store.record_request(
+                started_at=now + offset,
+                finished_at=now + offset,
+                provider_id="provider-a",
+                thread_id=None,
+                session_name=name,
+                model="gpt-5",
+                status_code=200,
+                successful=True,
+                outcome="succeeded",
+                retry_count=0,
+            )
+
+        history = self.store.request_history(
+            window="custom",
+            start_at=now - 4,
+            end_at=now - 2,
+            now=now,
+        )
+
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["session_name"], "inside")
+        with self.assertRaisesRegex(ValueError, "7 天"):
+            self.store.request_history(
+                window="custom",
+                start_at=now - 8 * 24 * 3600,
+                end_at=now,
+                now=now,
+            )
+
     def test_request_history_includes_failures_and_paginates(self) -> None:
         now = 2_000_000.0
         records = (
@@ -544,7 +601,7 @@ class UsageTests(unittest.TestCase):
         self.assertNotIn("response_body", columns)
         self.assertNotIn("api_key", columns)
 
-    def test_local_request_history_keeps_24_hours_without_duplicating_usage(self) -> None:
+    def test_local_request_history_keeps_seven_days_without_duplicating_usage(self) -> None:
         now = 2_000_000.0
         usage = TokenUsage(12, 3, 15, cached_tokens=4)
         usage_id = self.store.record(
@@ -2437,6 +2494,124 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 1)
         await upstream_client.aclose()
 
+    async def test_completed_event_before_client_close_is_recorded_as_success(self) -> None:
+        class CompletedStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (
+                    b'data: {"type":"response.completed","response":{"status":"completed",'
+                    b'"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}\n\n'
+                )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=CompletedStream(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            usage_store=usage_store,
+        )
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, receive))
+        iterator = response.body_iterator
+
+        self.assertIn(b"response.completed", await anext(iterator))
+        await iterator.aclose()
+        await upstream_client.aclose()
+
+        history = usage_store.request_history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertTrue(history["items"][0]["succeeded"])
+        self.assertIsNone(history["items"][0]["error_kind"])
+
+    async def test_client_close_before_terminal_event_uses_short_cancel_summary(self) -> None:
+        class PartialStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=PartialStream(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            usage_store=usage_store,
+        )
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, receive))
+        iterator = response.body_iterator
+
+        self.assertIn(b"partial", await anext(iterator))
+        await iterator.aclose()
+        await upstream_client.aclose()
+
+        history = usage_store.request_history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertFalse(history["items"][0]["succeeded"])
+        self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
+        self.assertEqual(history["items"][0]["error_summary"], "客户端取消")
+
     async def test_forwards_request_stream_headers_query_and_response(self) -> None:
         observed: dict[str, object] = {}
 
@@ -2629,8 +2804,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="runtime-data-directory"', page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=24", page.text)
-        self.assertIn("app.js?v=29", page.text)
+        self.assertIn("styles.css?v=26", page.text)
+        self.assertIn("app.js?v=31", page.text)
         self.assertIn("<span>请求</span><span>服务器检测</span>", page.text)
         self.assertIn("供应商", page.text)
         self.assertIn("设置会话路由", page.text)

@@ -47,6 +47,14 @@ test("labels running, successful, and failed request results", () => {
     context.api.requestResultLabel({ succeeded: false, error_summary: "响应流中断" }),
     "响应流中断",
   );
+  assert.equal(
+    context.api.requestResultLabel({
+      succeeded: false,
+      error_kind: "client_disconnected",
+      error_summary: "客户端在响应完成前断开连接",
+    }),
+    "客户端取消",
+  );
 });
 test("keeps the actual provider visible in each request row", () => {
   assert.equal(
