@@ -67,6 +67,7 @@ def default_protocol_settings() -> dict[str, Any]:
         "provider_order": [],
         "hidden_provider_ids": [],
         "session_provider_overrides": {},
+        "show_provider_launch_command": True,
     }
 
 
@@ -177,6 +178,9 @@ def load_protocol_settings(path: Path) -> dict[str, Any]:
             and isinstance(provider_id, str)
             and provider_id.strip()
         }
+    show_launch_command = payload.get("show_provider_launch_command")
+    if isinstance(show_launch_command, bool):
+        settings["show_provider_launch_command"] = show_launch_command
     return settings
 
 
@@ -205,6 +209,9 @@ def save_protocol_settings(settings: dict[str, Any], path: Path) -> None:
             and isinstance(provider_id, str)
             and provider_id.strip()
         }
+    show_launch_command = settings.get("show_provider_launch_command")
+    if isinstance(show_launch_command, bool):
+        normalized["show_provider_launch_command"] = show_launch_command
     _write_json_object(path, normalized)
 
 
@@ -361,6 +368,7 @@ class SharedRuntimeCoordinator:
         service_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        profile = self.profiles[service_id]
         configured_port = payload.get("port")
         if (
             isinstance(configured_port, bool)
@@ -372,6 +380,12 @@ class SharedRuntimeCoordinator:
         if not isinstance(database_value, str) or not database_value.strip():
             raise ValueError("数据来源不能为空")
         health_url = normalize_health_status_url(payload.get("health_status_url"))
+        if (
+            getattr(profile, "apply_runtime_preferences", None) is not None
+            and "show_provider_launch_command" in payload
+            and not isinstance(payload["show_provider_launch_command"], bool)
+        ):
+            raise ValueError("临时启动命令显示设置必须是布尔值")
         source, loaded = self._prepare_database(database_value)
         with self._lock:
             self.settings_store.replace_runtime(
@@ -381,6 +395,9 @@ class SharedRuntimeCoordinator:
             )
             for current_service_id, providers in loaded.items():
                 self.profiles[current_service_id].apply_runtime_database(source, providers)
+            apply_preferences = getattr(profile, "apply_runtime_preferences", None)
+            if apply_preferences is not None:
+                apply_preferences(payload)
         return self.snapshot(service_id)
 
 

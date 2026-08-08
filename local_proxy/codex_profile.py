@@ -212,12 +212,23 @@ def build_codex_profile(
             persist(selected_provider_id=selected_id)
 
     def runtime_metadata() -> dict[str, Any]:
+        with settings_lock:
+            show_launch_command = settings.get("show_provider_launch_command", True)
         return {
             "data_directory": display_path(root),
             "settings_file": display_path(active_settings_path),
             "usage_database": display_path(active_usage_path),
             "codex_config_file": "~/.codex/config.toml",
+            "show_provider_launch_command": bool(show_launch_command),
         }
+
+    def apply_runtime_preferences(payload: Mapping[str, Any]) -> None:
+        if "show_provider_launch_command" not in payload:
+            return
+        show_launch_command = payload["show_provider_launch_command"]
+        if not isinstance(show_launch_command, bool):
+            raise ValueError("临时启动命令显示设置必须是布尔值")
+        persist(show_provider_launch_command=show_launch_command)
 
     return ProxyProfile(
         service_id="codex",
@@ -249,6 +260,7 @@ def build_codex_profile(
             ),
         },
         runtime_metadata=runtime_metadata,
+        apply_runtime_preferences=apply_runtime_preferences,
         ui_config=lambda: codex_ui_config(port, root),
         session_name_resolver=session_name_index.resolve,
         session_catalog=session_catalog,
