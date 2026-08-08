@@ -103,6 +103,7 @@ const runtimeForm = document.querySelector("#runtime-form");
 const runtimePortInput = document.querySelector("#runtime-port");
 const runtimeDatabaseInput = document.querySelector("#runtime-database-path");
 const runtimeHealthUrlInput = document.querySelector("#runtime-health-url");
+const runtimeShowLaunchCommandInput = document.querySelector("#runtime-show-launch-command");
 const themeButton = document.querySelector("#theme-button");
 const themeMenu = document.querySelector("#theme-menu");
 const recovery = document.querySelector("#recovery");
@@ -185,6 +186,10 @@ function applyUiConfig(config) {
       uiConfig.features.session_routing !== true,
     );
   }
+  document.querySelector("#runtime-launch-command-row")?.toggleAttribute(
+    "hidden",
+    uiConfig.features.provider_launch_command !== true,
+  );
 }
 
 async function readUiConfig() {
@@ -623,6 +628,9 @@ function runtimePayloadFromForm() {
     port: Number(runtimePortInput.value),
     database_path: runtimeDatabaseInput.value.trim(),
     health_status_url: healthStatusUrl || null,
+    ...(uiConfig.features.provider_launch_command === true
+      ? { show_provider_launch_command: runtimeShowLaunchCommandInput.checked }
+      : {}),
   };
 }
 
@@ -642,6 +650,7 @@ function renderRuntimeSettings(settings) {
   runtimePortInput.value = String(settings.configured_port ?? settings.active_port ?? "");
   runtimeDatabaseInput.value = settings.database_path || "~/.cc-switch/cc-switch.db";
   runtimeHealthUrlInput.value = settings.health_status_url || "";
+  runtimeShowLaunchCommandInput.checked = settings.show_provider_launch_command !== false;
   document.querySelector("#database-path").textContent = runtimeDatabaseInput.value;
   document.querySelector("#runtime-data-directory").textContent = settings.data_directory || uiConfig.data_directory;
   document.querySelector("#runtime-config-location").textContent = settings.codex_config_file || settings.claude_config_file || uiConfig.config_location;
@@ -651,6 +660,7 @@ function renderRuntimeSettings(settings) {
   state.classList.toggle("pending", restartRequired);
   state.lastChild.textContent = restartRequired ? "等待重启" : "配置已生效";
   renderRuntimeSettingsSummary();
+  if (latestStatus) renderProviderList();
 }
 
 async function responseDetail(response, fallback) {
@@ -700,7 +710,7 @@ function requestResultLabel(item) {
       : "接收中";
   }
   if (item?.succeeded === true) {
-    return `HTTP ${Number(item.status_code || 200)}`;
+    return String(Number(item.status_code || 200));
   }
   if (item?.error_summary) return item.error_summary;
   const statusCode = Number(item?.status_code || 0);
@@ -708,8 +718,8 @@ function requestResultLabel(item) {
 }
 
 function requestActualProviderLabel(item) {
-  const prefix = item?.state === "running" ? "正在使用" : "本次使用";
-  return `${prefix} · ${item?.provider_name || item?.provider_id || "未知供应商"}`;
+  const provider = item?.provider_name || item?.provider_id || "未知供应商";
+  return item?.state === "running" ? `正在使用 · ${provider}` : provider;
 }
 
 function positionSessionRoutePopover() {
@@ -990,7 +1000,9 @@ function renderRequests() {
     const result = document.createElement("span");
     result.className = "request-result";
     result.textContent = requestResultLabel(item);
-    result.title = result.textContent;
+    result.title = state === "succeeded"
+      ? `HTTP ${Number(item.status_code || 200)}`
+      : result.textContent;
     row.append(status, startedAt, session, route, model, duration, token, result);
     requestList.append(row);
   }
@@ -1928,7 +1940,11 @@ function renderProviderList() {
     name.textContent = escapeText(provider.name);
     providerSelect.append(name);
     title.append(providerSelect);
-    if (uiConfig.features.provider_launch_command) {
+    if (
+      uiConfig.features.provider_launch_command
+      && latestRuntimeSettings !== null
+      && latestRuntimeSettings?.show_provider_launch_command !== false
+    ) {
       const launchButton = document.createElement("button");
       launchButton.type = "button";
       launchButton.className = "copy-command";

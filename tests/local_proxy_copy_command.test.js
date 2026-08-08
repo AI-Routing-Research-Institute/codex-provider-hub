@@ -8,6 +8,7 @@ const vm = require("node:vm");
 
 const sourcePath = path.join(__dirname, "..", "proxy_static", "app.js");
 const source = fs.readFileSync(sourcePath, "utf8");
+const html = fs.readFileSync(path.join(__dirname, "..", "proxy_static", "index.html"), "utf8");
 const start = source.indexOf("async function copyProviderCommand");
 const end = source.indexOf("async function shutdownProxy");
 assert.notEqual(start, -1);
@@ -62,4 +63,11 @@ test("shows the backend detail when command generation fails", async () => {
   assert.equal(instance.toasts[0][1], "该供应商没有可用 Key");
   assert.equal(instance.toasts[0][2], "error");
   assert.equal(button.disabled, false);
+});
+
+test("lets runtime settings hide provider launch command buttons", () => {
+  assert.match(html, /id="runtime-show-launch-command" type="checkbox"/);
+  assert.match(source, /show_provider_launch_command: runtimeShowLaunchCommandInput\.checked/);
+  assert.match(source, /latestRuntimeSettings !== null/);
+  assert.match(source, /latestRuntimeSettings\?\.show_provider_launch_command !== false/);
 });

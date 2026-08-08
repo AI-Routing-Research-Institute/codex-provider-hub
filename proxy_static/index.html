@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="./static/styles.css?v=22">
+  <link rel="stylesheet" href="./static/styles.css?v=24">
 </head>
 <body>
   <main class="stage">
@@ -258,6 +258,10 @@
               <button id="test-health-url" class="secondary-button setting-action-button" type="button">测试</button>
             </div>
           </div>
+          <label id="runtime-launch-command-row" class="setting-row setting-toggle" hidden>
+            <span><strong>供应商临时启动命令</strong><small>在供应商卡片中显示“复制临时启动命令”按钮</small></span>
+            <input id="runtime-show-launch-command" type="checkbox" checked>
+          </label>
           <div class="setting-row setting-readonly-row">
             <span><strong>本地数据目录</strong><small>共享设置与两套协议数据均保存在此，不保存供应商 Key</small></span>
             <div class="setting-path-value">
@@ -315,6 +319,6 @@
   </div>
   <div id="history-detail-popover" class="history-detail-popover" role="tooltip"></div>
 
-  <script src="./static/app.js?v=27" defer></script>
+  <script src="./static/app.js?v=29" defer></script>
 </body>
 </html>
