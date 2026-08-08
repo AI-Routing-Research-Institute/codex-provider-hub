@@ -45,14 +45,14 @@ RECOVERY_HISTORY_HOURS = 24
 RECOVERY_HISTORY_API_LIMIT = 500
 RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 USAGE_HISTORY_PAGE_LIMIT = 50
-REQUEST_HISTORY_HOURS = 24
+REQUEST_HISTORY_HOURS = 7 * 24
 REQUEST_HISTORY_PAGE_LIMIT = 50
-REQUEST_HISTORY_WINDOWS = {"1h", "6h", "24h"}
+REQUEST_HISTORY_WINDOWS = {"1h", "6h", "24h", "7d", "custom"}
 SSE_RETRY_EVENT_PARSE_BYTES = 256 * 1024
 SSE_RETRY_PREFLIGHT_BYTES = 8 * 1024 * 1024
 SSE_RETRY_MARKER_TAIL_BYTES = 512
 USAGE_RESPONSE_BUFFER_BYTES = 8 * 1024 * 1024
-USAGE_WINDOWS = {"today", "24h", "7d", "30d", "all"}
+USAGE_WINDOWS = {"today", "24h", "7d", "30d", "all", "custom"}
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -334,6 +334,8 @@ class UsageStore:
         self,
         *,
         window: str = "24h",
+        start_at: float | None = None,
+        end_at: float | None = None,
         status: str = "all",
         provider_id: str | None = None,
         query: str = "",
@@ -348,11 +350,24 @@ class UsageStore:
         if normalized_status not in {"all", "succeeded", "failed"}:
             raise ValueError("请求记录状态无效")
         timestamp = time.time() if now is None else float(now)
-        hours = {"1h": 1, "6h": 6, "24h": 24}[normalized_window]
-        cutoff = timestamp - hours * 3600
+        if normalized_window == "custom":
+            cutoff, upper_bound = _custom_time_bounds(
+                start_at,
+                end_at,
+                max_seconds=REQUEST_HISTORY_HOURS * 3600,
+            )
+            if cutoff < timestamp - REQUEST_HISTORY_HOURS * 3600:
+                raise ValueError("自定义时间不能早于最近 7 天的保留范围")
+        else:
+            hours = {"1h": 1, "6h": 6, "24h": 24, "7d": 7}[normalized_window]
+            cutoff = timestamp - hours * 3600
+            upper_bound = None
         bounded_limit = max(1, min(int(limit), REQUEST_HISTORY_PAGE_LIMIT))
         clauses = ["sort_at >= ?"]
         params: list[Any] = [cutoff]
+        if upper_bound is not None:
+            clauses.append("sort_at < ?")
+            params.append(upper_bound)
         if normalized_status == "succeeded":
             clauses.append("succeeded = 1")
         elif normalized_status == "failed":
@@ -437,6 +452,8 @@ class UsageStore:
         last_row = visible_rows[-1] if has_more and visible_rows else None
         return {
             "window": normalized_window,
+            "start_at": round(cutoff * 1000),
+            "end_at": None if upper_bound is None else round(upper_bound * 1000) - 1,
             "total_count": total_count,
             "items": [
                 {
@@ -520,14 +537,32 @@ class UsageStore:
             }
         return tuple(sessions.values())
 
-    def summary(self, window: str, *, now: float | None = None) -> dict[str, Any]:
+    def summary(
+        self,
+        window: str,
+        *,
+        start_at: float | None = None,
+        end_at: float | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
         normalized = window.strip().lower()
         if normalized not in USAGE_WINDOWS:
             raise ValueError("不支持的 Token 统计时间范围")
         timestamp = time.time() if now is None else float(now)
-        cutoff = _usage_window_cutoff(normalized, timestamp)
-        where = "" if cutoff is None else "WHERE recorded_at >= ?"
-        params: tuple[float, ...] = () if cutoff is None else (cutoff,)
+        if normalized == "custom":
+            cutoff, upper_bound = _custom_time_bounds(start_at, end_at)
+        else:
+            cutoff = _usage_window_cutoff(normalized, timestamp)
+            upper_bound = None
+        clauses: list[str] = []
+        params: list[float] = []
+        if cutoff is not None:
+            clauses.append("recorded_at >= ?")
+            params.append(cutoff)
+        if upper_bound is not None:
+            clauses.append("recorded_at < ?")
+            params.append(upper_bound)
+        where = "" if not clauses else f"WHERE {' AND '.join(clauses)}"
         aggregate = """
             COUNT(*) AS request_count,
             COALESCE(SUM(CASE WHEN succeeded = 1 THEN 1 ELSE 0 END), 0)
@@ -565,6 +600,8 @@ class UsageStore:
         return {
             "window": normalized,
             "cutoff": cutoff,
+            "start_at": None if cutoff is None else round(cutoff * 1000),
+            "end_at": None if upper_bound is None else round(upper_bound * 1000) - 1,
             "total": _usage_summary_row(total),
             "by_provider": {
                 str(row["provider_id"]): _usage_summary_row(row) for row in rows
@@ -576,6 +613,8 @@ class UsageStore:
         *,
         provider_id: str,
         window: str,
+        start_at: float | None = None,
+        end_at: float | None = None,
         cursor: str | None = None,
         limit: int = USAGE_HISTORY_PAGE_LIMIT,
         now: float | None = None,
@@ -584,13 +623,20 @@ class UsageStore:
         if normalized not in USAGE_WINDOWS:
             raise ValueError("不支持的 Token 统计时间范围")
         timestamp = time.time() if now is None else float(now)
-        cutoff = _usage_window_cutoff(normalized, timestamp)
+        if normalized == "custom":
+            cutoff, upper_bound = _custom_time_bounds(start_at, end_at)
+        else:
+            cutoff = _usage_window_cutoff(normalized, timestamp)
+            upper_bound = None
         bounded_limit = max(1, min(int(limit), USAGE_HISTORY_PAGE_LIMIT))
         clauses = ["provider_id = ?"]
         params: list[Any] = [str(provider_id)]
         if cutoff is not None:
             clauses.append("recorded_at >= ?")
             params.append(cutoff)
+        if upper_bound is not None:
+            clauses.append("recorded_at < ?")
+            params.append(upper_bound)
         count_clauses = list(clauses)
         count_params = list(params)
         if cursor:
@@ -652,6 +698,8 @@ class UsageStore:
         last_row = visible_rows[-1] if has_more and visible_rows else None
         return {
             "window": normalized,
+            "start_at": None if cutoff is None else round(cutoff * 1000),
+            "end_at": None if upper_bound is None else round(upper_bound * 1000) - 1,
             "provider_id": str(provider_id),
             "total_count": total_count,
             "total": _usage_summary_row(total),
@@ -920,6 +968,52 @@ def _usage_window_cutoff(window: str, now: float) -> float | None:
     return now - seconds[window]
 
 
+def _custom_time_bounds(
+    start_at: float | None,
+    end_at: float | None,
+    *,
+    max_seconds: float | None = None,
+) -> tuple[float, float]:
+    try:
+        start = float(start_at)
+        end = float(end_at)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("自定义时间必须同时提供开始和结束时间") from exc
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise ValueError("自定义时间格式无效")
+    if start >= end:
+        raise ValueError("开始时间必须早于结束时间")
+    if max_seconds is not None and end - start > max_seconds:
+        raise ValueError(f"自定义时间范围不能超过 {round(max_seconds / 86400)} 天")
+    return start, end
+
+
+def _query_time_range(
+    request: Request,
+    *,
+    window_param: str,
+    default_window: str,
+    allowed_windows: set[str],
+    max_custom_seconds: float | None = None,
+) -> tuple[str, float | None, float | None]:
+    window = request.query_params.get(window_param, default_window).strip().lower()
+    if window not in allowed_windows:
+        raise ValueError("时间范围无效")
+    if window != "custom":
+        return window, None, None
+    try:
+        start_ms = int(request.query_params.get("start_at", ""))
+        end_ms = int(request.query_params.get("end_at", ""))
+    except ValueError as exc:
+        raise ValueError("自定义时间必须同时提供开始和结束时间") from exc
+    start, end_inclusive = _custom_time_bounds(
+        start_ms / 1000,
+        end_ms / 1000,
+        max_seconds=max_custom_seconds,
+    )
+    return window, start, end_inclusive + 0.001
+
+
 class UsageCapture:
     """Observe a streamed upstream response and resolve one final usage record."""
 
@@ -932,7 +1026,12 @@ class UsageCapture:
         self._output_segments: list[str] = []
         self._saw_output_delta = False
         self._upstream_usage: TokenUsage | None = None
+        self._saw_successful_terminal_event = False
         self._finalized = False
+
+    @property
+    def saw_successful_terminal_event(self) -> bool:
+        return self._saw_successful_terminal_event
 
     def feed(self, chunk: bytes) -> None:
         if self._finalized or not chunk:
@@ -997,6 +1096,13 @@ class UsageCapture:
         if usage is not None:
             self._upstream_usage = usage
         event_type = root.get("type")
+        response = root.get("response") if isinstance(root.get("response"), dict) else {}
+        if (
+            event_type == "response.completed"
+            and root.get("status") != "failed"
+            and response.get("status") != "failed"
+        ):
+            self._saw_successful_terminal_event = True
         if event_type in {
             "response.output_text.delta",
             "response.function_call_arguments.delta",
@@ -1879,10 +1985,18 @@ def create_proxy_app(
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    def public_status(window: str = "today") -> dict[str, Any]:
+    def public_status(
+        window: str = "today",
+        start_at: float | None = None,
+        end_at: float | None = None,
+    ) -> dict[str, Any]:
         with preferences_lock:
             hidden = set(active_hidden_provider_ids)
-        usage = usage_store.summary(window) if usage_store is not None else _empty_usage_summary(window)
+        usage = (
+            usage_store.summary(window, start_at=start_at, end_at=end_at)
+            if usage_store is not None
+            else _empty_usage_summary(window)
+        )
         recovery_history = None
         if recovery_history_store is not None:
             try:
@@ -1902,15 +2016,29 @@ def create_proxy_app(
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
-        window = request.query_params.get("usage_window", "today").strip().lower()
-        return public_status(window if window in USAGE_WINDOWS else "today")
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="today",
+                allowed_windows=USAGE_WINDOWS,
+            )
+        except ValueError:
+            return public_status("today")
+        return public_status(window, start_at, end_at)
 
     @app.get("/control/api/status", include_in_schema=False)
     async def control_status(request: Request):
-        window = request.query_params.get("usage_window", "today").strip().lower()
-        if window not in USAGE_WINDOWS:
-            return JSONResponse(status_code=422, content={"detail": "Token 统计时间范围无效"})
-        return public_status(window)
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="today",
+                allowed_windows=USAGE_WINDOWS,
+            )
+            return public_status(window, start_at, end_at)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.get("/control/api/recovery-history", include_in_schema=False)
     async def control_recovery_history(request: Request):
@@ -1937,10 +2065,16 @@ def create_proxy_app(
     @app.get("/control/api/usage-history", include_in_schema=False)
     async def control_usage_history(request: Request):
         provider_id = request.query_params.get("provider_id", "").strip()
-        window = request.query_params.get("usage_window", "today").strip().lower()
         cursor = request.query_params.get("cursor")
-        if window not in USAGE_WINDOWS:
-            return JSONResponse(status_code=422, content={"detail": "Token 统计时间范围无效"})
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="today",
+                allowed_windows=USAGE_WINDOWS,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
         if not provider_id or not any(
             provider.provider_id == provider_id for provider in router.providers()
         ):
@@ -1951,6 +2085,8 @@ def create_proxy_app(
             history = usage_store.history(
                 provider_id=provider_id,
                 window=window,
+                start_at=start_at,
+                end_at=end_at,
                 cursor=cursor,
             )
         except ValueError as exc:
@@ -1963,7 +2099,16 @@ def create_proxy_app(
     async def control_requests(request: Request):
         if usage_store is None:
             return JSONResponse(status_code=503, content={"detail": "请求记录功能不可用"})
-        window = request.query_params.get("window", "24h").strip().lower()
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="window",
+                default_window="24h",
+                allowed_windows=REQUEST_HISTORY_WINDOWS,
+                max_custom_seconds=REQUEST_HISTORY_HOURS * 3600,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
         status_filter = request.query_params.get("status", "all").strip().lower()
         provider_id = request.query_params.get("provider_id", "").strip() or None
         query = request.query_params.get("query", "")
@@ -1976,6 +2121,8 @@ def create_proxy_app(
                 router,
                 usage_store,
                 window=window,
+                start_at=start_at,
+                end_at=end_at,
                 status_filter=status_filter,
                 provider_id=provider_id,
                 query=query,
@@ -2422,6 +2569,8 @@ def _public_requests(
     usage_store: UsageStore,
     *,
     window: str = "24h",
+    start_at: float | None = None,
+    end_at: float | None = None,
     status_filter: str = "all",
     provider_id: str | None = None,
     query: str = "",
@@ -2501,6 +2650,8 @@ def _public_requests(
     else:
         history = usage_store.request_history(
             window=window,
+            start_at=start_at,
+            end_at=end_at,
             status=normalized_status,
             provider_id=provider_id,
             query=query,
@@ -3086,6 +3237,9 @@ async def _forward_request(
                 usage_id: int | None = None
                 if usage_capture is not None and usage_store is not None:
                     usage = usage_capture.finalize(upstream_response.status_code)
+                    terminal_success = bool(
+                        getattr(usage_capture, "saw_successful_terminal_event", False)
+                    )
                     if usage is not None:
                         try:
                             usage_id = usage_store.record(
@@ -3094,7 +3248,7 @@ async def _forward_request(
                                 usage=usage,
                                 status_code=upstream_response.status_code,
                                 successful=(
-                                    stream_completed
+                                    (stream_completed or terminal_success)
                                     and stream_failure is None
                                     and 200 <= upstream_response.status_code < 300
                                 ),
@@ -3102,7 +3256,16 @@ async def _forward_request(
                         except (OSError, sqlite3.Error):
                             pass
                 successful = (
-                    stream_completed
+                    (
+                        stream_completed
+                        or bool(
+                            getattr(
+                                usage_capture,
+                                "saw_successful_terminal_event",
+                                False,
+                            )
+                        )
+                    )
                     and stream_failure is None
                     and 200 <= upstream_response.status_code < 300
                 )
@@ -3111,7 +3274,7 @@ async def _forward_request(
                 if not successful and history_kind is None:
                     if not stream_completed:
                         history_kind = "client_disconnected"
-                        history_summary = "客户端在响应完成前断开连接"
+                        history_summary = "客户端取消"
                     else:
                         history_kind = f"http_{upstream_response.status_code}"
                         history_summary = f"HTTP {upstream_response.status_code}"

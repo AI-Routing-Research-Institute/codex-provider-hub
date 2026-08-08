@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="./static/styles.css?v=24">
+  <link rel="stylesheet" href="./static/styles.css?v=26">
 </head>
 <body>
   <main class="stage">
@@ -76,17 +76,21 @@
               </div>
             </div>
             <div class="toolbar-actions">
-              <label class="usage-window-control">
-                <span class="visually-hidden">Token 统计时间范围</span>
-                <span class="usage-window-icon" aria-hidden="true">◷</span>
-                <select id="usage-window" aria-label="Token 统计时间范围">
-                  <option value="today">今日</option>
-                  <option value="24h">近 24 小时</option>
-                  <option value="7d">近 7 天</option>
-                  <option value="30d">近 30 天</option>
-                  <option value="all">全部</option>
-                </select>
-              </label>
+              <div class="time-window-control usage-window-wrap">
+                <label class="usage-window-control">
+                  <span class="visually-hidden">Token 统计时间范围</span>
+                  <span class="usage-window-icon" aria-hidden="true">◷</span>
+                  <select id="usage-window" aria-label="Token 统计时间范围">
+                    <option value="today">今日</option>
+                    <option value="24h">近 24 小时</option>
+                    <option value="7d">近 7 天</option>
+                    <option value="30d">近 30 天</option>
+                    <option value="all">全部</option>
+                    <option value="custom">自定义时间…</option>
+                  </select>
+                </label>
+                <button class="time-range-edit" type="button" data-time-range-edit="usage" title="设置自定义 Token 时间" aria-label="设置自定义 Token 时间" aria-controls="time-range-popover">▦</button>
+              </div>
               <label class="search">
                 <span class="visually-hidden">搜索供应商</span>
                 <span class="search-icon" aria-hidden="true">⌕</span>
@@ -101,7 +105,7 @@
             <div class="usage-metric"><span>输入</span><strong id="usage-input">0</strong></div>
             <div class="usage-metric"><span>输出</span><strong id="usage-output">0</strong></div>
             <div class="usage-metric"><span>缓存</span><strong id="usage-cached">0</strong></div>
-            <div class="usage-estimate-wrap"><span id="usage-estimated-note" hidden>含估算请求</span></div>
+            <div class="usage-estimate-wrap"><span id="usage-range-label" class="time-range-label" hidden></span><span id="usage-estimated-note" hidden>含估算请求</span></div>
           </div>
           <div class="provider-list-shell">
             <div class="manage-hint" id="manage-hint" hidden>拖动左侧手柄调整顺序；搜索时暂停拖动。隐藏的供应商仅在管理模式显示。</div>
@@ -151,7 +155,10 @@
           </div>
         </div>
         <div class="request-filters" aria-label="请求筛选">
-          <label><span class="visually-hidden">时间范围</span><select id="request-window"><option value="1h">近 1 小时</option><option value="6h">近 6 小时</option><option value="24h" selected>近 24 小时</option></select></label>
+          <div class="time-window-control request-window-control">
+            <label><span class="visually-hidden">时间范围</span><select id="request-window"><option value="1h">近 1 小时</option><option value="6h">近 6 小时</option><option value="24h" selected>近 24 小时</option><option value="7d">近 7 天</option><option value="custom">自定义时间…</option></select></label>
+            <button class="time-range-edit" type="button" data-time-range-edit="requests" title="设置自定义请求时间" aria-label="设置自定义请求时间" aria-controls="time-range-popover">▦</button>
+          </div>
           <label><span class="visually-hidden">请求状态</span><select id="request-status"><option value="all">全部状态</option><option value="running">运行中</option><option value="succeeded">成功</option><option value="failed">失败</option></select></label>
           <label><span class="visually-hidden">供应商</span><select id="request-provider"><option value="">全部供应商</option></select></label>
           <label class="request-search"><span class="search-icon" aria-hidden="true">⌕</span><input id="request-query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off"></label>
@@ -308,6 +315,15 @@
     <label class="session-route-field"><span>后续供应商</span><select id="session-route-provider" disabled><option value="">请先选择会话</option></select></label>
     <p id="session-route-meta" class="session-route-meta">只显示最近 7 天的 Codex 会话，活跃会话优先。</p>
   </div>
+  <div id="time-range-popover" class="time-range-popover" role="dialog" aria-modal="false" aria-labelledby="time-range-title" hidden>
+    <div class="time-range-heading"><div><strong id="time-range-title">自定义时间范围</strong><span id="time-range-hint">精确到秒</span></div><button id="time-range-close" class="usage-history-close" type="button" title="关闭自定义时间" aria-label="关闭自定义时间">×</button></div>
+    <div class="time-range-fields">
+      <fieldset><legend>开始时间</legend><div><input id="time-range-start-date" type="date" aria-label="开始日期"><input id="time-range-start-time" type="time" step="1" aria-label="开始时间"></div></fieldset>
+      <fieldset><legend>结束时间</legend><div><input id="time-range-end-date" type="date" aria-label="结束日期"><input id="time-range-end-time" type="time" step="1" aria-label="结束时间"></div></fieldset>
+    </div>
+    <p id="time-range-error" class="time-range-error" role="alert" hidden></p>
+    <div class="time-range-actions"><button id="time-range-cancel" class="secondary-button" type="button">取消</button><button id="time-range-apply" class="primary-button" type="button">应用</button></div>
+  </div>
   <div id="usage-history-popover" class="usage-history-popover" role="dialog" aria-modal="false" aria-label="请求记录">
     <div class="usage-history-heading">
       <div><strong id="usage-history-title">请求记录</strong><span id="usage-history-meta"></span></div>
@@ -319,6 +335,6 @@
   </div>
   <div id="history-detail-popover" class="history-detail-popover" role="tooltip"></div>
 
-  <script src="./static/app.js?v=29" defer></script>
+  <script src="./static/app.js?v=31" defer></script>
 </body>
 </html>

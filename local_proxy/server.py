@@ -19,6 +19,8 @@ from starlette.background import BackgroundTask
 from local_proxy.core import (
     CONTROL_ASSET_DIR,
     RECOVERY_HISTORY_API_LIMIT,
+    REQUEST_HISTORY_HOURS,
+    REQUEST_HISTORY_WINDOWS,
     USAGE_WINDOWS,
     HealthStatusUrlStore,
     ProviderConfigurationError,
@@ -33,6 +35,7 @@ from local_proxy.core import (
     _public_control_status,
     _public_requests,
     _public_sessions,
+    _query_time_range,
     _valid_control_request,
     order_proxy_providers,
     retry_policy_from_mapping,
@@ -242,11 +245,15 @@ def _register_control_routes(
     control_asset_dir: Path,
     on_shutdown_requested: Callable[[], None] | None,
 ) -> None:
-    def public_status(window: str = "today") -> dict[str, Any]:
+    def public_status(
+        window: str = "today",
+        start_at: float | None = None,
+        end_at: float | None = None,
+    ) -> dict[str, Any]:
         with profile.preferences_lock:
             hidden = set(profile.active_hidden_provider_ids)
         usage = (
-            profile.usage_store.summary(window)
+            profile.usage_store.summary(window, start_at=start_at, end_at=end_at)
             if profile.usage_store is not None
             else _empty_usage_summary(window)
         )
@@ -269,8 +276,16 @@ def _register_control_routes(
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
-        window = request.query_params.get("usage_window", "today").strip().lower()
-        return public_status(window if window in USAGE_WINDOWS else "today")
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="today",
+                allowed_windows=USAGE_WINDOWS,
+            )
+        except ValueError:
+            return public_status("today")
+        return public_status(window, start_at, end_at)
 
     async def control_page() -> FileResponse:
         return FileResponse(control_asset_dir / "index.html")
@@ -298,10 +313,16 @@ def _register_control_routes(
         return response
 
     async def control_status(request: Request):
-        window = request.query_params.get("usage_window", "today").strip().lower()
-        if window not in USAGE_WINDOWS:
-            return JSONResponse(status_code=422, content={"detail": "Token 统计时间范围无效"})
-        return public_status(window)
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="today",
+                allowed_windows=USAGE_WINDOWS,
+            )
+            return public_status(window, start_at, end_at)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     async def control_recovery_history(request: Request):
         if profile.recovery_history_store is None:
@@ -321,10 +342,16 @@ def _register_control_routes(
 
     async def control_usage_history(request: Request):
         provider_id = request.query_params.get("provider_id", "").strip()
-        window = request.query_params.get("usage_window", "today").strip().lower()
         cursor = request.query_params.get("cursor")
-        if window not in USAGE_WINDOWS:
-            return JSONResponse(status_code=422, content={"detail": "Token 统计时间范围无效"})
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="today",
+                allowed_windows=USAGE_WINDOWS,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
         if not provider_id or not any(
             provider.provider_id == provider_id for provider in profile.router.providers()
         ):
@@ -335,6 +362,8 @@ def _register_control_routes(
             history = profile.usage_store.history(
                 provider_id=provider_id,
                 window=window,
+                start_at=start_at,
+                end_at=end_at,
                 cursor=cursor,
             )
         except ValueError as exc:
@@ -352,10 +381,19 @@ def _register_control_routes(
         ):
             return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
         try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="window",
+                default_window="24h",
+                allowed_windows=REQUEST_HISTORY_WINDOWS,
+                max_custom_seconds=REQUEST_HISTORY_HOURS * 3600,
+            )
             payload = _public_requests(
                 profile.router,
                 profile.usage_store,
-                window=request.query_params.get("window", "24h"),
+                window=window,
+                start_at=start_at,
+                end_at=end_at,
                 status_filter=request.query_params.get("status", "all"),
                 provider_id=provider_id,
                 query=request.query_params.get("query", ""),
