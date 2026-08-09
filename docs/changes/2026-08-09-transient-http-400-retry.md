@@ -2,7 +2,7 @@
 id = "2026-08-09-transient-http-400-retry"
 type = "fix"
 release_bump = "patch"
-status = "planned"
+status = "verified"
 +++
 
 # 临时性 HTTP 400 错误继续重试
@@ -53,11 +53,20 @@ status = "planned"
 
 ## 实际改动
 
-pending
+- `local_proxy/core.py` 在 HTTP 400 响应向客户端输出前最多缓冲 4 KB 解码后正文，支持完整 JSON、顶层 `message/code/type`、嵌套 `error` 和纯文本错误分类。
+- 临时错误白名单覆盖中英文模型繁忙或容量已满、无可用渠道、上游暂不可用和稍后重试提示，并复用现有 `model_capacity`、`upstream_error` 与脱敏摘要。
+- 永久错误代码与无代码文案增加上下文超长、参数无效、请求过大和不支持字段等类别，并在临时文案匹配前优先返回，防止“请稍后重试”提示让永久错误进入无限重试。
+- 未识别、永久、超大或读取较慢的 HTTP 400 将已缓冲字节和待完成分块无损交还响应流；分块正文不会丢失、截断或重复。
+- HTTP 400 分类使用 HTTPX 解码后的正文，gzip 响应透传时移除 `Content-Encoding`，避免客户端对已解码正文再次解压。
+- `tests/test_proxy_core.py` 增加嵌套 JSON、顶层 JSON、分块 JSON、纯文本、gzip、慢分块、4 KB 边界以及永久错误透传回归测试。
 
 ## 验证结果
 
-pending
+- `.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py'`：384 项通过，1 项按既有条件跳过；仅出现既有 Starlette 依赖弃用警告。
+- `node --test tests/*.test.js`：30 项通过。
+- `node --check proxy_static/app.js`：通过。
+- `.venv/Scripts/python.exe -m compileall -q local_proxy tests`：通过。
+- `git diff --check`：通过，仅提示 Git 后续可能按本机配置转换行尾。
 
 ## PR
 

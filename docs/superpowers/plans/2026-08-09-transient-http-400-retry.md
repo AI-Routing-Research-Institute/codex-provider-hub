@@ -15,7 +15,7 @@
 **Files:**
 - Modify: `tests/test_proxy_core.py`
 
-- [ ] **Step 1: Add a failing transient JSON HTTP 400 test**
+- [x] **Step 1: Add a failing transient JSON HTTP 400 test**
 
 Create an async test whose first upstream response is HTTP 400 with:
 
@@ -25,7 +25,7 @@ Create an async test whose first upstream response is HTTP 400 with:
 
 Return HTTP 200 on the second attempt. Assert two attempts, successful client output, one retry, `model_capacity` classification, and a recovery-history entry at `before_output`.
 
-- [ ] **Step 2: Run the focused test and confirm RED**
+- [x] **Step 2: Run the focused test and confirm RED**
 
 Run:
 
@@ -35,11 +35,11 @@ Run:
 
 Expected: FAIL because HTTP 400 is currently returned without retry.
 
-- [ ] **Step 3: Add failing channel/upstream and permanent-response tests**
+- [x] **Step 3: Add failing channel/upstream and permanent-response tests**
 
 Cover JSON or split plain-text bodies containing `No available channel for model` and `upstream temporarily unavailable`, followed by success. Add an `invalid_request_error` HTTP 400 and an unknown HTTP 400 that assert one attempt and byte-for-byte response preservation.
 
-- [ ] **Step 4: Run all new tests and confirm each fails for missing classification**
+- [x] **Step 4: Run all new tests and confirm each fails for missing classification**
 
 Run:
 
@@ -55,7 +55,7 @@ Expected: transient cases FAIL with one attempt; permanent case may pass and rem
 - Modify: `local_proxy/core.py`
 - Test: `tests/test_proxy_core.py`
 
-- [ ] **Step 1: Add a body classifier**
+- [x] **Step 1: Add a body classifier**
 
 Add a helper with this contract:
 
@@ -69,11 +69,11 @@ def _http_400_retry_failure(
 
 Only inspect status 400. Decode JSON when possible; otherwise wrap decoded text as an error message. Call `_embedded_retry_failure()` so permanent codes remain authoritative.
 
-- [ ] **Step 2: Extend explicit transient semantics**
+- [x] **Step 2: Extend explicit transient semantics**
 
 Extend the centralized classifier with narrow patterns for model busy/capacity, `No available channel`, Chinese channel-unavailable wording, upstream unavailable, and `请稍后重试`. Keep `invalid_request_error`, `model_not_found`, authentication, permission, quota, billing, and policy codes ahead of message-based transient matching.
 
-- [ ] **Step 3: Add a bounded pre-output inspector**
+- [x] **Step 3: Add a bounded pre-output inspector**
 
 Add:
 
@@ -82,21 +82,21 @@ async def _inspect_http_400_before_output(
     response: httpx.Response,
     first_chunk: bytes,
     stream: AsyncIterator[bytes],
-) -> tuple[bytes | None, str | None, str | None]:
+) -> tuple[bytes | None, AsyncIterator[bytes], str | None, str | None]:
     ...
 ```
 
-Read at most `RETRY_ERROR_BODY_BYTES` before classification. Return `(None, kind, summary)` for recognized transient errors. Return `(buffered_bytes, None, None)` for permanent, unknown, oversized, timed-out, or malformed bodies so the existing stream can continue without byte loss.
+Read at most `RETRY_ERROR_BODY_BYTES` of decoded content before classification. Return `(None, stream, kind, summary)` for recognized transient errors. Return the buffered prefix plus an updated iterator for permanent, unknown, oversized, malformed, or slow bodies so the response can continue without byte loss. On a read timeout, retain the pending `anext()` task in the updated iterator and commit the already-read prefix instead of misclassifying a slow permanent response; keep transport exceptions before output as the existing retryable `stream_start` failure. Use `aiter_bytes()` for inspected HTTP 400 responses and remove `Content-Encoding` when decoded bytes are passed through.
 
-- [ ] **Step 4: Wire inspection into the retry loop**
+- [x] **Step 4: Wire inspection into the retry loop**
 
 After obtaining `first_chunk` and before SSE/HTML output commitment, invoke the HTTP 400 inspector when retries are enabled. Set `final_error` from the returned retry kind and let the existing `max_attempts`, delay, manual reroute, recovery history, and disconnect checks run unchanged.
 
-- [ ] **Step 5: Run focused tests and confirm GREEN**
+- [x] **Step 5: Run focused tests and confirm GREEN**
 
 Run the three focused test names from Task 1. Expected: PASS with transient cases retried and permanent bodies unchanged.
 
-- [ ] **Step 6: Run the full proxy-core test module**
+- [x] **Step 6: Run the full proxy-core test module**
 
 Run:
 
@@ -111,11 +111,11 @@ Expected: PASS.
 **Files:**
 - Modify: `docs/changes/2026-08-09-transient-http-400-retry.md`
 
-- [ ] **Step 1: Update the change record to implemented**
+- [x] **Step 1: Update the change record to implemented**
 
 List exact helpers, message categories, stream-preservation behavior, and tests in `实际改动`.
 
-- [ ] **Step 2: Run complete local verification**
+- [x] **Step 2: Run complete local verification**
 
 Run:
 
@@ -129,7 +129,7 @@ git diff --check
 
 Expected: all Python and Node tests pass; syntax, compileall, and diff checks exit 0.
 
-- [ ] **Step 3: Mark the change record verified**
+- [x] **Step 3: Mark the change record verified**
 
 Record exact command results and counts. Keep `PR` pending until the pull request exists.
 

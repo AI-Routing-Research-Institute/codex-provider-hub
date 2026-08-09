@@ -12,7 +12,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from contextlib import asynccontextmanager, closing
+from contextlib import asynccontextmanager, closing, suppress
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -2949,8 +2949,10 @@ async def _forward_request(
     stream: AsyncIterator[bytes] | None = None
     final_error = "upstream_unavailable"
     final_summary: str | None = None
+    response_body_decoded = False
     attempt = 1
     while True:
+        response_body_decoded = False
         if attempt > 1:
             snapshot, _ = router.route_retry_to_current(snapshot)
         provider = snapshot.provider
@@ -3002,8 +3004,20 @@ async def _forward_request(
                 if upstream_response.is_stream_consumed:
                     first_chunk = upstream_response.content or None
                     stream = _empty_async_iterator()
+                    response_body_decoded = (
+                        upstream_response.status_code == 400
+                        and retry_policy.enabled
+                        and "content-encoding" in upstream_response.headers
+                    )
                 else:
-                    stream = upstream_response.aiter_raw()
+                    if (
+                        upstream_response.status_code == 400
+                        and retry_policy.enabled
+                    ):
+                        stream = upstream_response.aiter_bytes()
+                        response_body_decoded = True
+                    else:
+                        stream = upstream_response.aiter_raw()
                     try:
                         first_chunk = await anext(stream)
                     except StopAsyncIteration:
@@ -3026,6 +3040,22 @@ async def _forward_request(
                         retry_kind = None
                     else:
                         final_error = retry_kind or "malformed_response"
+                if (
+                    retry_kind is None
+                    and first_chunk is not None
+                    and upstream_response.status_code == 400
+                    and retry_policy.enabled
+                ):
+                    assert stream is not None
+                    first_chunk, stream, retry_kind, retry_summary = (
+                        await _inspect_http_400_before_output(
+                            upstream_response,
+                            first_chunk,
+                            stream,
+                        )
+                    )
+                    if retry_kind is not None:
+                        final_error = retry_kind
                 if (
                     retry_kind is None
                     and first_chunk is not None
@@ -3167,6 +3197,9 @@ async def _forward_request(
         key: value
         for key, value in upstream_response.headers.items()
         if key.casefold() not in RESPONSE_HEADERS_TO_DROP
+        and not (
+            response_body_decoded and key.casefold() == "content-encoding"
+        )
     }
 
     usage_capture = None
@@ -3326,6 +3359,125 @@ def _is_html_404_response(response: httpx.Response) -> bool:
     content_type = response.headers.get("content-type", "")
     media_type = content_type.partition(";")[0].strip().casefold()
     return media_type in HTML_ERROR_CONTENT_TYPES
+
+
+async def _inspect_http_400_before_output(
+    response: httpx.Response,
+    first_chunk: bytes,
+    stream: AsyncIterator[bytes],
+) -> tuple[
+    bytes | None,
+    AsyncIterator[bytes],
+    str | None,
+    str | None,
+]:
+    buffered = bytearray(first_chunk[:RETRY_ERROR_BODY_BYTES])
+    first_remainder = first_chunk[RETRY_ERROR_BODY_BYTES:]
+    if first_remainder:
+        return (
+            bytes(buffered),
+            _resume_async_iterator(stream, prefix=first_remainder),
+            None,
+            None,
+        )
+    while len(buffered) < RETRY_ERROR_BODY_BYTES:
+        next_chunk = asyncio.create_task(anext(stream))
+        try:
+            done, _ = await asyncio.wait(
+                {next_chunk},
+                timeout=RETRY_ERROR_READ_TIMEOUT_SECONDS,
+            )
+            if not done:
+                return (
+                    bytes(buffered),
+                    _resume_async_iterator(stream, pending=next_chunk),
+                    None,
+                    None,
+                )
+            chunk = next_chunk.result()
+        except StopAsyncIteration:
+            retry_kind, retry_summary = _http_400_retry_failure(
+                response,
+                bytes(buffered),
+            )
+            if retry_kind is not None:
+                return None, stream, retry_kind, retry_summary
+            return bytes(buffered), stream, None, None
+        except httpx.HTTPError as exc:
+            return (
+                None,
+                stream,
+                "stream_start",
+                _exception_retry_summary("stream_start", exc),
+            )
+        remaining = RETRY_ERROR_BODY_BYTES - len(buffered)
+        buffered.extend(chunk[:remaining])
+        chunk_remainder = chunk[remaining:]
+        if chunk_remainder:
+            stream = _resume_async_iterator(stream, prefix=chunk_remainder)
+    return bytes(buffered), stream, None, None
+
+
+async def _resume_async_iterator(
+    stream: AsyncIterator[bytes],
+    *,
+    prefix: bytes = b"",
+    pending: asyncio.Task[bytes] | None = None,
+) -> AsyncIterator[bytes]:
+    try:
+        if prefix:
+            yield prefix
+        if pending is not None:
+            try:
+                chunk = await pending
+            except StopAsyncIteration:
+                return
+            if chunk:
+                yield chunk
+        async for chunk in stream:
+            yield chunk
+    finally:
+        if pending is not None:
+            if not pending.done():
+                pending.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await pending
+
+
+def _http_400_retry_failure(
+    response: httpx.Response,
+    body_prefix: bytes,
+) -> tuple[str | None, str | None]:
+    if response.status_code != 400 or not body_prefix:
+        return None, None
+    root = _decode_json(body_prefix)
+    if isinstance(root, dict):
+        response_node = root.get("response")
+        has_explicit_failure = (
+            root.get("error") is not None
+            or root.get("status") == "failed"
+            or root.get("type") in {"error", "response.failed"}
+            or (
+                isinstance(response_node, dict)
+                and (
+                    response_node.get("error") is not None
+                    or response_node.get("status") == "failed"
+                )
+            )
+        )
+        if not has_explicit_failure:
+            root = {"error": root}
+    else:
+        content_type = response.headers.get("content-type", "")
+        media_type = content_type.partition(";")[0].strip().casefold()
+        if media_type == "application/json" or media_type.endswith("+json"):
+            return None, None
+        root = {
+            "error": {
+                "message": _decode_response_prefix(response, body_prefix),
+            }
+        }
+    return _embedded_retry_failure(root, "")
 
 
 async def _inspect_html_404_before_output(
@@ -3686,7 +3838,7 @@ def _embedded_retry_failure(
             details.append(str(node))
     error_codes = {
         str(node.get(key)).strip().casefold()
-        for node in error_nodes
+        for node in (root, response, *error_nodes)
         if isinstance(node, dict)
         for key in ("code", "type")
         if isinstance(node.get(key), (str, int, float))
@@ -3702,17 +3854,63 @@ def _embedded_retry_failure(
         ),
         "上游临时错误",
     )
+
+    permanent_codes = {
+        "authentication_error",
+        "billing_error",
+        "content_policy_violation",
+        "context_length_exceeded",
+        "context_window_exceeded",
+        "insufficient_quota",
+        "invalid_argument",
+        "invalid_parameter",
+        "invalid_request_error",
+        "malformed_request",
+        "model_not_found",
+        "not_found_error",
+        "permission_denied",
+        "request_too_large",
+        "unsupported_parameter",
+        "unsupported_value",
+        "validation_error",
+    }
+    permanent_message = re.search(
+        r"(?i)(?:"
+        r"\b(?:invalid|unsupported|malformed)\s+"
+        r"(?:request|parameter|argument|payload|field|value|json)\b|"
+        r"\bcontext(?: length| window)?\b.{0,80}"
+        r"(?:exceed(?:ed|s)?|too long|maximum)|"
+        r"\bmaximum context length\b|"
+        r"\bmodel\b.{0,80}(?:not found|does not exist|unsupported)|"
+        r"(?:请求参数|请求格式|参数).{0,20}(?:错误|无效|非法|不支持)|"
+        r"上下文.{0,30}(?:过长|超长|超限|超过.{0,12}(?:限制|最大))|"
+        r"模型.{0,30}(?:不存在|未找到|不支持)|"
+        r"不支持.{0,12}(?:参数|字段|取值)|"
+        r"(?:请求体|json).{0,12}(?:格式错误|无效|非法)"
+        r")",
+        combined,
+    )
+    if (error_codes & permanent_codes) or permanent_message is not None:
+        return None, None
+
     if re.search(r"(?i)(?:\b429\b|too many requests|rate[_ -]?limit)", combined):
         rate_message = message if message != "上游临时错误" else "请求频率受限"
         return "rate_limited", _sanitize_retry_summary(f"HTTP 429：{rate_message}")
 
     capacity_codes = {
+        "model_busy",
         "model_at_capacity",
         "model_capacity",
         "model_capacity_error",
+        "model_overloaded",
     }
     capacity_message = re.search(
-        r"(?i)\b(?:selected|requested|this) model is (?:currently )?at capacity\b",
+        r"(?i)(?:"
+        r"\b(?:selected|requested|this) model is (?:currently )?at capacity\b|"
+        r"\bmodel\b.{0,120}\b(?:at capacity|busy|overloaded)\b|"
+        r"模型.{0,120}(?:负载.{0,20}(?:达到|已达|已经达到)?上限|"
+        r"容量.{0,20}(?:已满|达到上限)|繁忙|过载)"
+        r")",
         combined,
     )
     if (error_codes & capacity_codes) or capacity_message is not None:
@@ -3720,27 +3918,21 @@ def _embedded_retry_failure(
             f"模型容量已满：{message}"
         )
 
-    permanent_codes = {
-        "authentication_error",
-        "billing_error",
-        "content_policy_violation",
-        "insufficient_quota",
-        "invalid_request_error",
-        "model_not_found",
-        "not_found_error",
-        "permission_denied",
-    }
-    if error_codes & permanent_codes:
-        return None, None
-
     transient_codes = {
         "internal_server_error",
+        "no_available_channel",
+        "no_channel_available",
         "server_error",
         "upstream_error",
     }
     transient_message = re.search(
         r"(?i)(?:\b(?:500|502|503|504)\b|bad gateway|gateway timeout|"
-        r"service unavailable|temporar(?:y|ily) unavailable|upstream (?:request )?failed)",
+        r"service unavailable|temporar(?:y|ily) unavailable|"
+        r"upstream (?:request )?(?:failed|unavailable)|"
+        r"no available channels?|no channels? available|"
+        r"(?:无|没有).{0,12}可用渠道|渠道.{0,12}(?:不足|不可用|繁忙)|"
+        r"上游.{0,12}(?:暂时)?(?:不可用|失败|繁忙)|"
+        r"please try again later|请稍后重试)",
         combined,
     )
     if (error_codes & transient_codes) or transient_message is not None:

@@ -1,3 +1,5 @@
+import asyncio
+import gzip
 import json
 import sqlite3
 import socket
@@ -5,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import AsyncIterator
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +25,9 @@ from local_proxy.core import (
     TokenUsage,
     UsageCapture,
     UsageStore,
+    RETRY_ERROR_BODY_BYTES,
     _codex_thread_id,
+    _inspect_http_400_before_output,
     _public_control_status,
     create_proxy_app,
     filter_self_referencing_providers,
@@ -1746,6 +1751,551 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 1)
         self.assertEqual(router.status().total_retries, 0)
         self.assertEqual(history_store.history()["total_count"], 0)
+
+    async def test_transient_http_400_model_capacity_is_retried(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                "当前模型 gpt-5.6-sol 负载已经达到上限，"
+                                "请稍后重试"
+                            )
+                        }
+                    },
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        history_store = RecoveryHistoryStore(
+            Path(temp_context.name) / "recovery.sqlite3"
+        )
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+            recovery_history_store=history_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+        history = history_store.history()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().last_retry_kind, "model_capacity")
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["kind"], "model_capacity")
+        self.assertEqual(history["items"][0]["stage"], "before_output")
+        self.assertIn("负载已经达到上限", history["items"][0]["summary"])
+
+    async def test_transient_http_400_channel_error_is_retried(self) -> None:
+        attempts = 0
+
+        class ChunkedChannelError(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'{"error":{"message":"No available '
+                yield b'channel for model gpt-5.6-sol"}}'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    400,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkedChannelError(),
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().last_retry_kind, "upstream_error")
+        self.assertIn(
+            "No available channel",
+            router.status().recent_retry_errors[0].summary,
+        )
+
+    async def test_transient_plain_text_http_400_is_retried(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    400,
+                    headers={"content-type": "text/plain; charset=utf-8"},
+                    content="upstream temporarily unavailable, please try again later",
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().last_retry_kind, "upstream_error")
+
+    async def test_transient_top_level_http_400_message_is_retried(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    400,
+                    json={"message": "No available channel for model gpt-5.6-sol"},
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().last_retry_kind, "upstream_error")
+
+    async def test_permanent_http_400_is_passed_through_unchanged(self) -> None:
+        attempts = 0
+        body = (
+            b'{"code":"context_length_exceeded",'
+            b'"message":"context is too long; please try again later"}'
+        )
+
+        class ChunkedPermanentError(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield body[:31]
+                yield body[31:]
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                400,
+                headers={"content-type": "application/json"},
+                stream=ChunkedPermanentError(),
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, body)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_permanent_http_400_message_overrides_retry_hint(self) -> None:
+        attempts = 0
+        body = b"invalid parameter: reasoning_effort; please try again later"
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                400,
+                headers={"content-type": "text/plain; charset=utf-8"},
+                content=body,
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, body)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_top_level_permanent_http_400_code_is_not_retried(self) -> None:
+        attempts = 0
+        body = (
+            b'{"type":"error","code":"invalid_request_error",'
+            b'"message":"please try again later"}'
+        )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                400,
+                headers={"content-type": "application/json"},
+                content=body,
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, body)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_unknown_http_400_is_passed_through_unchanged(self) -> None:
+        attempts = 0
+        body = b'{"error":{"message":"business rule rejected request"}}'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                400,
+                headers={"content-type": "application/json"},
+                content=body,
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, body)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_malformed_json_http_400_is_passed_through_unchanged(self) -> None:
+        attempts = 0
+        body = b'{"error":{"message":"No available channel"}} trailing'
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                400,
+                headers={"content-type": "application/json"},
+                content=body,
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, body)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_slow_permanent_http_400_is_passed_through_unchanged(self) -> None:
+        attempts = 0
+        body = (
+            b'{"code":"context_length_exceeded",'
+            b'"message":"context is too long"}'
+        )
+
+        class SlowPermanentError(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield body[:24]
+                await asyncio.sleep(0.3)
+                yield body[24:]
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                400,
+                headers={"content-type": "application/json"},
+                stream=SlowPermanentError(),
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, body)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_gzip_transient_http_400_is_retried(self) -> None:
+        attempts = 0
+        body = b'{"error":{"message":"No available channel for model"}}'
+        compressed_body = gzip.compress(body)
+
+        class GzipTransientError(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield compressed_body
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    400,
+                    headers={
+                        "content-encoding": "gzip",
+                        "content-type": "application/json",
+                    },
+                    stream=GzipTransientError(),
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().last_retry_kind, "upstream_error")
+
+    async def test_gzip_permanent_http_400_is_decoded_before_pass_through(self) -> None:
+        attempts = 0
+        body = (
+            b'{"code":"context_length_exceeded",'
+            b'"message":"context is too long"}'
+        )
+        compressed_body = gzip.compress(body)
+
+        class GzipPermanentError(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield compressed_body
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                400,
+                headers={
+                    "content-encoding": "gzip",
+                    "content-type": "application/json",
+                },
+                stream=GzipPermanentError(),
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, body)
+        self.assertNotIn("content-encoding", response.headers)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(router.status().total_retries, 0)
+
+    async def test_http_400_inspection_preserves_bytes_past_limit(self) -> None:
+        first_chunk = b"a" * (RETRY_ERROR_BODY_BYTES - 4)
+        crossing_chunk = b"bcde" + b"overflow"
+        trailing_chunk = b"tail"
+
+        async def remaining_chunks() -> AsyncIterator[bytes]:
+            yield crossing_chunk
+            yield trailing_chunk
+
+        response = httpx.Response(
+            400,
+            headers={"content-type": "text/plain; charset=utf-8"},
+        )
+        stream = remaining_chunks()
+
+        buffered, resumed_stream, retry_kind, retry_summary = (
+            await _inspect_http_400_before_output(
+                response,
+                first_chunk,
+                stream,
+            )
+        )
+        remainder = b"".join([chunk async for chunk in resumed_stream])
+
+        self.assertEqual(buffered, first_chunk + b"bcde")
+        self.assertEqual(len(buffered), RETRY_ERROR_BODY_BYTES)
+        self.assertEqual(remainder, b"overflow" + trailing_chunk)
+        self.assertIsNone(retry_kind)
+        self.assertIsNone(retry_summary)
 
     async def test_sniffed_nginx_404_exhausts_without_html_leak(self) -> None:
         attempts = 0
