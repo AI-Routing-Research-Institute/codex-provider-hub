@@ -239,6 +239,51 @@ function formatCustomRange(range, { includeYear = false } = {}) {
   return `${format(range.start)} 至 ${format(range.end)}`;
 }
 
+function localDayEnd(milliseconds) {
+  const value = new Date(milliseconds);
+  value.setHours(23, 59, 59, 999);
+  return value.getTime();
+}
+
+function defaultTimeWindow(target) {
+  return target === "usage" ? "today" : "24h";
+}
+
+function validTimeWindow(target, windowName) {
+  const allowed = target === "usage"
+    ? ["today", "24h", "7d", "30d", "all", "custom"]
+    : ["1h", "6h", "24h", "7d", "custom"];
+  return allowed.includes(windowName);
+}
+
+function validStoredTimeRange(target, range, now = Date.now()) {
+  if (!range || !Number.isFinite(range.start) || !Number.isFinite(range.end)) return false;
+  if (range.start >= range.end || range.start > now || range.end > localDayEnd(now)) return false;
+  if (target !== "requests") return true;
+  return range.start >= now - 7 * 24 * 3600_000
+    && range.end - range.start <= 7 * 24 * 3600_000;
+}
+
+function restoredTimeRangePreference(target, stored, now = Date.now()) {
+  const legacy = stored && typeof stored === "object" && !("window" in stored);
+  const candidateRange = legacy ? stored : stored?.range;
+  const range = validStoredTimeRange(target, candidateRange, now) ? candidateRange : null;
+  const candidateWindow = legacy ? "custom" : stored?.window;
+  const windowName = validTimeWindow(target, candidateWindow)
+    ? candidateWindow
+    : defaultTimeWindow(target);
+  return windowName === "custom" && !range
+    ? { window: defaultTimeWindow(target), range: null }
+    : { window: windowName, range };
+}
+
+function timeRangeStoragePayload(target) {
+  return {
+    window: appliedTimeWindows[target],
+    range: customTimeRanges[target],
+  };
+}
+
 function timeRangeSelect(target) {
   return target === "usage" ? usageWindow : requestWindow;
 }
@@ -247,21 +292,12 @@ function timeRangeStorageKey(target) {
   return `local-proxy-time-range-${uiConfig.service_id || "local"}-${target}`;
 }
 
-function validStoredTimeRange(target, range) {
-  if (!range || !Number.isFinite(range.start) || !Number.isFinite(range.end)) return false;
-  if (range.start >= range.end) return false;
-  if (target === "requests") {
-    const now = Date.now();
-    return range.end <= now + 60_000
-      && range.start >= now - 7 * 24 * 3600_000
-      && range.end - range.start <= 7 * 24 * 3600_000;
-  }
-  return true;
-}
-
 function persistTimeRange(target) {
   try {
-    localStorage.setItem(timeRangeStorageKey(target), JSON.stringify(customTimeRanges[target]));
+    localStorage.setItem(
+      timeRangeStorageKey(target),
+      JSON.stringify(timeRangeStoragePayload(target)),
+    );
   } catch (error) {}
 }
 
@@ -271,10 +307,10 @@ function restoreTimeRanges() {
   for (const target of ["usage", "requests"]) {
     try {
       const stored = JSON.parse(localStorage.getItem(timeRangeStorageKey(target)) || "null");
-      if (!validStoredTimeRange(target, stored)) continue;
-      customTimeRanges[target] = stored;
-      appliedTimeWindows[target] = "custom";
-      timeRangeSelect(target).value = "custom";
+      const preference = restoredTimeRangePreference(target, stored);
+      customTimeRanges[target] = preference.range;
+      appliedTimeWindows[target] = preference.window;
+      timeRangeSelect(target).value = preference.window;
     } catch (error) {}
   }
   updateTimeRangeDisplay();
@@ -378,8 +414,10 @@ function applyCustomTimeRange() {
     message = "请完整选择开始日期、时间和结束日期、时间。";
   } else if (start >= end) {
     message = "开始时间必须早于结束时间。";
-  } else if (end > now + 1000) {
-    message = "结束时间不能晚于当前时间。";
+  } else if (start > now) {
+    message = "开始时间不能晚于当前时间。";
+  } else if (end > localDayEnd(now)) {
+    message = "结束时间不能晚于今天 23:59:59。";
   } else if (
     timeRangeTarget === "requests"
     && (end - start > 7 * 24 * 3600_000 || start < now - 7 * 24 * 3600_000)
@@ -2875,6 +2913,7 @@ usageWindow.addEventListener("change", () => {
     return;
   }
   appliedTimeWindows.usage = usageWindow.value;
+  persistTimeRange("usage");
   refreshForTimeRange("usage");
 });
 manageProvidersButton.addEventListener("click", toggleProviderManagement);
@@ -2914,6 +2953,7 @@ requestWindow.addEventListener("change", () => {
     return;
   }
   appliedTimeWindows.requests = requestWindow.value;
+  persistTimeRange("requests");
   refreshForTimeRange("requests");
 });
 for (const control of [requestStatus, requestProvider]) {

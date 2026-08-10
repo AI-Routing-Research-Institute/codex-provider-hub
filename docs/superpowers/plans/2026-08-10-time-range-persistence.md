@@ -15,11 +15,11 @@
 **Files:**
 - Modify: `tests/local_proxy_time_range.test.js`
 
-- [ ] **Step 1: Add failing local-day boundary tests**
+- [x] **Step 1: Add failing local-day boundary tests**
 
 Evaluate the pure time helper from `proxy_static/app.js` and assert that a timestamp on 2026-08-10 resolves to local `23:59:59.999`. Assert that a range ending at that value is valid while a range ending at the following local midnight is invalid.
 
-- [ ] **Step 2: Run the boundary tests and confirm RED**
+- [x] **Step 2: Run the boundary tests and confirm RED**
 
 Run:
 
@@ -29,7 +29,7 @@ node --test tests/local_proxy_time_range.test.js
 
 Expected: FAIL because the current code only compares the end against `Date.now()` and has no local-day-end helper.
 
-- [ ] **Step 3: Add failing preference restoration tests**
+- [x] **Step 3: Add failing preference restoration tests**
 
 Cover these inputs through a pure normalization helper:
 
@@ -42,7 +42,7 @@ Cover these inputs through a pure normalization helper:
 
 Assert that they restore to `today`, `custom`, legacy `custom`, and the target default respectively. Add a storage-payload assertion that a fixed window retains the latest custom range.
 
-- [ ] **Step 4: Run the focused test and confirm RED**
+- [x] **Step 4: Run the focused test and confirm RED**
 
 Run the same Node command. Expected: FAIL because stored ranges currently force `custom` and fixed selections are not represented in storage.
 
@@ -52,7 +52,7 @@ Run the same Node command. Expected: FAIL because stored ranges currently force 
 - Modify: `proxy_static/app.js`
 - Test: `tests/local_proxy_time_range.test.js`
 
-- [ ] **Step 1: Add pure normalization helpers**
+- [x] **Step 1: Add pure normalization helpers**
 
 Implement helpers with these contracts:
 
@@ -69,7 +69,7 @@ function defaultTimeWindow(target) {
 
 function validStoredTimeRange(target, range, now = Date.now()) {
   if (!range || !Number.isFinite(range.start) || !Number.isFinite(range.end)) return false;
-  if (range.start >= range.end || range.end > localDayEnd(now)) return false;
+  if (range.start >= range.end || range.start > now || range.end > localDayEnd(now)) return false;
   if (target !== "requests") return true;
   return range.start >= now - 7 * 24 * 3600_000
     && range.end - range.start <= 7 * 24 * 3600_000;
@@ -96,19 +96,19 @@ function timeRangeStoragePayload(target) {
 
 Support the legacy raw `{start, end}` value, explicit fixed windows, valid custom windows, and target defaults.
 
-- [ ] **Step 2: Persist and restore the normalized state**
+- [x] **Step 2: Persist and restore the normalized state**
 
 Change `persistTimeRange()` to serialize `timeRangeStoragePayload(target)`. Change `restoreTimeRanges()` to apply the normalized window and range instead of forcing `custom` whenever a stored range exists.
 
-- [ ] **Step 3: Persist fixed preset changes**
+- [x] **Step 3: Persist fixed preset changes**
 
 After assigning `appliedTimeWindows.usage` or `.requests` in each select change handler, call `persistTimeRange(target)` before refreshing data. Do not clear `customTimeRanges[target]`.
 
-- [ ] **Step 4: Allow the current local day end**
+- [x] **Step 4: Allow the current local day end**
 
-Replace the `end > now + 1000` rejection with `end > localDayEnd(now)`. Keep the existing start-before-end and request seven-day checks. Update the validation message to state that the end cannot be later than today `23:59:59`.
+Replace the `end > now + 1000` rejection with `end > localDayEnd(now)`, and explicitly reject `start > now`. Keep the existing start-before-end and request seven-day checks. Update the validation messages to state that the start cannot be later than the current time and the end cannot be later than today `23:59:59`.
 
-- [ ] **Step 5: Run focused tests and confirm GREEN**
+- [x] **Step 5: Run focused tests and confirm GREEN**
 
 Run:
 
@@ -124,11 +124,11 @@ Expected: all time-range tests pass and JavaScript syntax validation exits 0.
 **Files:**
 - Modify: `docs/changes/2026-08-10-time-range-persistence.md`
 
-- [ ] **Step 1: Update the change record to implemented**
+- [x] **Step 1: Update the change record to implemented**
 
 Record the exact storage migration, preset persistence, current-day boundary, and regression tests.
 
-- [ ] **Step 2: Run complete verification**
+- [x] **Step 2: Run complete verification**
 
 Run:
 
@@ -143,7 +143,7 @@ git diff --check
 
 Expected: Python and Node tests pass; both JavaScript checks, compileall, and diff check exit 0.
 
-- [ ] **Step 3: Mark the change record verified**
+- [x] **Step 3: Mark the change record verified**
 
 Record exact command results and keep the PR field pending until GitHub returns the final URL.
 

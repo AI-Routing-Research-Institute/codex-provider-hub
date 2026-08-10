@@ -2,7 +2,7 @@
 id = "2026-08-10-time-range-persistence"
 type = "fix"
 release_bump = "patch"
-status = "planned"
+status = "verified"
 +++
 
 # 时间筛选选项持久化与当天结束边界
@@ -53,11 +53,19 @@ status = "planned"
 
 ## 实际改动
 
-pending
+- `proxy_static/app.js` 将现有本地存储值升级为 `{window, range}`，固定预设和最近一次自定义范围分别保存；选择固定预设时立即持久化，但不清空自定义范围。
+- 初始化恢复通过统一规范化函数处理新结构、旧 `{start, end}` 结构、无效窗口和无效自定义范围，仅在保存选项确实为 `custom` 时激活自定义。
+- 自定义结束时间上限从“当前时刻”放宽为浏览器本地当天 `23:59:59.999`，开始时间仍不得晚于当前时刻，并保留请求记录最近 7 天和最长 7 天跨度限制。
+- `tests/local_proxy_time_range.test.js` 增加当天末尾、次日边界、未来开始时间、请求七日约束、固定预设恢复、旧结构迁移和存储负载回归测试。
 
 ## 验证结果
 
-pending
+- `.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py'`：384 项通过，1 项按既有条件跳过；仅出现既有 Starlette 依赖弃用警告。
+- `node --test tests/*.test.js`：32 项通过。
+- `node --check proxy_static/app.js`：通过。
+- `node --check provider_status/static/app.js`：通过。
+- `.venv/Scripts/python.exe -m compileall -q local_proxy tests`：通过。
+- `git diff --check`：通过，仅提示 Git 后续可能按本机配置转换行尾。
 
 ## PR
 
