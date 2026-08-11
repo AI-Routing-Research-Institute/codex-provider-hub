@@ -157,6 +157,16 @@ function text(selector, value) {
   if (element && value != null) element.textContent = String(value);
 }
 
+function viewStorageKey(serviceId = uiConfig.service_id || "local") {
+  return `local-proxy-view-${serviceId || "local"}`;
+}
+
+function normalizeViewName(viewName, requestsEnabled = true) {
+  const allowed = ["providers", "requests", "settings", "runtime"];
+  if (!allowed.includes(viewName)) return "providers";
+  return viewName === "requests" && !requestsEnabled ? "providers" : viewName;
+}
+
 function applyUiConfig(config) {
   if (!config || typeof config !== "object") return;
   uiConfig = {
@@ -206,6 +216,25 @@ function applyUiConfig(config) {
     "hidden",
     uiConfig.features.provider_launch_command !== true,
   );
+}
+
+function requestsViewEnabled() {
+  const button = document.querySelector('.view-tab[data-view="requests"]');
+  return Boolean(button && !button.hidden);
+}
+
+function persistView(viewName) {
+  try {
+    localStorage.setItem(viewStorageKey(), viewName);
+  } catch (error) {}
+}
+
+function restoreView() {
+  let savedView = "providers";
+  try {
+    savedView = localStorage.getItem(viewStorageKey()) || "providers";
+  } catch (error) {}
+  switchView(savedView, { persist: false });
 }
 
 function padTimePart(value) {
@@ -1348,7 +1377,8 @@ function openAllRequests() {
   void readRequests({ reset: true });
 }
 
-function switchView(viewName) {
+function switchView(viewName, { persist = true } = {}) {
+  viewName = normalizeViewName(viewName, requestsViewEnabled());
   closeUsageHistoryPopover();
   if (viewName !== "requests") closeSessionRoutePopover();
   for (const button of document.querySelectorAll(".view-tab")) {
@@ -1366,6 +1396,7 @@ function switchView(viewName) {
   if (viewName === "requests" && requestHistoryItems.length === 0 && !requestLoading) {
     readRequests({ reset: true });
   }
+  if (persist) persistView(viewName);
 }
 
 function escapeText(value) {
@@ -3121,6 +3152,7 @@ themeMedia.addEventListener("change", () => {
 });
 async function initialize() {
   await readUiConfig();
+  restoreView();
   if (!uiConfig.proxy_url) text("#proxy-url", `${window.location.origin}/v1`);
   applyTheme(themePreference());
   renderHealthSourceStatus();
