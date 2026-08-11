@@ -124,12 +124,14 @@ def create_app(
         window: WindowName = Query(default="24h"),
     ) -> dict[str, Any]:
         now = _as_utc(get_now())
+        providers = _read_status(store, _WINDOW_DAYS[window], now)
+        manual_jobs = _latest_manual_jobs(control_store, providers)
         providers = _sort_providers_by_model(
-            _read_status(store, _WINDOW_DAYS[window], now),
+            providers,
             _SORT_MODEL,
+            manual_jobs,
         )
         data_status, last_checked = _freshness(providers, now)
-        manual_jobs = _latest_manual_jobs(control_store, providers)
         manual_histories = _manual_histories(control_store, providers)
         response.headers["Cache-Control"] = "public, max-age=30"
         response.headers["Access-Control-Allow-Origin"] = "*"
@@ -309,10 +311,16 @@ def _read_status(
 def _sort_providers_by_model(
     providers: list[dict[str, Any]],
     model_name: str,
+    manual_jobs: dict[str, ManualProbeJob] | None = None,
 ) -> list[dict[str, Any]]:
     indexed = list(enumerate(providers))
     indexed.sort(
-        key=lambda item: _provider_sort_key(item[1], model_name, item[0])
+        key=lambda item: _provider_sort_key(
+            item[1],
+            model_name,
+            item[0],
+            manual_jobs,
+        )
     )
     return [provider for _index, provider in indexed]
 
@@ -321,6 +329,7 @@ def _provider_sort_key(
     provider: dict[str, Any],
     model_name: str,
     original_index: int,
+    manual_jobs: dict[str, ManualProbeJob] | None = None,
 ) -> tuple[int, int, float, int]:
     model = next(
         (
@@ -331,7 +340,12 @@ def _provider_sort_key(
         None,
     )
     if model is None:
-        return (2, 0, 0.0, original_index)
+        return _manual_probe_sort_key(
+            provider,
+            model_name,
+            original_index,
+            manual_jobs,
+        )
 
     raw_streak = model.get("consecutive_successes")
     streak = (
@@ -348,6 +362,33 @@ def _provider_sort_key(
     if last_success is not None:
         return (1, 0, -last_success.timestamp(), original_index)
     return (2, 0, 0.0, original_index)
+
+
+def _manual_probe_sort_key(
+    provider: dict[str, Any],
+    model_name: str,
+    original_index: int,
+    manual_jobs: dict[str, ManualProbeJob] | None,
+) -> tuple[int, int, float, int]:
+    if not manual_jobs:
+        return (2, 0, 0.0, original_index)
+    job = manual_jobs.get(str(provider.get("provider_id")))
+    if job is None:
+        return (2, 0, 0.0, original_index)
+    result = next(
+        (
+            item
+            for item in job.results
+            if item.get("model") == model_name
+        ),
+        None,
+    )
+    if result is None or not bool(result.get("success")):
+        return (2, 0, 0.0, original_index)
+    finished_at = _parse_datetime(result.get("finished_at"))
+    if finished_at is None:
+        return (2, 0, 0.0, original_index)
+    return (2, 0, -finished_at.timestamp(), original_index)
 
 
 def _overall_state(providers: list[dict[str, Any]]) -> str:
