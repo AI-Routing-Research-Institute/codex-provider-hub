@@ -113,6 +113,41 @@ test("throttles session route refreshes and keeps cached items while refreshing"
   assert.match(source, /readSessionRoutes\(\{ quiet: true, force: true \}\)/);
 });
 
+test("serializes status polling and pauses hidden control tabs", () => {
+  const start = source.indexOf("async function readStatus");
+  const end = source.indexOf("async function readHealthStatus");
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const readStatusSource = source.slice(start, end);
+
+  assert.match(source, /let statusRequestActive = false/);
+  assert.match(
+    readStatusSource,
+    /controlRequestActive \|\| statusRequestActive \|\| \(!force && document\.hidden\)/,
+  );
+  assert.match(readStatusSource, /statusRequestActive = true/);
+  assert.match(readStatusSource, /finally \{\s*statusRequestActive = false/);
+  assert.match(source, /document\.addEventListener\("visibilitychange"/);
+  assert.match(source, /readStatus\(\{ quiet: true, force: true \}\)/);
+});
+
+test("renders quiet request refreshes only after fresh data arrives", () => {
+  const requestStart = source.indexOf("async function readRequests");
+  const requestEnd = source.indexOf("function openAllRequests");
+  const statusStart = source.indexOf("function renderStatus");
+  const statusEnd = source.indexOf("async function readStatus");
+  assert.notEqual(requestStart, -1);
+  assert.notEqual(requestEnd, -1);
+  assert.notEqual(statusStart, -1);
+  assert.notEqual(statusEnd, -1);
+
+  assert.match(
+    source.slice(requestStart, requestEnd),
+    /requestLoading = true;\s*if \(!quiet\) renderRequests\(\)/,
+  );
+  assert.doesNotMatch(source.slice(statusStart, statusEnd), /renderRequests\(\)/);
+});
+
 test("uses route-aware draining request counts", () => {
   const start = source.indexOf("const drainingProviders");
   const end = source.indexOf("renderProviderList();", start);

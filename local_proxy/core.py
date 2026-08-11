@@ -236,6 +236,8 @@ class UsageStore:
                     ON request_history(provider_id, finished_at);
                 CREATE INDEX IF NOT EXISTS request_history_session_key
                     ON request_history(session_key);
+                CREATE INDEX IF NOT EXISTS request_history_usage_id
+                    ON request_history(usage_id);
                 """
             )
             columns = {
@@ -2068,20 +2070,22 @@ def create_proxy_app(
                 default_window="today",
                 allowed_windows=USAGE_WINDOWS,
             )
-            return public_status(window, start_at, end_at)
+            return await asyncio.to_thread(public_status, window, start_at, end_at)
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.get("/control/api/recovery-history", include_in_schema=False)
     async def control_recovery_history(request: Request):
         if recovery_history_store is None:
-            history = public_status()["retry"]["history"]
+            status = await asyncio.to_thread(public_status)
+            history = status["retry"]["history"]
         else:
             try:
                 limit = int(
                     request.query_params.get("limit", str(RECOVERY_HISTORY_API_LIMIT))
                 )
-                history = recovery_history_store.history(
+                history = await asyncio.to_thread(
+                    recovery_history_store.history,
                     limit=limit,
                     cursor=request.query_params.get("cursor"),
                 )
@@ -2114,7 +2118,8 @@ def create_proxy_app(
         if usage_store is None:
             return JSONResponse(status_code=503, content={"detail": "Token 记录功能不可用"})
         try:
-            history = usage_store.history(
+            history = await asyncio.to_thread(
+                usage_store.history,
                 provider_id=provider_id,
                 window=window,
                 start_at=start_at,
@@ -2149,7 +2154,8 @@ def create_proxy_app(
         ):
             return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
         try:
-            payload = _public_requests(
+            payload = await asyncio.to_thread(
+                _public_requests,
                 router,
                 usage_store,
                 window=window,
@@ -2172,9 +2178,14 @@ def create_proxy_app(
         if session_catalog is None:
             return JSONResponse(status_code=503, content={"detail": "会话路由功能不可用"})
         try:
-            payload = _public_sessions(
+            sessions = await asyncio.to_thread(
+                session_catalog,
+                time.time() - 7 * 24 * 3600,
+            )
+            payload = await asyncio.to_thread(
+                _public_sessions,
                 router,
-                session_catalog(time.time() - 7 * 24 * 3600),
+                sessions,
                 session_name_resolver=session_name_resolver,
             )
         except (OSError, TypeError, ValueError):
@@ -2689,17 +2700,25 @@ def _public_requests(
             query=query,
             cursor=cursor,
         )
+    history_thread_ids = {
+        raw.get("_thread_id")
+        for raw in history["items"]
+        if raw.get("_thread_id") is not None
+    }
+    history_session_names: Mapping[str, str] = {}
+    if session_name_resolver is not None and history_thread_ids:
+        try:
+            history_session_names = session_name_resolver(history_thread_ids)
+        except (OSError, TypeError, ValueError):
+            history_session_names = {}
+
     items: list[dict[str, Any]] = []
     for raw in history["items"]:
         item = dict(raw)
         thread_id = item.pop("_thread_id", None)
-        if thread_id is not None and session_name_resolver is not None:
-            try:
-                current_name = session_name_resolver((thread_id,)).get(thread_id)
-            except (OSError, TypeError, ValueError):
-                current_name = None
-            if current_name:
-                item["session_name"] = current_name
+        current_name = history_session_names.get(thread_id)
+        if current_name:
+            item["session_name"] = current_name
         provider = providers.get(item["provider_id"])
         item["provider_name"] = provider.name if provider else item["provider_id"]
         item["route_provider_id"] = router.session_provider_override(thread_id)

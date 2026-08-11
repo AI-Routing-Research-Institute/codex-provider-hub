@@ -20,6 +20,7 @@ let healthPollTimer = null;
 let toastTimer = null;
 let renderedListSignature = null;
 let statusRequestSequence = 0;
+let statusRequestActive = false;
 let healthRequestSequence = 0;
 let controlRequestActive = false;
 let healthRequestActive = false;
@@ -1321,7 +1322,7 @@ async function readRequests({ reset = false, loadMore = false, refresh = false, 
     requestError = null;
   }
   requestLoading = true;
-  renderRequests();
+  if (!quiet) renderRequests();
   const sequence = ++requestSequence;
   const params = timeRangeParams("requests");
   params.set("status", requestStatus.value);
@@ -2541,11 +2542,11 @@ function renderStatus(status) {
     drainingDetail.textContent = "切换不会中断已经开始的流式响应。";
   }
   renderProviderList();
-  if (!document.querySelector("#requests-view").hidden) renderRequests();
 }
 
-async function readStatus({ quiet = false } = {}) {
-  if (controlRequestActive) return;
+async function readStatus({ quiet = false, force = false } = {}) {
+  if (controlRequestActive || statusRequestActive || (!force && document.hidden)) return;
+  statusRequestActive = true;
   const requestSequence = ++statusRequestSequence;
   try {
     const params = timeRangeParams("usage");
@@ -2565,6 +2566,8 @@ async function readStatus({ quiet = false } = {}) {
   } catch (error) {
     footerMessage.textContent = "无法连接本地中转，服务可能已经退出";
     if (!quiet) showToast("连接失败", "无法读取本地中转状态。", "error");
+  } finally {
+    statusRequestActive = false;
   }
 }
 
@@ -3147,6 +3150,9 @@ window.addEventListener("resize", () => {
   if (usageHistoryPopover.classList.contains("show")) positionUsageHistoryPopover();
   hideHistoryDetail({ force: true });
 });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) void readStatus({ quiet: true, force: true });
+});
 themeMedia.addEventListener("change", () => {
   if (themePreference() === "system") applyTheme("system");
 });
@@ -3156,7 +3162,7 @@ async function initialize() {
   if (!uiConfig.proxy_url) text("#proxy-url", `${window.location.origin}/v1`);
   applyTheme(themePreference());
   renderHealthSourceStatus();
-  readStatus();
+  readStatus({ force: true });
   readRuntimeSettings({ quiet: true });
   pollTimer = window.setInterval(() => readStatus({ quiet: true }), 1000);
   healthPollTimer = window.setInterval(
