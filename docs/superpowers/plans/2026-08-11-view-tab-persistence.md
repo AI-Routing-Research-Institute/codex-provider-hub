@@ -15,7 +15,7 @@
 **Files:**
 - Create: `tests/local_proxy_view_state.test.js`
 
-- [ ] **Step 1: Add failing normalization tests**
+- [x] **Step 1: Add failing normalization tests**
 
 Extract the planned pure helpers from `proxy_static/app.js` and assert:
 
@@ -27,7 +27,7 @@ normalizeViewName("requests", false) === "providers"
 viewStorageKey("codex") === "local-proxy-view-codex"
 ```
 
-- [ ] **Step 2: Run the focused test and confirm RED**
+- [x] **Step 2: Run the focused test and confirm RED**
 
 Run:
 
@@ -37,7 +37,7 @@ node --test tests/local_proxy_view_state.test.js
 
 Expected: FAIL because the helpers and persistence wiring do not exist.
 
-- [ ] **Step 3: Add failing wiring assertions**
+- [x] **Step 3: Add failing wiring assertions**
 
 Assert that `switchView()` accepts a `{persist}` option and invokes `persistView()` with the normalized value, while `initialize()` invokes `restoreView()` after `readUiConfig()`.
 
@@ -47,13 +47,13 @@ Assert that `switchView()` accepts a `{persist}` option and invokes `persistView
 - Modify: `proxy_static/app.js`
 - Test: `tests/local_proxy_view_state.test.js`
 
-- [ ] **Step 1: Add pure helpers**
+- [x] **Step 1: Add pure helpers**
 
 Implement:
 
 ```js
 function viewStorageKey(serviceId = uiConfig.service_id || "local") {
-  return `local-proxy-view-${serviceId}`;
+  return `local-proxy-view-${serviceId || "local"}`;
 }
 
 function normalizeViewName(viewName, requestsEnabled = true) {
@@ -63,19 +63,19 @@ function normalizeViewName(viewName, requestsEnabled = true) {
 }
 ```
 
-- [ ] **Step 2: Add guarded persistence and restoration**
+- [x] **Step 2: Add guarded persistence and restoration**
 
 `persistView()` writes only the normalized string and catches storage failures. `restoreView()` reads after UI config, derives request availability from the requests tab `hidden` state, and calls `switchView(saved, {persist: false})`; read failures call the same fallback path with `providers`.
 
-- [ ] **Step 3: Normalize and persist in switchView**
+- [x] **Step 3: Normalize and persist in switchView**
 
 Change the signature to `switchView(viewName, {persist = true} = {})`. Normalize before updating buttons and panels; after the existing lazy loads, persist the normalized value when requested.
 
-- [ ] **Step 4: Restore during initialization**
+- [x] **Step 4: Restore during initialization**
 
 Call `restoreView()` immediately after `await readUiConfig()` so feature visibility is already resolved. Keep existing status, runtime-settings, and polling startup behavior.
 
-- [ ] **Step 5: Run focused verification**
+- [x] **Step 5: Run focused verification**
 
 Run:
 
@@ -92,7 +92,7 @@ Expected: all Node tests and JavaScript syntax checks pass.
 **Files:**
 - Modify: `docs/changes/2026-08-11-view-tab-persistence.md`
 
-- [ ] **Step 1: Update the change record to implemented**
+- [x] **Step 1: Update the change record to implemented**
 
 Record the storage key, fallback rules, initialization point, tests, and absence of backend changes.
 

@@ -2,7 +2,7 @@
 id = "2026-08-11-view-tab-persistence"
 type = "fix"
 release_bump = "patch"
-status = "planned"
+status = "implemented"
 +++
 
 # 控制台主导航页签持久化
@@ -52,7 +52,10 @@ status = "planned"
 
 ## 实际改动
 
-pending
+- `proxy_static/app.js` 增加按 `service_id` 隔离的页签存储键，并只保存 `providers`、`requests`、`settings`、`runtime` 白名单值。
+- `switchView()` 统一规范化并持久化实际生效页签；用户点击导航或通过现有请求入口切换时都会保存。
+- 页面在 UI 配置加载后恢复最后页签；请求历史功能关闭、保存值非法或本地存储不可用时回退供应商。
+- `tests/local_proxy_view_state.test.js` 增加合法页签、隐藏请求页回退、服务键隔离、切换持久化和初始化恢复回归测试。
 
 ## 验证结果
 
