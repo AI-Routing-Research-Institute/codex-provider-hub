@@ -320,17 +320,19 @@ def _register_control_routes(
                 default_window="today",
                 allowed_windows=USAGE_WINDOWS,
             )
-            return public_status(window, start_at, end_at)
+            return await asyncio.to_thread(public_status, window, start_at, end_at)
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     async def control_recovery_history(request: Request):
         if profile.recovery_history_store is None:
-            history = public_status()["retry"]["history"]
+            status = await asyncio.to_thread(public_status)
+            history = status["retry"]["history"]
         else:
             try:
                 limit = int(request.query_params.get("limit", str(RECOVERY_HISTORY_API_LIMIT)))
-                history = profile.recovery_history_store.history(
+                history = await asyncio.to_thread(
+                    profile.recovery_history_store.history,
                     limit=limit,
                     cursor=request.query_params.get("cursor"),
                 )
@@ -359,7 +361,8 @@ def _register_control_routes(
         if profile.usage_store is None:
             return JSONResponse(status_code=503, content={"detail": "Token 记录功能不可用"})
         try:
-            history = profile.usage_store.history(
+            history = await asyncio.to_thread(
+                profile.usage_store.history,
                 provider_id=provider_id,
                 window=window,
                 start_at=start_at,
@@ -388,7 +391,8 @@ def _register_control_routes(
                 allowed_windows=REQUEST_HISTORY_WINDOWS,
                 max_custom_seconds=REQUEST_HISTORY_HOURS * 3600,
             )
-            payload = _public_requests(
+            payload = await asyncio.to_thread(
+                _public_requests,
                 profile.router,
                 profile.usage_store,
                 window=window,
@@ -410,8 +414,12 @@ def _register_control_routes(
         if profile.session_catalog is None:
             return JSONResponse(status_code=503, content={"detail": "会话路由功能不可用"})
         try:
-            sessions = profile.session_catalog(time.time() - 7 * 24 * 3600)
-            payload = _public_sessions(
+            sessions = await asyncio.to_thread(
+                profile.session_catalog,
+                time.time() - 7 * 24 * 3600,
+            )
+            payload = await asyncio.to_thread(
+                _public_sessions,
                 profile.router,
                 sessions,
                 session_name_resolver=profile.session_name_resolver,

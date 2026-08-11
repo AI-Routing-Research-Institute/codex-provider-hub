@@ -1,5 +1,8 @@
-import unittest
+import asyncio
 import tempfile
+import threading
+import time
+import unittest
 from pathlib import Path
 
 import httpx
@@ -282,6 +285,73 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["service"], "codex-provider-hub")
         self.assertEqual(set(response.json()["services"]), {"codex", "claude"})
+
+    async def test_slow_request_history_does_not_block_health_endpoint(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowUsageStore:
+            def request_history(self, **kwargs):
+                started.set()
+                release.wait(timeout=2)
+                return {
+                    "window": kwargs["window"],
+                    "total_count": 0,
+                    "items": [],
+                    "next_cursor": None,
+                }
+
+        self.codex_profile.usage_store = SlowUsageStore()
+        request_task = asyncio.create_task(
+            self.client.get("/control/codex/api/requests", params={"window": "24h"})
+        )
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        try:
+            health = await asyncio.wait_for(self.client.get("/healthz"), timeout=0.5)
+            self.assertEqual(health.status_code, 200)
+            self.assertFalse(request_task.done())
+        finally:
+            release.set()
+        response = await asyncio.wait_for(request_task, timeout=1)
+        self.assertEqual(response.status_code, 200)
+
+    async def test_request_history_resolves_session_names_in_one_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UsageStore(Path(temp_dir) / "codex.sqlite3")
+            now = time.time()
+            for offset, thread_id in enumerate(("thread-a", "thread-b")):
+                store.record_request(
+                    started_at=now - offset - 1,
+                    finished_at=now - offset,
+                    provider_id="codex-a",
+                    thread_id=thread_id,
+                    session_name="旧名称",
+                    model="gpt-test",
+                    status_code=200,
+                    successful=True,
+                    outcome="succeeded",
+                    retry_count=0,
+                )
+            resolver_calls: list[set[str]] = []
+
+            def resolve_session_names(thread_ids):
+                requested = set(thread_ids)
+                resolver_calls.append(requested)
+                return {thread_id: f"名称-{thread_id}" for thread_id in requested}
+
+            self.codex_profile.usage_store = store
+            self.codex_profile.session_name_resolver = resolve_session_names
+            response = await self.client.get(
+                "/control/codex/api/requests",
+                params={"window": "24h"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(resolver_calls, [{"thread-a", "thread-b"}])
+        self.assertEqual(
+            {item["session_name"] for item in response.json()["items"]},
+            {"名称-thread-a", "名称-thread-b"},
+        )
 
 
 if __name__ == "__main__":

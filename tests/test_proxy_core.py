@@ -298,6 +298,32 @@ class UsageTests(unittest.TestCase):
             self.assertTrue(database.is_file())
             self.assertEqual(store.summary("today")["total"]["request_count"], 0)
 
+    def test_existing_database_adds_request_history_usage_index(self) -> None:
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
+            connection.execute("DROP INDEX request_history_usage_id")
+
+        UsageStore(self.store.path)
+
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            indexes = {
+                row[1]
+                for row in connection.execute("PRAGMA index_list(request_history)")
+            }
+            query_plan = {
+                row[3]
+                for row in connection.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT 1 FROM request_history WHERE usage_id = ?",
+                    (1,),
+                )
+            }
+
+        self.assertIn("request_history_usage_id", indexes)
+        self.assertTrue(
+            any("request_history_usage_id" in step for step in query_plan),
+            query_plan,
+        )
+
     def test_upstream_usage_wins_over_local_estimate(self) -> None:
         capture = UsageCapture(
             b'{"model":"gpt-5","input":"this would be estimated"}',
