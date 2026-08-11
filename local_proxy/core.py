@@ -88,6 +88,36 @@ SSE_FAILURE_MARKER_RE = re.compile(
     rb'(?<!\\)"error"\s*:\s*(?:\{|"))',
     re.IGNORECASE,
 )
+
+
+class DisconnectAwareStreamingResponse(StreamingResponse):
+    """Stop a stalled upstream iterator as soon as the ASGI client disconnects."""
+
+    async def __call__(self, scope: dict[str, Any], receive, send) -> None:
+        if scope["type"] == "websocket":
+            await super().__call__(scope, receive, send)
+            return
+
+        stream_task = asyncio.create_task(self.stream_response(send))
+        disconnect_task = asyncio.create_task(self.listen_for_disconnect(receive))
+        done, pending = await asyncio.wait(
+            {stream_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        if stream_task in done:
+            await stream_task
+        else:
+            await disconnect_task
+
+        if self.background is not None:
+            await self.background()
+
+
 SSE_MODEL_CAPACITY_CODE_RE = re.compile(
     rb"\bmodel(?:_at)?_capacity(?:_error)?\b",
     re.IGNORECASE,
@@ -1699,13 +1729,15 @@ class ProviderRouter:
         error: str | None = None,
     ) -> None:
         with self._lock:
-            provider_id = snapshot.provider.provider_id
+            detail = self._active_request_details.pop(snapshot.request_id, None)
+            if detail is None:
+                return
+            provider_id = detail.provider_id
             remaining = max(0, self._active.get(provider_id, 1) - 1)
             if remaining:
                 self._active[provider_id] = remaining
             else:
                 self._active.pop(provider_id, None)
-            self._active_request_details.pop(snapshot.request_id, None)
             self._last_provider_id = provider_id
             self._last_status_code = status_code
             self._last_error = error
@@ -3336,7 +3368,7 @@ async def _forward_request(
                         error=history_kind,
                     )
 
-    return StreamingResponse(
+    return DisconnectAwareStreamingResponse(
         response_body(),
         status_code=upstream_response.status_code,
         headers=response_headers,

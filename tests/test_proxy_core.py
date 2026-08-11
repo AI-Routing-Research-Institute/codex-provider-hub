@@ -101,6 +101,22 @@ class ProviderRouterTests(unittest.TestCase):
         router.finish_request(first_request, status_code=200)
         self.assertEqual(router.status().active_by_provider, {"second": 1})
 
+    def test_finishing_the_same_request_twice_does_not_remove_another_request(self) -> None:
+        router = ProviderRouter((provider("first", current=True),))
+        first_request = router.begin_request()
+        second_request = router.begin_request()
+
+        router.finish_request(first_request, status_code=200)
+        router.finish_request(first_request, status_code=200)
+
+        status = router.status()
+        self.assertEqual(status.active_by_provider, {"first": 1})
+        self.assertEqual(
+            [detail.request_id for detail in status.active_request_details],
+            [second_request.request_id],
+        )
+        router.finish_request(second_request, status_code=200)
+
     def test_retry_can_move_active_request_to_current_provider(self) -> None:
         router = ProviderRouter((provider("first", current=True), provider("second")))
         request = router.begin_request()
@@ -3159,6 +3175,77 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         history = usage_store.request_history()
         self.assertEqual(history["total_count"], 1)
         self.assertFalse(history["items"][0]["succeeded"])
+        self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
+        self.assertEqual(history["items"][0]["error_summary"], "客户端取消")
+
+    async def test_client_disconnect_cancels_a_stalled_upstream_stream(self) -> None:
+        stream_closed = asyncio.Event()
+        never_continue = asyncio.Event()
+
+        class StalledStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                    await never_continue.wait()
+                finally:
+                    stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=StalledStream(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client, usage_store=usage_store)
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        request_body_sent = False
+
+        async def request_receive():
+            nonlocal request_body_sent
+            if request_body_sent:
+                return {"type": "http.disconnect"}
+            request_body_sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "asgi": {"spec_version": "2.4"},
+            "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, request_receive))
+        first_body_sent = asyncio.Event()
+
+        async def response_receive():
+            await first_body_sent.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first_body_sent.set()
+
+        await asyncio.wait_for(response(scope, response_receive, send), timeout=1)
+        await upstream_client.aclose()
+
+        self.assertTrue(stream_closed.is_set())
+        self.assertEqual(router.status().active_request_details, ())
+        history = usage_store.request_history()
+        self.assertEqual(history["total_count"], 1)
         self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
         self.assertEqual(history["items"][0]["error_summary"], "客户端取消")
 
