@@ -96,11 +96,11 @@ Expected: all Node tests and JavaScript syntax checks pass.
 
 Record the storage key, fallback rules, initialization point, tests, and absence of backend changes.
 
-- [ ] **Step 2: Run sensitive information scans**
+- [x] **Step 2: Run sensitive information scans**
 
 Scan the complete branch diff against `origin/main` for private-key headers, OpenAI-style keys, GitHub tokens, bearer tokens, password assignments, API-key assignments, and authorization headers. The scan must exit successfully with no matched secret values before push.
 
-- [ ] **Step 3: Run complete verification**
+- [x] **Step 3: Run complete verification**
 
 Run:
 

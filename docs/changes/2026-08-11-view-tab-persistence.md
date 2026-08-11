@@ -2,7 +2,7 @@
 id = "2026-08-11-view-tab-persistence"
 type = "fix"
 release_bump = "patch"
-status = "implemented"
+status = "verified"
 +++
 
 # 控制台主导航页签持久化
@@ -59,7 +59,12 @@ status = "implemented"
 
 ## 验证结果
 
-pending
+- `.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"`：384 项通过，1 项跳过。
+- `node --test tests/*.test.js`：35 项通过。
+- `node --check proxy_static/app.js` 与 `node --check provider_status/static/app.js`：通过。
+- `.venv/Scripts/python.exe -m compileall -q local_proxy tests`：通过。
+- `git diff --cached --check` 与 `git diff --check`：通过。
+- 提交后对 `origin/main...HEAD` 完整差异执行 7 类敏感信息扫描：私钥头、`sk-` 密钥、GitHub token、Bearer token、password 赋值、API key 赋值和 Authorization 头赋值均无命中。
 
 ## PR
 
