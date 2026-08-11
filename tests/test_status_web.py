@@ -10,7 +10,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from provider_status.config import ProviderConfig
-from provider_status.control import ManualProbeControlStore
+from provider_status.control import ManualProbeControlStore, ManualProbeJob
 from provider_status.store import ProbeRecord, StatusStore
 from provider_status.web import (
     _overall_state,
@@ -372,6 +372,86 @@ class StatusWebTests(unittest.TestCase):
             [provider["provider_id"] for provider in payload["providers"]],
             ["three", "one", "recent", "older", "never"],
         )
+        serialized = json.dumps(payload)
+        for internal_key in ("consecutive_successes", "last_success_at"):
+            self.assertNotIn(internal_key, serialized)
+
+    def test_status_api_sorts_manual_probe_success_before_missing_success(
+        self,
+    ) -> None:
+        database = self.root / "manual-sort-status.sqlite3"
+        control_database = self.root / "manual-sort-control.sqlite3"
+        store = StatusStore(database)
+        store.initialize(
+            (
+                make_provider(
+                    provider_id="automatic-down",
+                    name="Any Router",
+                    models=("gpt-5.6-sol",),
+                ),
+                make_provider(
+                    provider_id="manual-only",
+                    name="佛爷API",
+                    models=("gpt-5.6-sol", "gpt-5.5"),
+                    probe_mode="manual_only",
+                ),
+            ),
+            self.now - timedelta(hours=2),
+        )
+        targets = {
+            target.provider_id: target.id
+            for target in store.list_due_targets(self.now, limit=20)
+        }
+        store.record_probe(
+            targets["automatic-down"],
+            ProbeRecord(
+                started_at=self.now - timedelta(minutes=5, seconds=1),
+                success=False,
+                latency_ms=None,
+                error_code="no_channel",
+            ),
+            self.now - timedelta(minutes=5),
+        )
+        control = ManualProbeControlStore(control_database)
+        control.initialize()
+        job, _ = control.enqueue(
+            "manual-only",
+            self.now - timedelta(minutes=4),
+            requested_models=("gpt-5.6-sol",),
+        )
+        control.claim_next(self.now - timedelta(minutes=4))
+        control.set_total_models(job.job_id, 1)
+        control.record_result(
+            job.job_id,
+            model="gpt-5.6-sol",
+            position=1,
+            scheduled=False,
+            success=True,
+            latency_ms=1200,
+            error_code=None,
+            error_summary=None,
+            finished_at=self.now - timedelta(minutes=3),
+        )
+        control.complete(job.job_id, self.now - timedelta(minutes=3))
+
+        with TestClient(
+            create_app(
+                database,
+                control_database_path=control_database,
+                now_factory=lambda: self.now,
+            )
+        ) as client:
+            response = client.get("/api/status?window=24h")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            [provider["provider_id"] for provider in payload["providers"]],
+            ["manual-only", "automatic-down"],
+        )
+        manual = payload["providers"][0]["manual_probe"]
+        self.assertEqual(manual["results"][0]["model"], "gpt-5.6-sol")
+        self.assertTrue(manual["results"][0]["success"])
         serialized = json.dumps(payload)
         for internal_key in ("consecutive_successes", "last_success_at"):
             self.assertNotIn(internal_key, serialized)
@@ -811,6 +891,34 @@ class ProviderSortTests(unittest.TestCase):
             ],
         }
 
+    @staticmethod
+    def manual_job(
+        provider_id: str,
+        *,
+        model: str,
+        success: bool,
+        finished_at: str,
+    ) -> ManualProbeJob:
+        finished = datetime.fromisoformat(finished_at)
+        return ManualProbeJob(
+            job_id=f"{provider_id}-job",
+            provider_id=provider_id,
+            status="completed",
+            requested_at=finished - timedelta(minutes=1),
+            started_at=finished - timedelta(minutes=1),
+            finished_at=finished,
+            total_models=1,
+            completed_models=1,
+            error_summary=None,
+            results=(
+                {
+                    "model": model,
+                    "success": success,
+                    "finished_at": finished_at,
+                },
+            ),
+        )
+
     def test_provider_sort_uses_streak_then_recent_success(self) -> None:
         providers = [
             self.provider_rank("recent", 0, "2026-07-24T05:00:00+00:00"),
@@ -843,6 +951,52 @@ class ProviderSortTests(unittest.TestCase):
         self.assertEqual(
             [provider["provider_id"] for provider in sorted_providers],
             ["first", "second", "negative", "boolean"],
+        )
+
+    def test_provider_sort_uses_manual_success_when_model_is_missing(self) -> None:
+        providers = [
+            self.provider_rank("automatic-success", 0, "2026-07-23T05:00:00+00:00"),
+            self.provider_rank("automatic-never", 0, None),
+            {"provider_id": "manual-success", "models": []},
+            {"provider_id": "manual-failed", "models": []},
+            {"provider_id": "manual-other-model", "models": []},
+        ]
+        manual_jobs = {
+            "manual-success": self.manual_job(
+                "manual-success",
+                model="gpt-5.6-sol",
+                success=True,
+                finished_at="2026-07-24T05:01:00+00:00",
+            ),
+            "manual-failed": self.manual_job(
+                "manual-failed",
+                model="gpt-5.6-sol",
+                success=False,
+                finished_at="2026-07-24T05:03:00+00:00",
+            ),
+            "manual-other-model": self.manual_job(
+                "manual-other-model",
+                model="gpt-5.5",
+                success=True,
+                finished_at="2026-07-24T05:05:00+00:00",
+            ),
+        }
+
+        sorted_providers = _sort_providers_by_model(
+            providers,
+            "gpt-5.6-sol",
+            manual_jobs,
+        )
+
+        self.assertEqual(
+            [provider["provider_id"] for provider in sorted_providers],
+            [
+                "automatic-success",
+                "manual-success",
+                "automatic-never",
+                "manual-failed",
+                "manual-other-model",
+            ],
         )
 
 
