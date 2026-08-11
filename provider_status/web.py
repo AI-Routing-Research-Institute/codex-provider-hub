@@ -28,6 +28,7 @@ from provider_status.store import StatusStore
 
 
 WindowName = Literal["3h", "24h", "7d", "15d", "30d"]
+ManualHistories = dict[str, dict[str, tuple[dict[str, Any], ...]]]
 _WINDOW_DAYS = {"3h": 0.125, "24h": 1, "7d": 7, "15d": 15, "30d": 30}
 _SORT_MODEL = "gpt-5.6-sol"
 _AUTH_HTTP_401_RE = re.compile(r"\bHTTP\s+401\b", re.IGNORECASE)
@@ -126,13 +127,14 @@ def create_app(
         now = _as_utc(get_now())
         providers = _read_status(store, _WINDOW_DAYS[window], now)
         manual_jobs = _latest_manual_jobs(control_store, providers)
+        manual_histories = _manual_histories(control_store, providers)
         providers = _sort_providers_by_model(
             providers,
             _SORT_MODEL,
             manual_jobs,
+            manual_histories,
         )
         data_status, last_checked = _freshness(providers, now)
-        manual_histories = _manual_histories(control_store, providers)
         response.headers["Cache-Control"] = "public, max-age=30"
         response.headers["Access-Control-Allow-Origin"] = "*"
         return {
@@ -312,6 +314,7 @@ def _sort_providers_by_model(
     providers: list[dict[str, Any]],
     model_name: str,
     manual_jobs: dict[str, ManualProbeJob] | None = None,
+    manual_histories: ManualHistories | None = None,
 ) -> list[dict[str, Any]]:
     indexed = list(enumerate(providers))
     indexed.sort(
@@ -320,6 +323,7 @@ def _sort_providers_by_model(
             model_name,
             item[0],
             manual_jobs,
+            manual_histories,
         )
     )
     return [provider for _index, provider in indexed]
@@ -330,6 +334,7 @@ def _provider_sort_key(
     model_name: str,
     original_index: int,
     manual_jobs: dict[str, ManualProbeJob] | None = None,
+    manual_histories: ManualHistories | None = None,
 ) -> tuple[int, int, float, int]:
     model = next(
         (
@@ -345,6 +350,7 @@ def _provider_sort_key(
             model_name,
             original_index,
             manual_jobs,
+            manual_histories,
         )
 
     raw_streak = model.get("consecutive_successes")
@@ -369,26 +375,57 @@ def _manual_probe_sort_key(
     model_name: str,
     original_index: int,
     manual_jobs: dict[str, ManualProbeJob] | None,
+    manual_histories: ManualHistories | None,
 ) -> tuple[int, int, float, int]:
-    if not manual_jobs:
-        return (2, 0, 0.0, original_index)
-    job = manual_jobs.get(str(provider.get("provider_id")))
-    if job is None:
-        return (2, 0, 0.0, original_index)
-    result = next(
-        (
-            item
-            for item in job.results
-            if item.get("model") == model_name
-        ),
-        None,
+    latest_success = _manual_probe_last_success_at(
+        str(provider.get("provider_id")),
+        model_name,
+        manual_jobs,
+        manual_histories,
     )
-    if result is None or not bool(result.get("success")):
+    if latest_success is None:
         return (2, 0, 0.0, original_index)
-    finished_at = _parse_datetime(result.get("finished_at"))
-    if finished_at is None:
-        return (2, 0, 0.0, original_index)
-    return (2, 0, -finished_at.timestamp(), original_index)
+    return (2, 0, -latest_success.timestamp(), original_index)
+
+
+def _manual_probe_last_success_at(
+    provider_id: str,
+    model_name: str,
+    manual_jobs: dict[str, ManualProbeJob] | None,
+    manual_histories: ManualHistories | None,
+) -> datetime | None:
+    success_times = []
+    for result in _manual_probe_sort_results(
+        provider_id,
+        model_name,
+        manual_jobs,
+        manual_histories,
+    ):
+        if not bool(result.get("success")):
+            continue
+        parsed = _parse_datetime(result.get("finished_at"))
+        if parsed is not None:
+            success_times.append(parsed)
+    return max(success_times) if success_times else None
+
+
+def _manual_probe_sort_results(
+    provider_id: str,
+    model_name: str,
+    manual_jobs: dict[str, ManualProbeJob] | None,
+    manual_histories: ManualHistories | None,
+) -> tuple[dict[str, Any], ...]:
+    results: list[dict[str, Any]] = []
+    job = manual_jobs.get(provider_id) if manual_jobs else None
+    if job is not None:
+        results.extend(
+            result
+            for result in job.results
+            if result.get("model") == model_name
+        )
+    if manual_histories:
+        results.extend(manual_histories.get(provider_id, {}).get(model_name, ()))
+    return tuple(results)
 
 
 def _overall_state(providers: list[dict[str, Any]]) -> str:
