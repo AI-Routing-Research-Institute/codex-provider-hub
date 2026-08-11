@@ -376,7 +376,7 @@ class StatusWebTests(unittest.TestCase):
         for internal_key in ("consecutive_successes", "last_success_at"):
             self.assertNotIn(internal_key, serialized)
 
-    def test_status_api_sorts_manual_probe_success_before_missing_success(
+    def test_status_api_sorts_manual_history_success_before_missing_success(
         self,
     ) -> None:
         database = self.root / "manual-sort-status.sqlite3"
@@ -414,15 +414,15 @@ class StatusWebTests(unittest.TestCase):
         )
         control = ManualProbeControlStore(control_database)
         control.initialize()
-        job, _ = control.enqueue(
+        success_job, _ = control.enqueue(
             "manual-only",
-            self.now - timedelta(minutes=4),
+            self.now - timedelta(minutes=8),
             requested_models=("gpt-5.6-sol",),
         )
-        control.claim_next(self.now - timedelta(minutes=4))
-        control.set_total_models(job.job_id, 1)
+        control.claim_next(self.now - timedelta(minutes=8))
+        control.set_total_models(success_job.job_id, 1)
         control.record_result(
-            job.job_id,
+            success_job.job_id,
             model="gpt-5.6-sol",
             position=1,
             scheduled=False,
@@ -430,9 +430,28 @@ class StatusWebTests(unittest.TestCase):
             latency_ms=1200,
             error_code=None,
             error_summary=None,
+            finished_at=self.now - timedelta(minutes=7),
+        )
+        control.complete(success_job.job_id, self.now - timedelta(minutes=7))
+        failed_job, _ = control.enqueue(
+            "manual-only",
+            self.now - timedelta(minutes=4),
+            requested_models=("gpt-5.6-sol",),
+        )
+        control.claim_next(self.now - timedelta(minutes=4))
+        control.set_total_models(failed_job.job_id, 1)
+        control.record_result(
+            failed_job.job_id,
+            model="gpt-5.6-sol",
+            position=1,
+            scheduled=False,
+            success=False,
+            latency_ms=1800,
+            error_code="upstream_unavailable",
+            error_summary="HTTP 503",
             finished_at=self.now - timedelta(minutes=3),
         )
-        control.complete(job.job_id, self.now - timedelta(minutes=3))
+        control.complete(failed_job.job_id, self.now - timedelta(minutes=3))
 
         with TestClient(
             create_app(
@@ -451,7 +470,10 @@ class StatusWebTests(unittest.TestCase):
         )
         manual = payload["providers"][0]["manual_probe"]
         self.assertEqual(manual["results"][0]["model"], "gpt-5.6-sol")
-        self.assertTrue(manual["results"][0]["success"])
+        self.assertFalse(manual["results"][0]["success"])
+        history = payload["providers"][0]["manual_history"]["gpt-5.6-sol"]
+        self.assertFalse(history[0]["success"])
+        self.assertTrue(history[1]["success"])
         serialized = json.dumps(payload)
         for internal_key in ("consecutive_successes", "last_success_at"):
             self.assertNotIn(internal_key, serialized)
@@ -996,6 +1018,69 @@ class ProviderSortTests(unittest.TestCase):
                 "automatic-never",
                 "manual-failed",
                 "manual-other-model",
+            ],
+        )
+
+    def test_provider_sort_uses_manual_history_success_when_latest_job_fails(
+        self,
+    ) -> None:
+        providers = [
+            self.provider_rank("automatic-success", 0, "2026-07-23T05:00:00+00:00"),
+            self.provider_rank("automatic-never", 0, None),
+            {"provider_id": "manual-history-success", "models": []},
+            {"provider_id": "manual-history-other-model", "models": []},
+        ]
+        manual_jobs = {
+            "manual-history-success": self.manual_job(
+                "manual-history-success",
+                model="gpt-5.6-sol",
+                success=False,
+                finished_at="2026-07-24T05:03:00+00:00",
+            ),
+            "manual-history-other-model": self.manual_job(
+                "manual-history-other-model",
+                model="gpt-5.6-sol",
+                success=False,
+                finished_at="2026-07-24T05:04:00+00:00",
+            ),
+        }
+        manual_histories = {
+            "manual-history-success": {
+                "gpt-5.6-sol": (
+                    {
+                        "success": False,
+                        "finished_at": "2026-07-24T05:03:00+00:00",
+                    },
+                    {
+                        "success": True,
+                        "finished_at": "2026-07-24T05:01:00+00:00",
+                    },
+                )
+            },
+            "manual-history-other-model": {
+                "gpt-5.5": (
+                    {
+                        "success": True,
+                        "finished_at": "2026-07-24T05:02:00+00:00",
+                    },
+                )
+            },
+        }
+
+        sorted_providers = _sort_providers_by_model(
+            providers,
+            "gpt-5.6-sol",
+            manual_jobs,
+            manual_histories,
+        )
+
+        self.assertEqual(
+            [provider["provider_id"] for provider in sorted_providers],
+            [
+                "automatic-success",
+                "manual-history-success",
+                "automatic-never",
+                "manual-history-other-model",
             ],
         )
 
