@@ -330,12 +330,21 @@ class CodexConfigTests(unittest.TestCase):
         menu_items_by_label: dict[str, object] = {}
 
         class FakeMenuItem:
-            def __init__(self, label, action, default=False, checked=None):
+            def __init__(
+                self,
+                label,
+                action,
+                default=False,
+                checked=None,
+                visible=True,
+            ):
                 self.label = label
                 self.action = action
                 self.default = default
                 self.checked = checked
-                menu_labels.append(label)
+                self.visible = visible
+                if visible:
+                    menu_labels.append(label)
                 menu_items_by_label[label] = self
 
         class FakeMenu:
@@ -347,6 +356,7 @@ class CodexConfigTests(unittest.TestCase):
         class FakeIcon:
             def __init__(self, name, image, title, menu):
                 self.menu = menu
+                self.title = title
                 self.stopped = False
 
             def run(self):
@@ -368,6 +378,7 @@ class CodexConfigTests(unittest.TestCase):
             mock.patch.object(local_proxy_app, "create_app_icon", return_value=object()),
             mock.patch.object(local_proxy_app, "auto_start_supported", return_value=True),
             mock.patch.object(local_proxy_app, "is_auto_start_enabled", return_value=True),
+            mock.patch.object(local_proxy_app.webbrowser, "open") as browser,
         ):
             restart_requested = local_proxy_app._run_tray(
                 server,
@@ -377,15 +388,30 @@ class CodexConfigTests(unittest.TestCase):
             )
             auto_start_item = menu_items_by_label["开机自启"]
             auto_start_checked = auto_start_item.checked(auto_start_item)
+            visible_open_item = menu_items_by_label["打开控制台"]
+            default_item = menu_items_by_label["默认打开 Codex 控制台"]
+            visible_open_item.action(tray_holder["icon"], visible_open_item)
+            default_item.action(tray_holder["icon"], default_item)
 
         self.assertTrue(restart_requested)
         self.assertTrue(tray_holder["icon"].stopped)
         server.request_stop.assert_called_once_with()
         self.assertEqual(
             menu_labels,
-            ["打开 Codex 控制台", "打开 Claude Code 控制台", "开机自启", "重启本地中转", "退出本地中转"],
+            ["打开控制台", "打开 Claude Code 控制台", "开机自启", "重启本地中转", "退出本地中转"],
         )
         self.assertTrue(auto_start_checked)
+        self.assertFalse(visible_open_item.default)
+        self.assertTrue(default_item.default)
+        self.assertFalse(default_item.visible)
+        self.assertEqual(tray_holder["icon"].title, "模型路由服务")
+        self.assertEqual(
+            browser.call_args_list,
+            [
+                mock.call("http://127.0.0.1:17890/control/codex/"),
+                mock.call("http://127.0.0.1:17890/control/codex/"),
+            ],
+        )
 
     def test_run_server_opens_both_views_and_stops_once(self) -> None:
         server = mock.Mock(running=False)

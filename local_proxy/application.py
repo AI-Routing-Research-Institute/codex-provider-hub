@@ -411,7 +411,13 @@ def _run_tray(
         icon.stop()
 
     menu_items = [
-        pystray.MenuItem("打开 Codex 控制台", open_codex_console, default=True),
+        pystray.MenuItem(
+            "默认打开 Codex 控制台",
+            open_codex_console,
+            default=True,
+            visible=False,
+        ),
+        pystray.MenuItem("打开控制台", open_codex_console),
         pystray.MenuItem("打开 Claude Code 控制台", open_claude_console),
         pystray.Menu.SEPARATOR,
     ]
@@ -436,7 +442,7 @@ def _run_tray(
     icon = pystray.Icon(
         "codex-local-proxy",
         image,
-        "Codex 与 Claude Code 本地中转",
+        "模型路由服务",
         menu=pystray.Menu(*menu_items),
     )
     tray_holder["icon"] = icon
