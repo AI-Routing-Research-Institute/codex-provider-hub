@@ -29,6 +29,8 @@ from local_proxy.core import (
     _codex_thread_id,
     _inspect_http_400_before_output,
     _public_control_status,
+    _public_requests,
+    _request_reasoning_effort,
     create_proxy_app,
     filter_self_referencing_providers,
     order_proxy_providers,
@@ -87,6 +89,20 @@ class ProviderRouterTests(unittest.TestCase):
 
         self.assertEqual(_codex_thread_id(headers), thread_id)
         self.assertIsNone(_codex_thread_id({"x-codex-turn-metadata": "not-json"}))
+
+    def test_active_request_exposes_reasoning_effort(self) -> None:
+        router = ProviderRouter((provider("first", current=True),))
+        request = router.begin_request()
+        router.update_request_model(request, "gpt-5", "high")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = _public_requests(
+                router,
+                UsageStore(Path(temp_dir) / "usage.sqlite3"),
+            )
+
+        self.assertEqual(payload["active"][0]["model"], "gpt-5")
+        self.assertEqual(payload["active"][0]["reasoning_effort"], "high")
+        router.finish_request(request, status_code=200)
 
     def test_switch_affects_new_requests_without_moving_active_request(self) -> None:
         router = ProviderRouter((provider("first", current=True), provider("second")))
@@ -323,6 +339,60 @@ class UsageTests(unittest.TestCase):
             any("request_history_usage_id" in step for step in query_plan),
             query_plan,
         )
+
+    def test_existing_database_adds_request_history_reasoning_effort(self) -> None:
+        old_path = Path(self.temp_context.name) / "old-request-history.sqlite3"
+        with closing(sqlite3.connect(old_path)) as connection, connection:
+            connection.executescript(
+                """
+                CREATE TABLE request_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at REAL NOT NULL,
+                    finished_at REAL NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    session_key TEXT,
+                    session_name TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status_code INTEGER,
+                    succeeded INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    retry_count INTEGER NOT NULL,
+                    error_kind TEXT,
+                    error_summary TEXT,
+                    usage_id INTEGER,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                    usage_source TEXT,
+                    estimate_method TEXT
+                );
+                """
+            )
+
+        UsageStore(old_path)
+
+        with closing(sqlite3.connect(old_path)) as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(request_history)")
+            }
+        self.assertIn("reasoning_effort", columns)
+
+    def test_reads_nested_and_legacy_reasoning_effort(self) -> None:
+        self.assertEqual(
+            _request_reasoning_effort(b'{"reasoning":{"effort":"high"}}'),
+            "high",
+        )
+        self.assertEqual(
+            _request_reasoning_effort(b'{"reasoning_effort":" low "}'),
+            "low",
+        )
+        self.assertIsNone(_request_reasoning_effort(b'{"reasoning":{"effort":7}}'))
+        self.assertIsNone(_request_reasoning_effort(b"not-json"))
 
     def test_upstream_usage_wins_over_local_estimate(self) -> None:
         capture = UsageCapture(
@@ -666,6 +736,7 @@ class UsageTests(unittest.TestCase):
             thread_id="thread-fixture",
             session_name="Codex 服务可用检测",
             model="gpt-5.6-sol",
+            reasoning_effort="high",
             status_code=200,
             successful=False,
             outcome="failed",
@@ -686,6 +757,7 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(history["total_count"], 1)
         self.assertEqual(history["items"][0]["retry_count"], 2)
         self.assertEqual(history["items"][0]["total_tokens"], 15)
+        self.assertEqual(history["items"][0]["reasoning_effort"], "high")
         self.assertNotIn("fixture-private-token", history["items"][0]["error_summary"])
         with closing(sqlite3.connect(self.store.path)) as connection:
             columns = {
@@ -3233,7 +3305,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
             sent = True
             return {
                 "type": "http.request",
-                "body": b'{"model":"test"}',
+                "body": b'{"model":"test","reasoning":{"effort":"high"}}',
                 "more_body": False,
             }
 
@@ -3254,6 +3326,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history["total_count"], 1)
         self.assertTrue(history["items"][0]["succeeded"])
         self.assertIsNone(history["items"][0]["error_kind"])
+        self.assertEqual(history["items"][0]["reasoning_effort"], "high")
 
     async def test_client_close_before_terminal_event_uses_short_cancel_summary(self) -> None:
         class PartialStream(httpx.AsyncByteStream):

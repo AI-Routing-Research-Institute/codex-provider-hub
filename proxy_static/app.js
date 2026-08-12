@@ -128,6 +128,7 @@ const usageHistoryMore = document.querySelector("#usage-history-more");
 const usageHistoryClose = document.querySelector("#usage-history-close");
 const historyDetailPopover = document.querySelector("#history-detail-popover");
 const requestList = document.querySelector("#request-list");
+const requestTableShell = document.querySelector(".request-table-shell");
 const requestsEmpty = document.querySelector("#requests-empty");
 const requestWindow = document.querySelector("#request-window");
 const requestStatus = document.querySelector("#request-status");
@@ -969,6 +970,7 @@ function requestRecordKey(item) {
     item?.provider_id,
     item?.session_key,
     item?.model,
+    item?.reasoning_effort,
     item?.duration_ms,
     item?.outcome,
   ].join("|");
@@ -981,6 +983,20 @@ function formatRequestDuration(milliseconds) {
   const minutes = Math.floor(value / 60000);
   const seconds = Math.floor((value % 60000) / 1000);
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function requestReasoningEffortLabel(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "—";
+  const labels = {
+    none: "关闭",
+    minimal: "极低",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+  };
+  return labels[raw.toLowerCase()] || raw.slice(0, 40);
 }
 
 function requestResultLabel(item) {
@@ -1229,7 +1245,7 @@ function createRequestProviderCell(item) {
 
 function renderRequests() {
   if (!requestList) return;
-  const previousScrollTop = requestList.scrollTop;
+  const previousScrollTop = requestTableShell?.scrollTop || 0;
   const combined = [...requestActiveItems, ...requestHistoryItems];
   requestList.replaceChildren();
   for (const item of combined) {
@@ -1268,6 +1284,13 @@ function renderRequests() {
     model.textContent = item.model || "unknown";
     model.title = model.textContent;
 
+    const reasoning = document.createElement("span");
+    reasoning.className = "request-reasoning";
+    reasoning.textContent = requestReasoningEffortLabel(item.reasoning_effort);
+    reasoning.title = item.reasoning_effort
+      ? `推理强度：${reasoning.textContent}`
+      : "未指定推理强度";
+
     const duration = document.createElement("span");
     duration.className = "request-duration";
     duration.textContent = state === "running"
@@ -1289,10 +1312,10 @@ function renderRequests() {
       : state === "cancelled"
         ? "客户端在响应完成前结束连接"
         : result.textContent;
-    row.append(status, startedAt, session, route, model, duration, token, result);
+    row.append(status, startedAt, session, route, model, reasoning, duration, token, result);
     requestList.append(row);
   }
-  requestList.scrollTop = previousScrollTop;
+  if (requestTableShell) requestTableShell.scrollTop = previousScrollTop;
   requestsEmpty.hidden = combined.length > 0;
   requestsEmpty.textContent = requestError
     ? requestError
@@ -3136,10 +3159,10 @@ sessionRouteSessionSelect.addEventListener("change", () => {
   renderSessionRouteProviders();
 });
 sessionRouteProviderSelect.addEventListener("change", () => void updateSelectedSessionRoute());
-requestList.addEventListener("scroll", () => {
-  const remaining = requestList.scrollHeight
-    - requestList.scrollTop
-    - requestList.clientHeight;
+requestTableShell.addEventListener("scroll", () => {
+  const remaining = requestTableShell.scrollHeight
+    - requestTableShell.scrollTop
+    - requestTableShell.clientHeight;
   if (remaining < 64 && requestNextCursor && !requestLoading) {
     void readRequests({ loadMore: true });
   }

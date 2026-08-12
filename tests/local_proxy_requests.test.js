@@ -8,6 +8,8 @@ const vm = require("node:vm");
 
 const sourcePath = path.join(__dirname, "..", "proxy_static", "app.js");
 const source = fs.readFileSync(sourcePath, "utf8");
+const htmlSource = fs.readFileSync(path.join(__dirname, "..", "proxy_static", "index.html"), "utf8");
+const stylesSource = fs.readFileSync(path.join(__dirname, "..", "proxy_static", "styles.css"), "utf8");
 const start = source.indexOf("function requestRecordKey");
 const end = source.indexOf("function populateRequestProviders");
 assert.notEqual(start, -1);
@@ -17,6 +19,7 @@ const context = vm.createContext({});
 vm.runInContext(
   `${source.slice(start, end)}\nthis.api = {
     formatRequestDuration,
+    requestReasoningEffortLabel,
     requestResultLabel,
     requestActualProviderLabel,
   };`,
@@ -28,6 +31,26 @@ test("formats short and long request durations", () => {
   assert.equal(context.api.formatRequestDuration(420), "420ms");
   assert.equal(context.api.formatRequestDuration(4200), "4.2s");
   assert.equal(context.api.formatRequestDuration(125000), "2:05");
+});
+
+test("labels request reasoning effort", () => {
+  assert.equal(context.api.requestReasoningEffortLabel("none"), "关闭");
+  assert.equal(context.api.requestReasoningEffortLabel("minimal"), "极低");
+  assert.equal(context.api.requestReasoningEffortLabel("low"), "低");
+  assert.equal(context.api.requestReasoningEffortLabel("medium"), "中");
+  assert.equal(context.api.requestReasoningEffortLabel("high"), "高");
+  assert.equal(context.api.requestReasoningEffortLabel("xhigh"), "极高");
+  assert.equal(context.api.requestReasoningEffortLabel(null), "—");
+  assert.equal(context.api.requestReasoningEffortLabel("custom"), "custom");
+});
+
+test("uses nine aligned request columns without positional header rules", () => {
+  assert.match(htmlSource, /request-column-reasoning">推理强度/);
+  assert.match(source, /row\.append\(status, startedAt, session, route, model, reasoning, duration, token, result\)/);
+  assert.match(stylesSource, /--request-columns:[^;]+;/);
+  assert.match(stylesSource, /\.request-column-duration, \.request-column-token \{ text-align: right; \}/);
+  assert.match(stylesSource, /\.request-column-status, \.request-column-time, \.request-column-reasoning, \.request-column-result \{ text-align: center; \}/);
+  assert.doesNotMatch(stylesSource, /\.request-table-header span:nth-child/);
 });
 
 test("labels running, successful, and failed request results", () => {
@@ -146,6 +169,13 @@ test("renders quiet request refreshes only after fresh data arrives", () => {
     /requestLoading = true;\s*if \(!quiet\) renderRequests\(\)/,
   );
   assert.doesNotMatch(source.slice(statusStart, statusEnd), /renderRequests\(\)/);
+});
+
+test("keeps request pagination on the shared table scroll container", () => {
+  assert.match(source, /const requestTableShell = document\.querySelector\("\.request-table-shell"\)/);
+  assert.match(source, /requestTableShell\.addEventListener\("scroll"/);
+  assert.match(source, /requestTableShell\.scrollHeight\s*- requestTableShell\.scrollTop\s*- requestTableShell\.clientHeight/);
+  assert.doesNotMatch(source, /requestList\.addEventListener\("scroll"/);
 });
 
 test("uses route-aware draining request counts", () => {
