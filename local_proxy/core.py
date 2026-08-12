@@ -1926,6 +1926,7 @@ def create_proxy_app(
     config_endpoint_name: str = "codex-config",
     codex_profile: Any | None = None,
     claude_profile: Any | None = None,
+    update_controller: Any | None = None,
 ) -> FastAPI:
     if codex_profile is not None or claude_profile is not None:
         if codex_profile is None or claude_profile is None:
@@ -1937,6 +1938,7 @@ def create_proxy_app(
             claude_profile,
             control_asset_dir=control_asset_dir,
             on_shutdown_requested=on_shutdown_requested,
+            update_controller=update_controller,
         )
     if router is None:
         raise ValueError("必须提供供应商路由器")

@@ -561,6 +561,7 @@ class CodexConfigTests(unittest.TestCase):
             codex_profile=codex_profile_instance,
             claude_profile=claude_profile_instance,
             on_shutdown_requested=mock.ANY,
+            update_controller=mock.ANY,
         )
         server_class.assert_called_once_with(
             host="127.0.0.1",
