@@ -354,5 +354,140 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FakeUpdateController:
+    def __init__(self, *, supported=True, check_error=None, download_error=None):
+        self.supported = supported
+        self._check_error = check_error
+        self._download_error = download_error
+        self.finalized = False
+        self.downloaded = False
+
+    def status(self):
+        return {
+            "supported": self.supported,
+            "current_version": "0.7.1",
+            "has_update": True,
+            "latest_version": "0.8.0",
+            "release_url": "https://example/release",
+            "notes": "",
+        }
+
+    def check(self):
+        if self._check_error is not None:
+            raise self._check_error
+        return self.status()
+
+    def download(self):
+        if self._download_error is not None:
+            raise self._download_error
+        self.downloaded = True
+        return Path("/tmp/new.exe")
+
+    def finalize(self):
+        self.finalized = True
+
+
+class UpdateRouteTests(unittest.IsolatedAsyncioTestCase):
+    def _build(self, controller):
+        codex = ProxyProfile(
+            service_id="codex",
+            service_name="codex-local-proxy",
+            router=ProviderRouter((codex_provider(),)),
+            upstream_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))),
+            owns_client=False,
+            config_endpoint_name="codex-config",
+        )
+        claude = ProxyProfile(
+            service_id="claude",
+            service_name="claude-local-proxy",
+            router=ProviderRouter((claude_provider(),)),
+            upstream_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))),
+            owns_client=False,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            config_endpoint_name="claude-config",
+        )
+        app = create_proxy_app(
+            codex_profile=codex,
+            claude_profile=claude,
+            update_controller=controller,
+        )
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        )
+
+    async def test_status_returns_version_without_controller(self) -> None:
+        client = self._build(None)
+        try:
+            response = await client.get("/control/codex/api/update")
+        finally:
+            await client.aclose()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["supported"])
+
+    async def test_check_returns_update_info(self) -> None:
+        client = self._build(FakeUpdateController())
+        try:
+            response = await client.post(
+                "/control/codex/api/update/check",
+                headers={"X-Local-Proxy-Control": "1"},
+            )
+        finally:
+            await client.aclose()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["latest_version"], "0.8.0")
+
+    async def test_check_requires_control_header(self) -> None:
+        client = self._build(FakeUpdateController())
+        try:
+            response = await client.post("/control/codex/api/update/check")
+        finally:
+            await client.aclose()
+        self.assertEqual(response.status_code, 403)
+
+    async def test_check_maps_update_error_to_502(self) -> None:
+        from local_proxy.updater import UpdateError
+
+        client = self._build(FakeUpdateController(check_error=UpdateError("检查更新失败：HTTP 403")))
+        try:
+            response = await client.post(
+                "/control/codex/api/update/check",
+                headers={"X-Local-Proxy-Control": "1"},
+            )
+        finally:
+            await client.aclose()
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("403", response.json()["detail"])
+        self.assertIn("release_url", response.json())
+
+    async def test_apply_rejects_unsupported_platform(self) -> None:
+        controller = FakeUpdateController(supported=False)
+        client = self._build(controller)
+        try:
+            response = await client.post(
+                "/control/codex/api/update/apply",
+                headers={"X-Local-Proxy-Control": "1"},
+            )
+        finally:
+            await client.aclose()
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(controller.finalized)
+
+    async def test_apply_downloads_then_schedules_finalize(self) -> None:
+        controller = FakeUpdateController()
+        client = self._build(controller)
+        try:
+            response = await client.post(
+                "/control/codex/api/update/apply",
+                headers={"X-Local-Proxy-Control": "1"},
+            )
+        finally:
+            await client.aclose()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "restarting")
+        self.assertTrue(controller.downloaded)
+        self.assertTrue(controller.finalized)
+
+
 if __name__ == "__main__":
     unittest.main()

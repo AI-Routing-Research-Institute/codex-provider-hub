@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.background import BackgroundTask
@@ -40,6 +41,7 @@ from local_proxy.core import (
     order_proxy_providers,
     retry_policy_from_mapping,
 )
+from local_proxy.updater import RELEASES_PAGE, UpdateError
 
 
 UI_CONFIG_FIELDS = frozenset(
@@ -132,6 +134,7 @@ def create_unified_proxy_app(
     *,
     control_asset_dir: Path = CONTROL_ASSET_DIR,
     on_shutdown_requested: Callable[[], None] | None = None,
+    update_controller: Any | None = None,
 ) -> FastAPI:
     profiles = {"codex": codex, "claude": claude}
 
@@ -196,6 +199,7 @@ def create_unified_proxy_app(
             prefix=f"/control/{service_id}",
             control_asset_dir=control_asset_dir,
             on_shutdown_requested=on_shutdown_requested,
+            update_controller=update_controller,
         )
 
     @app.api_route(
@@ -244,6 +248,7 @@ def _register_control_routes(
     prefix: str,
     control_asset_dir: Path,
     on_shutdown_requested: Callable[[], None] | None,
+    update_controller: Any | None = None,
 ) -> None:
     def public_status(
         window: str = "today",
@@ -655,6 +660,53 @@ def _register_control_routes(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def control_update_status():
+        if update_controller is None:
+            return JSONResponse(
+                content={"supported": False, "current_version": None, "has_update": False},
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(
+            content=update_controller.status(),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def control_update_check(request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if update_controller is None:
+            return JSONResponse(status_code=503, content={"detail": "更新功能不可用"})
+        try:
+            status = await run_in_threadpool(update_controller.check)
+        except UpdateError as exc:
+            return JSONResponse(
+                status_code=502,
+                content={"detail": str(exc), "release_url": RELEASES_PAGE},
+            )
+        return JSONResponse(content=status, headers={"Cache-Control": "no-store"})
+
+    async def control_update_apply(request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if update_controller is None:
+            return JSONResponse(status_code=503, content={"detail": "更新功能不可用"})
+        if not update_controller.supported:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "当前平台请手动下载安装最新版本", "release_url": RELEASES_PAGE},
+            )
+        try:
+            await run_in_threadpool(update_controller.download)
+        except UpdateError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": str(exc), "release_url": RELEASES_PAGE},
+            )
+        return JSONResponse(
+            content={"status": "restarting"},
+            background=BackgroundTask(update_controller.finalize),
+        )
+
     async def control_shutdown(request: Request):
         if not _valid_control_request(request):
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
@@ -715,3 +767,6 @@ def _register_control_routes(
         include_in_schema=False,
     )
     app.add_api_route(f"{prefix}/api/shutdown", control_shutdown, methods=["POST"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/update", control_update_status, methods=["GET"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/update/check", control_update_check, methods=["POST"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/update/apply", control_update_apply, methods=["POST"], include_in_schema=False)

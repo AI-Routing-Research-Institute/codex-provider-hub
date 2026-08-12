@@ -11,7 +11,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # pythonw.exe does not provide standard streams, while Uvicorn initializes
 # logging against them even when access logging is disabled.
@@ -278,6 +278,17 @@ def run_application(
         if icon is not None:
             icon.stop()
 
+    def _on_update_ready(path: Path) -> None:
+        tray_holder["update_apply_path"] = str(path)
+        stop_application()
+
+    update_controller = UpdateController(
+        current_version=APP_VERSION,
+        supported=update_supported(),
+        updates_dir=updates_directory(),
+        on_ready=_on_update_ready,
+    )
+
     codex_profile = build_codex_profile(
         database=database,
         port=port,
@@ -304,6 +315,7 @@ def run_application(
         codex_profile=codex_profile,
         claude_profile=claude_profile,
         on_shutdown_requested=stop_application,
+        update_controller=update_controller,
     )
     server = LocalProxyServer(
         host=DEFAULT_HOST,
@@ -572,6 +584,67 @@ def update_supported() -> bool:
 
 def updates_directory() -> Path:
     return data_directory() / "updates"
+
+
+class UpdateController:
+    def __init__(
+        self,
+        *,
+        current_version: str,
+        supported: bool,
+        updates_dir: Path,
+        on_ready: Callable[[Path], None],
+    ) -> None:
+        self.current_version = current_version
+        self.supported = supported
+        self._updates_dir = updates_dir
+        self._on_ready = on_ready
+        self._lock = threading.Lock()
+        self._last_info: Any = None
+        self._downloaded: Path | None = None
+
+    def status(self) -> dict[str, Any]:
+        from local_proxy.updater import RELEASES_PAGE
+
+        info = self._last_info
+        payload: dict[str, Any] = {
+            "supported": self.supported,
+            "current_version": self.current_version,
+            "has_update": bool(info is not None and info.has_update),
+            "latest_version": info.latest_version if info is not None else None,
+            "release_url": info.release_url if info is not None else RELEASES_PAGE,
+            "notes": info.notes if info is not None else "",
+        }
+        return payload
+
+    def check(self) -> dict[str, Any]:
+        from local_proxy import updater
+
+        info = updater.check_for_update(self.current_version)
+        with self._lock:
+            self._last_info = info
+            self._downloaded = None
+        return self.status()
+
+    def download(self) -> Path:
+        from local_proxy import updater
+
+        with self._lock:
+            info = self._last_info
+        if info is None or not info.has_update:
+            raise updater.UpdateError("请先检查更新")
+        if not self.supported:
+            raise updater.UpdateError("当前平台不支持就地更新")
+        path = updater.download_asset(info, self._updates_dir)
+        with self._lock:
+            self._downloaded = path
+        return path
+
+    def finalize(self) -> None:
+        with self._lock:
+            path = self._downloaded
+        if path is not None:
+            self._on_ready(path)
 
 
 def _spawn_detached(command: list[str], working_directory: Path) -> None:

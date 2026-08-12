@@ -2940,6 +2940,112 @@ async function shutdownProxy() {
   }
 }
 
+let updateState = { supported: false, has_update: false, release_url: "" };
+
+function renderUpdateResult(message, tone) {
+  const box = document.querySelector("#update-result");
+  if (!box) return;
+  if (!message) {
+    box.hidden = true;
+    box.textContent = "";
+    return;
+  }
+  box.hidden = false;
+  box.textContent = "";
+  const span = document.createElement("span");
+  span.textContent = message;
+  box.appendChild(span);
+  if (tone === "update" && updateState.release_url) {
+    const link = document.createElement("a");
+    link.href = updateState.release_url;
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    link.textContent = "打开 Releases 页面";
+    link.style.marginLeft = "8px";
+    box.appendChild(link);
+  }
+}
+
+function applyUpdateState(state) {
+  updateState = { ...updateState, ...state };
+  const versionCode = document.querySelector("#update-current-version");
+  if (versionCode) {
+    versionCode.textContent = state.current_version
+      ? `v${state.current_version}`
+      : "—";
+  }
+  const applyButton = document.querySelector("#update-apply-button");
+  if (applyButton) {
+    applyButton.hidden = !(updateState.has_update && updateState.supported);
+  }
+}
+
+async function loadUpdateStatus() {
+  try {
+    const response = await fetch(controlUrl("/api/update"), { cache: "no-store" });
+    if (!response.ok) return;
+    applyUpdateState(await response.json());
+  } catch (error) {
+    /* 版本信息读取失败时静默降级 */
+  }
+}
+
+async function checkForUpdate() {
+  const button = document.querySelector("#update-check-button");
+  if (button) button.disabled = true;
+  renderUpdateResult("正在检查更新…", "info");
+  try {
+    const response = await fetch(controlUrl("/api/update/check"), {
+      method: "POST",
+      headers: CONTROL_HEADER,
+      cache: "no-store",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      updateState.release_url = payload.release_url || updateState.release_url;
+      renderUpdateResult(payload.detail || `检查更新失败：HTTP ${response.status}`, "update");
+      return;
+    }
+    applyUpdateState(payload);
+    if (payload.has_update) {
+      renderUpdateResult(`发现新版本 v${payload.latest_version}`, "update");
+    } else {
+      renderUpdateResult("当前已是最新版本。", "info");
+    }
+  } catch (error) {
+    renderUpdateResult(error?.message || "无法连接更新服务。", "info");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function applyUpdate() {
+  const button = document.querySelector("#update-apply-button");
+  if (button) button.disabled = true;
+  renderUpdateResult("正在下载并校验新版本…", "info");
+  try {
+    const response = await fetch(controlUrl("/api/update/apply"), {
+      method: "POST",
+      headers: CONTROL_HEADER,
+      cache: "no-store",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      updateState.release_url = payload.release_url || updateState.release_url;
+      renderUpdateResult(payload.detail || `更新失败：HTTP ${response.status}`, "update");
+      if (button) button.disabled = false;
+      return;
+    }
+    window.clearInterval(pollTimer);
+    window.clearInterval(healthPollTimer);
+    renderUpdateResult("更新已就绪，正在重启到新版本…", "info");
+    showToast("正在更新", "本地中转会自动重启到新版本。", "success");
+  } catch (error) {
+    renderUpdateResult(error?.message || "无法连接更新服务。", "info");
+    if (button) button.disabled = false;
+  }
+}
+
 searchInput.addEventListener("input", renderProviderList);
 usageWindow.addEventListener("change", () => {
   if (usageWindow.value === "custom") {
@@ -2955,6 +3061,8 @@ healthRefreshButton.addEventListener("click", () => readHealthStatus());
 document.querySelector("#refresh-button").addEventListener("click", refreshProviders);
 document.querySelector("#copy-config").addEventListener("click", copyConfig);
 document.querySelector("#shutdown-button").addEventListener("click", shutdownProxy);
+document.querySelector("#update-check-button").addEventListener("click", checkForUpdate);
+document.querySelector("#update-apply-button").addEventListener("click", applyUpdate);
 for (const button of document.querySelectorAll(".view-tab")) {
   button.addEventListener("click", () => switchView(button.dataset.view));
 }
@@ -3164,6 +3272,7 @@ async function initialize() {
   renderHealthSourceStatus();
   readStatus({ force: true });
   readRuntimeSettings({ quiet: true });
+  loadUpdateStatus();
   pollTimer = window.setInterval(() => readStatus({ quiet: true }), 1000);
   healthPollTimer = window.setInterval(
     () => readHealthStatus({ quiet: true }),
