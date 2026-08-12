@@ -481,7 +481,11 @@ def create_app_icon() -> Any:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as exc:
         raise RuntimeError("图标生成需要安装 Pillow") from exc
-    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    canvas = 64
+    margin = 3
+    stroke_width = 3
+    target = canvas - 2 * margin
+    image = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     # "segoeuib.ttf" only resolves on Windows; pick a platform-appropriate
     # bold font so the tray/bundle icon keeps crisp glyphs on every OS.
@@ -493,17 +497,26 @@ def create_app_icon() -> Any:
     )
     font = None
     for candidate in font_candidates:
-        try:
-            font = ImageFont.truetype(candidate, 26)
+        # Measure the stroked bbox at each size and keep the largest one that
+        # fits the canvas margin, so the glyphs stay big without clipping on
+        # any platform's font metrics.
+        for font_size in range(target, 8, -1):
+            try:
+                trial = ImageFont.truetype(candidate, font_size)
+            except OSError:
+                break
+            box = draw.textbbox((0, 0), "CX", font=trial, stroke_width=stroke_width)
+            if box[2] - box[0] <= target and box[3] - box[1] <= target:
+                font = trial
+                break
+        if font is not None:
             break
-        except OSError:
-            continue
     if font is None:
         font = ImageFont.load_default()
-    box = draw.textbbox((0, 0), "CX", font=font, stroke_width=2)
-    x = (64 - (box[2] - box[0])) / 2
-    y = (64 - (box[3] - box[1])) / 2 - box[1]
-    draw.text((x, y), "CX", font=font, fill="white", stroke_fill="#146c73", stroke_width=2)
+    box = draw.textbbox((0, 0), "CX", font=font, stroke_width=stroke_width)
+    x = (canvas - (box[2] - box[0])) / 2 - box[0]
+    y = (canvas - (box[3] - box[1])) / 2 - box[1]
+    draw.text((x, y), "CX", font=font, fill="white", stroke_fill="#146c73", stroke_width=stroke_width)
     return image
 
 
