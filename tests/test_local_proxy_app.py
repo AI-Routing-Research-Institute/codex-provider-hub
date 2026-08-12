@@ -386,7 +386,6 @@ class CodexConfigTests(unittest.TestCase):
             restart_requested = local_proxy_app._run_tray(
                 server,
                 "http://127.0.0.1:17890/control/codex/",
-                "http://127.0.0.1:17890/control/claude/",
                 tray_holder,
             )
             auto_start_item = menu_items_by_label["开机自启"]
@@ -401,8 +400,9 @@ class CodexConfigTests(unittest.TestCase):
         server.request_stop.assert_called_once_with()
         self.assertEqual(
             menu_labels,
-            ["打开控制台", "打开 Claude Code 控制台", "开机自启", "检查更新", "重启本地中转", "退出本地中转"],
+            ["打开控制台", "开机自启", "检查更新", "重启本地中转", "退出本地中转"],
         )
+        self.assertNotIn("打开 Claude Code 控制台", menu_items_by_label)
         self.assertTrue(auto_start_checked)
         self.assertFalse(visible_open_item.default)
         self.assertTrue(default_item.default)

@@ -355,7 +355,6 @@ def run_local_proxy_server(
             restart_requested = _run_tray(
                 server,
                 codex_control_url,
-                claude_control_url,
                 active_tray_holder,
             )
         else:
@@ -377,7 +376,6 @@ def run_local_proxy_server(
 def _run_tray(
     server: LocalProxyServer,
     codex_control_url: str,
-    claude_control_url: str,
     tray_holder: dict[str, Any],
 ) -> bool:
     try:
@@ -397,9 +395,6 @@ def _run_tray(
 
     def open_codex_console(icon: Any = None, item: Any = None) -> None:
         webbrowser.open(codex_control_url)
-
-    def open_claude_console(icon: Any = None, item: Any = None) -> None:
-        webbrowser.open(claude_control_url)
 
     def auto_start_checked(item: Any = None) -> bool:
         try:
@@ -508,7 +503,6 @@ def _run_tray(
             visible=False,
         ),
         pystray.MenuItem("打开控制台", open_codex_console),
-        pystray.MenuItem("打开 Claude Code 控制台", open_claude_console),
         pystray.Menu.SEPARATOR,
     ]
     if auto_start_supported():
