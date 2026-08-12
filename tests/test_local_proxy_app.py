@@ -586,6 +586,22 @@ class CodexConfigTests(unittest.TestCase):
         self.assertIn("IconLocation", script)
         self.assertNotIn("codex_local_proxy_gui.py", script)
 
+    def test_app_icon_has_transparent_background(self) -> None:
+        from PIL import Image
+
+        icon = local_proxy_app.create_app_icon()
+        self.assertEqual(icon.mode, "RGBA")
+        self.assertEqual(icon.size, (64, 64))
+        alpha = icon.getchannel("A")
+        histogram = alpha.histogram()
+        opaque = sum(histogram[254:])
+        transparent = sum(histogram[:254])
+        self.assertGreater(transparent, 0)
+        self.assertGreater(opaque, 0)
+        # The transparent area must cover the outer frame, not just a sliver.
+        # The "CX" glyphs are opaque, the surrounding background is transparent.
+        self.assertGreater(transparent, opaque)
+
 
 if __name__ == "__main__":
     unittest.main()
