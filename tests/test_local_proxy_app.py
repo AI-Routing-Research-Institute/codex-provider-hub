@@ -587,20 +587,31 @@ class CodexConfigTests(unittest.TestCase):
         self.assertNotIn("codex_local_proxy_gui.py", script)
 
     def test_app_icon_has_transparent_background(self) -> None:
-        from PIL import Image
-
         icon = local_proxy_app.create_app_icon()
         self.assertEqual(icon.mode, "RGBA")
         self.assertEqual(icon.size, (64, 64))
         alpha = icon.getchannel("A")
         histogram = alpha.histogram()
         opaque = sum(histogram[254:])
-        transparent = sum(histogram[:254])
-        self.assertGreater(transparent, 0)
         self.assertGreater(opaque, 0)
         # The transparent area must cover the outer frame, not just a sliver.
         # The "CX" glyphs are opaque, the surrounding background is transparent.
-        self.assertGreater(transparent, opaque)
+        self.assertGreater(histogram[0], 64 * 64 // 4)
+        for corner in ((0, 0), (63, 0), (0, 63), (63, 63)):
+            self.assertEqual(alpha.getpixel(corner), 0)
+
+    def test_app_icon_glyphs_fill_canvas(self) -> None:
+        icon = local_proxy_app.create_app_icon()
+        bbox = icon.getchannel("A").getbbox()
+        self.assertIsNotNone(bbox)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        # Glyphs must fill most of the 64px canvas instead of shrinking to a
+        # small wordmark floating on the transparent background. Width is the
+        # binding dimension for "CX" (two caps side by side), so the height
+        # floor is intentionally lower to stay portable across font metrics.
+        self.assertGreaterEqual(width, 44)
+        self.assertGreaterEqual(height, 28)
 
 
 if __name__ == "__main__":
