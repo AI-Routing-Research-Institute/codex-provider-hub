@@ -65,4 +65,4 @@ PR #23 已合并并由 `v0.10.0` 发布，但对应的三份已发布功能说�
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/25
