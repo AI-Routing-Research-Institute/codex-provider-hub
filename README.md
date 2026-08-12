@@ -8,7 +8,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-4b5563?style=flat-square)
 ![README](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-c43d3d?style=flat-square)
-[![Release](https://img.shields.io/github/v/release/loongkkk/codex-provider-hub?style=flat-square)](https://github.com/loongkkk/codex-provider-hub/releases/latest)
+[![Release](https://img.shields.io/github/v/release/AI-Routing-Research-Institute/codex-provider-hub?style=flat-square)](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest)
 
 </div>
 
@@ -88,19 +88,19 @@ Provider Config ──► Probe Worker ──► SQLite ──► Status Web
 
 ### Windows 便携版（推荐）
 
-Windows x64 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，程序会启动一个同时支持 Codex 与 Claude Code 的本地中转服务：
+Windows x64 用户可以从 [GitHub Releases](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest) 下载便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，程序会启动一个同时支持 Codex 与 Claude Code 的本地中转服务：
 
-- [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
-- [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
+- [下载 `CodexLocalProxy-win-x64.exe`](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe)
+- [下载 SHA-256 校验文件](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe.sha256)
 
 下载后直接双击 EXE，程序会静默启动并常驻 Windows 通知区域，不会自动打开网页。右键托盘图标可分别打开 Codex 和 Claude Code 控制台，也可开启当前用户的“开机自启”。使用前需要先安装并配置 CC Switch，确保当前用户目录存在 `~/.cc-switch/cc-switch.db`。共享配置与 Codex/Claude Code 的独立状态均保存在 `~/.codex-local-proxy/`。
 
 ### macOS 便携版
 
-Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://github.com/loongkkk/codex-provider-hub/releases/latest) 下载 `.zip` 便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，程序会启动一个同时支持 Codex 与 Claude Code 的本地中转服务：
+Apple Silicon（M 系列芯片）Mac 用户可以从 [GitHub Releases](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest) 下载 `.zip` 便携版，无需安装 Python 或项目依赖。文件名暂时保留 `CodexLocalProxy`，程序会启动一个同时支持 Codex 与 Claude Code 的本地中转服务：
 
-- [下载 `CodexLocalProxy-macos-arm64.zip`](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip)
-- [下载 SHA-256 校验文件](https://github.com/loongkkk/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip.sha256)
+- [下载 `CodexLocalProxy-macos-arm64.zip`](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip)
+- [下载 SHA-256 校验文件](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip.sha256)
 
 使用步骤：
 
