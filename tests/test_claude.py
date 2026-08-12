@@ -156,6 +156,44 @@ class ClaudeCCSourceTests(unittest.TestCase):
 
 
 class ClaudeProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_403_is_retried(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(403, content=b"temporary forbidden")
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+                    b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                ),
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((claude_provider(),)),
+            client=upstream_client,
+            protocol_adapter=ClaudeMessagesProtocol(),
+            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0.1),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        try:
+            response = await client.post("/v1/messages", json={"model": "claude-test"})
+        finally:
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertIn("text_delta", response.text)
+
     async def test_successful_html_gateway_response_is_retried(self) -> None:
         attempts = 0
 

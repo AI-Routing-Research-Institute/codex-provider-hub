@@ -71,7 +71,7 @@ REQUEST_HEADERS_TO_REPLACE = HOP_BY_HOP_HEADERS | {
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
 MAX_CODEX_TURN_METADATA_CHARS = 32 * 1024
 RESPONSE_HEADERS_TO_DROP = HOP_BY_HOP_HEADERS | {"content-length"}
-RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {403, 500, 502, 503, 504}
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(authorization|api[-_ ]?key|access[-_ ]?token|token|secret)\b"
     r"[\"']?(\s*[:=]\s*)[\"']?(?:bearer\s+)?[^\s,;\"'}]+[\"']?"
@@ -214,6 +214,7 @@ class UsageStore:
                     session_key TEXT,
                     session_name TEXT NOT NULL,
                     model TEXT NOT NULL,
+                    reasoning_effort TEXT,
                     status_code INTEGER,
                     succeeded INTEGER NOT NULL,
                     outcome TEXT NOT NULL,
@@ -246,6 +247,14 @@ class UsageStore:
             }
             if "succeeded" not in columns:
                 connection.execute("ALTER TABLE request_usage ADD COLUMN succeeded INTEGER")
+            history_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(request_history)")
+            }
+            if "reasoning_effort" not in history_columns:
+                connection.execute(
+                    "ALTER TABLE request_history ADD COLUMN reasoning_effort TEXT"
+                )
             connection.execute(
                 """
                 UPDATE request_usage
@@ -310,12 +319,14 @@ class UsageStore:
         usage: TokenUsage | None = None,
         usage_id: int | None = None,
         finished_at: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         completed_at = time.time() if finished_at is None else float(finished_at)
         started = min(float(started_at), completed_at)
         safe_thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
         safe_session_name = str(session_name or "未知会话")[:240]
         safe_model = str(model or "unknown")[:240]
+        safe_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
         safe_summary = (
             _sanitize_retry_summary(error_summary) if error_summary else None
         )
@@ -328,6 +339,7 @@ class UsageStore:
             _session_key(safe_thread_id),
             safe_session_name,
             safe_model,
+            safe_reasoning_effort,
             None if status_code is None else int(status_code),
             int(bool(successful)),
             str(outcome)[:64],
@@ -349,11 +361,11 @@ class UsageStore:
                 """
                 INSERT INTO request_history (
                     started_at, finished_at, provider_id, thread_id, session_key,
-                    session_name, model, status_code, succeeded, outcome,
+                    session_name, model, reasoning_effort, status_code, succeeded, outcome,
                     duration_ms, retry_count, error_kind, error_summary, usage_id,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
                     reasoning_tokens, usage_source, estimate_method
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -432,7 +444,8 @@ class UsageStore:
             WITH items AS (
                 SELECT finished_at AS sort_at, id * 2 AS cursor_id,
                        started_at, finished_at, provider_id, thread_id,
-                       session_key, session_name, model, status_code, succeeded,
+                       session_key, session_name, model, reasoning_effort,
+                       status_code, succeeded,
                        outcome, duration_ms, retry_count, error_kind, error_summary,
                        input_tokens, output_tokens, total_tokens, cached_tokens,
                        reasoning_tokens, usage_source, estimate_method
@@ -441,7 +454,8 @@ class UsageStore:
                 SELECT recorded_at AS sort_at, id * 2 + 1 AS cursor_id,
                        recorded_at AS started_at, recorded_at AS finished_at,
                        provider_id, NULL AS thread_id, NULL AS session_key,
-                       '未知会话' AS session_name, model, status_code, succeeded,
+                       '未知会话' AS session_name, model, NULL AS reasoning_effort,
+                       status_code, succeeded,
                        CASE WHEN succeeded = 1 THEN 'succeeded' ELSE 'failed' END AS outcome,
                        NULL AS duration_ms, 0 AS retry_count, NULL AS error_kind,
                        NULL AS error_summary, input_tokens, output_tokens,
@@ -496,6 +510,7 @@ class UsageStore:
                     "session_key": row["session_key"],
                     "session_name": str(row["session_name"]),
                     "model": str(row["model"]),
+                    "reasoning_effort": row["reasoning_effort"],
                     "status_code": None if row["status_code"] is None else int(row["status_code"]),
                     "succeeded": bool(row["succeeded"]),
                     "outcome": str(row["outcome"]),
@@ -1154,11 +1169,32 @@ def _decode_json(payload: bytes) -> Any | None:
         return None
 
 
-def _request_model(payload: bytes) -> str:
+def _normalize_reasoning_effort(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized[:40] if normalized else None
+
+
+def _request_metadata(payload: bytes) -> tuple[str, str | None]:
     root = _decode_json(payload)
-    if isinstance(root, dict) and isinstance(root.get("model"), str):
-        return root["model"].strip()
-    return "unknown"
+    if not isinstance(root, dict):
+        return "unknown", None
+    model = root["model"].strip() if isinstance(root.get("model"), str) else "unknown"
+    reasoning = root.get("reasoning")
+    if isinstance(reasoning, dict):
+        nested_effort = _normalize_reasoning_effort(reasoning.get("effort"))
+        if nested_effort is not None:
+            return model, nested_effort
+    return model, _normalize_reasoning_effort(root.get("reasoning_effort"))
+
+
+def _request_model(payload: bytes) -> str:
+    return _request_metadata(payload)[0]
+
+
+def _request_reasoning_effort(payload: bytes) -> str | None:
+    return _request_metadata(payload)[1]
 
 
 def _usage_from_payload(root: dict[str, Any]) -> TokenUsage | None:
@@ -1364,6 +1400,7 @@ class ActiveRequest:
     thread_id: str | None
     started_wall_at: float
     model: str = "unknown"
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1626,7 +1663,12 @@ class ProviderRouter:
             )
             return snapshot
 
-    def update_request_model(self, snapshot: RouteSnapshot, model: str) -> None:
+    def update_request_model(
+        self,
+        snapshot: RouteSnapshot,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> None:
         with self._lock:
             detail = self._active_request_details.get(snapshot.request_id)
             if detail is None:
@@ -1637,6 +1679,7 @@ class ProviderRouter:
                 thread_id=detail.thread_id,
                 started_wall_at=detail.started_wall_at,
                 model=str(model or "unknown")[:240],
+                reasoning_effort=_normalize_reasoning_effort(reasoning_effort),
             )
 
     def session_provider_override(self, thread_id: str | None) -> str | None:
@@ -1699,6 +1742,7 @@ class ProviderRouter:
                     thread_id=detail.thread_id,
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
+                    reasoning_effort=detail.reasoning_effort,
                 )
 
             progress = self._retrying.get(snapshot.request_id)
@@ -2667,6 +2711,7 @@ def _public_requests(
                     "session_name": session_name,
                     "route_provider_id": route_provider_id,
                     "model": detail.model,
+                    "reasoning_effort": detail.reasoning_effort,
                     "status_code": None,
                     "succeeded": None,
                     "outcome": "retrying" if retry is not None else "receiving",
@@ -2874,6 +2919,7 @@ def _record_request_event(
     error_summary: str | None = None,
     usage: TokenUsage | None = None,
     usage_id: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> None:
     if store is None:
         return
@@ -2893,6 +2939,7 @@ def _record_request_event(
             thread_id=thread_id,
             session_name=session_name,
             model=model,
+            reasoning_effort=reasoning_effort,
             status_code=status_code,
             successful=successful,
             outcome=outcome,
@@ -2995,8 +3042,8 @@ async def _forward_request(
             status_code=413,
             content={"error": {"message": "请求体超过本地中转允许的大小"}},
         )
-    model = _request_model(request_body)
-    router.update_request_model(snapshot, model)
+    model, reasoning_effort = _request_metadata(request_body)
+    router.update_request_model(snapshot, model, reasoning_effort)
     upstream_response: httpx.Response | None = None
     first_chunk: bytes | None = None
     stream: AsyncIterator[bytes] | None = None
@@ -3057,18 +3104,11 @@ async def _forward_request(
                 if upstream_response.is_stream_consumed:
                     first_chunk = upstream_response.content or None
                     stream = _empty_async_iterator()
-                    response_body_decoded = (
-                        upstream_response.status_code == 400
-                        and retry_policy.enabled
-                        and "content-encoding" in upstream_response.headers
-                    )
+                    response_body_decoded = "content-encoding" in upstream_response.headers
                 else:
-                    if (
-                        upstream_response.status_code == 400
-                        and retry_policy.enabled
-                    ):
+                    response_body_decoded = "content-encoding" in upstream_response.headers
+                    if response_body_decoded:
                         stream = upstream_response.aiter_bytes()
-                        response_body_decoded = True
                     else:
                         stream = upstream_response.aiter_raw()
                     try:
@@ -3231,6 +3271,7 @@ async def _forward_request(
             thread_id=thread_id,
             session_name_resolver=session_name_resolver,
             model=model,
+            reasoning_effort=reasoning_effort,
             status_code=502,
             successful=False,
             outcome="exhausted",
@@ -3370,6 +3411,7 @@ async def _forward_request(
                     thread_id=thread_id,
                     session_name_resolver=session_name_resolver,
                     model=usage_capture.model if usage_capture is not None else model,
+                    reasoning_effort=reasoning_effort,
                     status_code=upstream_response.status_code,
                     successful=successful,
                     outcome="succeeded" if successful else "failed",

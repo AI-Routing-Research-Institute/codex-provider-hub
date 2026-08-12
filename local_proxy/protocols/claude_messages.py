@@ -21,7 +21,7 @@ _HOP_BY_HOP_HEADERS = {
 
 class ClaudeMessagesProtocol:
     name = "anthropic_messages"
-    retryable_status_codes = frozenset({408, 429, 500, 502, 503, 504, 529})
+    retryable_status_codes = frozenset({403, 408, 429, 500, 502, 503, 504, 529})
 
     def upstream_url(self, provider: Any, upstream_path: str) -> str:
         base_url = provider.base_url.rstrip("/")

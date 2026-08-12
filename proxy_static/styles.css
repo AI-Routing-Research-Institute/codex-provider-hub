@@ -816,11 +816,12 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .request-filters input { padding: 0 10px 0 34px; }
 .request-filters select:focus-visible, .request-filters input:focus { border-color: var(--teal); outline: 2px solid var(--teal-soft); }
 .request-search { position: relative; }
-.request-table-shell { --request-columns: 76px 128px minmax(220px, 1.45fr) minmax(150px, .9fr) 120px 72px 90px minmax(90px, .7fr); min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
-.request-table-header, .request-row { min-width: 1060px; display: grid; grid-template-columns: var(--request-columns); align-items: center; column-gap: 12px; }
-.request-table-header { z-index: 1; padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--surface-soft); color: var(--muted); font-size: 11px; font-weight: 700; }
-.request-table-header span:nth-child(7) { text-align: right; }
-.request-list { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-color: var(--line-strong) transparent; scrollbar-width: thin; }
+.request-table-shell { --request-columns: 76px 112px minmax(210px, 1.45fr) minmax(150px, .9fr) minmax(124px, .8fr) 86px 72px 92px minmax(112px, .7fr); min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-color: var(--line-strong) transparent; scrollbar-width: thin; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.request-table-header, .request-row { min-width: 1190px; display: grid; grid-template-columns: var(--request-columns); align-items: center; column-gap: 16px; }
+.request-table-header { position: sticky; top: 0; z-index: 1; padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--surface-soft); color: var(--muted); font-size: 11px; font-weight: 700; }
+.request-column-status, .request-column-time, .request-column-reasoning, .request-column-result { text-align: center; }
+.request-column-duration, .request-column-token { text-align: right; }
+.request-list { min-width: 0; }
 .request-row { position: relative; min-height: 50px; padding: 6px 14px; border-bottom: 1px solid var(--line); color: var(--text); font-size: 11px; transition: background-color 100ms ease; }
 .request-row:nth-child(even) { background: color-mix(in srgb, var(--surface-soft) 44%, transparent); }
 .request-row:hover { background: var(--teal-soft); }
@@ -831,7 +832,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .request-row.failed::before { background: var(--red); }
 .request-row.cancelled, .request-row.cancelled:hover { background: color-mix(in srgb, var(--amber-soft) 58%, var(--surface)); }
 .request-row.cancelled::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 0; width: 3px; border-radius: 0 3px 3px 0; background: var(--amber); }
-.request-state { width: fit-content; display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 999px; background: var(--surface-soft); font-size: 10px; font-weight: 700; }
+.request-state { width: fit-content; display: inline-flex; align-items: center; justify-self: center; gap: 5px; padding: 3px 7px; border-radius: 999px; background: var(--surface-soft); font-size: 10px; font-weight: 700; }
 .request-state-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
 .request-row.running .request-state { color: var(--green); }
 .request-row.running .request-state-dot { background: var(--green); animation: request-pulse 1.5s ease-in-out infinite; }
@@ -844,15 +845,18 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 @keyframes request-pulse { 50% { opacity: .35; transform: scale(.82); } }
 .request-time, .request-duration, .request-token { font-variant-numeric: tabular-nums; }
 .request-time, .request-duration { color: var(--muted); font-size: 10px; }
+.request-time, .request-reasoning { text-align: center; }
+.request-duration { text-align: right; }
 .request-session, .request-model, .request-result { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .request-session { font-size: 12px; font-weight: 700; }
 .request-provider-cell { min-width: 0; display: grid; }
 .request-provider-actual { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .request-model { color: var(--muted); }
+.request-reasoning { overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .request-token { color: var(--teal); font-weight: 700; text-align: right; }
 .request-row.failed .request-token { color: var(--red); }
 .request-row.cancelled .request-token { color: var(--amber); }
-.request-result { width: fit-content; max-width: 100%; padding: 3px 7px; overflow: hidden; border-radius: 999px; background: var(--surface-soft); color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.request-result { width: fit-content; max-width: 100%; padding: 3px 7px; overflow: hidden; justify-self: center; border-radius: 999px; background: var(--surface-soft); color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .request-row.succeeded .request-result { background: var(--teal-soft); color: var(--teal); font-weight: 700; }
 .request-row.failed .request-result { background: var(--danger-soft); color: var(--red); }
 .request-row.cancelled .request-result { background: var(--amber-soft); color: var(--amber); }
@@ -997,7 +1001,6 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
   .routing-panel { overflow: visible; border-top: 1px solid var(--line); }
   .settings-view { overflow: visible; }
   .requests-view { min-height: 680px; }
-  .request-table-shell { overflow-x: auto; }
 }
 
 @media (max-height: 760px) and (min-width: 861px) {
