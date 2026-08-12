@@ -12,9 +12,12 @@ from scripts.team_policy import (
     parse_change_record,
     validate_branch_name,
     validate_change_record,
+    validate_commit_identities,
     validate_commit_message,
     validate_staged_paths,
     render_release_notes,
+    _coauthor_names,
+    _extract_name,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -167,6 +170,47 @@ class GitPolicyTests(unittest.TestCase):
                 PolicyError, "禁止提交"
             ):
                 validate_staged_paths([path])
+
+    def test_accepts_whitelisted_commit_identities(self) -> None:
+        validate_commit_identities(
+            [("author", "moye12325"), ("committer", "GitHub")]
+        )
+        validate_commit_identities(
+            [
+                ("author", "loongkkk"),
+                ("committer", "LOONGKKK\\loong"),
+                ("co-author", "Gao Yiheng"),
+            ]
+        )
+
+    def test_rejects_any_identity_outside_whitelist(self) -> None:
+        with self.assertRaisesRegex(PolicyError, "BY250013"):
+            validate_commit_identities(
+                [("author", "moye12325"), ("committer", "BY250013")]
+            )
+        with self.assertRaisesRegex(PolicyError, "BY250013"):
+            validate_commit_identities(
+                [
+                    ("author", "moye12325"),
+                    ("committer", "moye12325"),
+                    ("co-author", "BY250013"),
+                ]
+            )
+
+    def test_extracts_name_and_coauthor_names(self) -> None:
+        self.assertEqual(
+            _extract_name("moye12325 <gengkang12325@gmail.com> 1700000000 +0800"),
+            "moye12325",
+        )
+        self.assertEqual(_extract_name("LOONGKKK\\loong <loongk@vip.qq.com>"), "LOONGKKK\\loong")
+        self.assertEqual(
+            _coauthor_names(
+                "✨ feat(policy): 门禁\n\n功能修改\n- x\n\n"
+                "Co-authored-by: Gao Yiheng <gaoyiheng2021@gmail.com>\n"
+                "Co-authored-by: BY250013 <gkk@originqc.com>\n"
+            ),
+            ["Gao Yiheng", "BY250013"],
+        )
 
 
 class RepositoryGovernanceAssetTests(unittest.TestCase):
