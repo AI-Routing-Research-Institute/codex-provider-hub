@@ -48,6 +48,16 @@ BLOCKED_PATH_PATTERNS = (
     re.compile(r"\.(?:sqlite3?|db)(?:-|$)"),
     re.compile(r"\.(?:pem|key|p12|pfx)$"),
 )
+ALLOWED_COMMIT_NAMES = frozenset(
+    (
+        "moye12325",
+        "loongkkk",
+        "LOONGKKK\\loong",
+        "Gao Yiheng",
+        "GitHub",
+    )
+)
+COAUTHOR_RE = re.compile(r"(?im)^\s*co-authored-by:\s*([^<]+?)\s*<[^>]+>\s*$")
 
 
 class PolicyError(RuntimeError):
@@ -350,6 +360,31 @@ def validate_staged_paths(paths: list[str]) -> None:
             raise PolicyError(f"禁止提交生成产物、敏感文件或本地状态：{path}")
 
 
+def _extract_name(ident: str) -> str:
+    name = ident.split("<", 1)[0].strip()
+    if not name:
+        raise PolicyError(f"无法从身份中解析用户名：{ident!r}")
+    return name
+
+
+def _coauthor_names(message: str) -> list[str]:
+    return [match.group(1).strip() for match in COAUTHOR_RE.finditer(message)]
+
+
+def validate_commit_identities(identities: list[tuple[str, str]]) -> None:
+    disallowed = [
+        (role, name)
+        for role, name in identities
+        if name not in ALLOWED_COMMIT_NAMES
+    ]
+    if disallowed:
+        detail = "；".join(f"{role} {name}" for role, name in disallowed)
+        raise PolicyError(
+            f"提交身份不在白名单中，拒绝提交：{detail}。"
+            "仅允许项目已登记的提交者用户名"
+        )
+
+
 def run_git(args: list[str], *, check: bool = True) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -399,10 +434,19 @@ def validate_pr(base: str, head: str) -> None:
     _require_change_record(paths, records)
     for record in records:
         validate_change_record(record, required_status="verified")
-    messages = run_git(["log", "--format=%B%x00", f"{base}..{head}"])
-    for message in (part.strip() for part in messages.split("\x00")):
-        if message:
-            validate_commit_message(message)
+    messages = run_git(["log", "--format=%an%x1f%cn%x1f%B%x00", f"{base}..{head}"])
+    for entry in (part for part in messages.split("\x00") if part.strip()):
+        author_name, committer_name, message = entry.split("\x1f", 2)
+        message = message.strip()
+        if not message:
+            continue
+        validate_commit_message(message)
+        identities = [
+            ("author", author_name.strip()),
+            ("committer", committer_name.strip()),
+        ]
+        identities.extend(("co-author", name) for name in _coauthor_names(message))
+        validate_commit_identities(identities)
 
 
 def run_full_verification() -> None:
@@ -426,10 +470,27 @@ def command_install_hooks() -> None:
 
 def command_pre_commit() -> None:
     validate_branch_name(run_git(["branch", "--show-current"]))
+    validate_commit_identities(
+        [
+            ("author", _extract_name(run_git(["var", "GIT_AUTHOR_IDENT"]))),
+            ("committer", _extract_name(run_git(["var", "GIT_COMMITTER_IDENT"]))),
+        ]
+    )
     paths = _paths_from_git(["diff", "--cached", "--name-only"])
     validate_staged_paths(paths)
     records = [parse_change_record(Path(path)) for path in paths if path.startswith("docs/changes/") and path.endswith(".md") and not path.endswith("template.md")]
     _require_change_record(paths, records)
+
+
+def command_commit_msg(path: str) -> None:
+    message = Path(path).read_text(encoding="utf-8")
+    validate_commit_message(message)
+    identities = [
+        ("author", _extract_name(run_git(["var", "GIT_AUTHOR_IDENT"]))),
+        ("committer", _extract_name(run_git(["var", "GIT_COMMITTER_IDENT"]))),
+    ]
+    identities.extend(("co-author", name) for name in _coauthor_names(message))
+    validate_commit_identities(identities)
 
 
 def command_pre_push(stdin: str) -> None:
@@ -479,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "pre-commit":
             command_pre_commit()
         elif args.command == "commit-msg":
-            validate_commit_message(Path(args.path).read_text(encoding="utf-8"))
+            command_commit_msg(args.path)
         elif args.command == "pre-push":
             command_pre_push(sys.stdin.read())
         elif args.command == "validate-pr":
