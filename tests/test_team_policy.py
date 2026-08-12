@@ -298,17 +298,15 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
         )
         rules = {rule["type"]: rule for rule in payload["rules"]}
         self.assertIn("deletion", rules)
-        self.assertIn("non_fast_forward", rules)
+        self.assertNotIn("non_fast_forward", rules)
+        self.assertNotIn("required_status_checks", rules)
         self.assertEqual(
             rules["pull_request"]["parameters"]["required_approving_review_count"],
             0,
         )
-        checks = rules["required_status_checks"]["parameters"][
-            "required_status_checks"
-        ]
         self.assertEqual(
-            {check["context"] for check in checks},
-            {"policy", "tests-windows", "tests-macos"},
+            set(payload["rules"][i]["type"] for i in range(len(payload["rules"]))),
+            {"deletion", "pull_request"},
         )
 
     def test_auto_release_workflow_is_serialized_and_dispatches_both_platforms(self) -> None:
