@@ -481,9 +481,8 @@ def create_app_icon() -> Any:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as exc:
         raise RuntimeError("图标生成需要安装 Pillow") from exc
-    image = Image.new("RGBA", (64, 64), "#146c73")
+    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((2, 2, 62, 62), radius=12, fill="#146c73")
     # "segoeuib.ttf" only resolves on Windows; pick a platform-appropriate
     # bold font so the tray/bundle icon keeps crisp glyphs on every OS.
     font_candidates = (
@@ -501,10 +500,10 @@ def create_app_icon() -> Any:
             continue
     if font is None:
         font = ImageFont.load_default()
-    box = draw.textbbox((0, 0), "CX", font=font, stroke_width=1)
+    box = draw.textbbox((0, 0), "CX", font=font, stroke_width=2)
     x = (64 - (box[2] - box[0])) / 2
     y = (64 - (box[3] - box[1])) / 2 - box[1]
-    draw.text((x, y), "CX", font=font, fill="white", stroke_width=1)
+    draw.text((x, y), "CX", font=font, fill="white", stroke_fill="#146c73", stroke_width=2)
     return image
 
 
