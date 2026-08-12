@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -353,7 +354,10 @@ def run_local_proxy_server(
     finally:
         if started:
             server.stop()
-    if restart_requested:
+    update_apply_path = active_tray_holder.get("update_apply_path")
+    if update_apply_path:
+        launch_update_helper(Path(update_apply_path))
+    elif restart_requested:
         launch_replacement_process()
     return 0
 
@@ -371,6 +375,13 @@ def _run_tray(
 
     image = create_app_icon()
     restart_requested = threading.Event()
+    update_state: dict[str, Any] = {"info": None, "busy": False}
+
+    def _notify(icon: Any, message: str) -> None:
+        try:
+            icon.notify(message, "Codex 本地中转")
+        except (AttributeError, NotImplementedError, OSError):
+            pass
 
     def open_codex_console(icon: Any = None, item: Any = None) -> None:
         webbrowser.open(codex_control_url)
@@ -410,6 +421,73 @@ def _run_tray(
         server.request_stop()
         icon.stop()
 
+    def update_menu_text(item: Any = None) -> str:
+        if update_state["busy"]:
+            return "正在更新…"
+        info = update_state["info"]
+        if info is not None and info.has_update:
+            return f"更新到 {info.latest_version}"
+        return "检查更新"
+
+    def update_menu_enabled(item: Any = None) -> bool:
+        return not update_state["busy"]
+
+    def _run_update_check(icon: Any, *, announce: bool) -> None:
+        from local_proxy import updater
+
+        try:
+            info = updater.check_for_update(APP_VERSION)
+        except updater.UpdateError as exc:
+            if announce:
+                _notify(icon, f"检查更新失败：{exc}")
+            return
+        update_state["info"] = info
+        icon.update_menu()
+        if info.has_update:
+            _notify(icon, f"发现新版本 {info.latest_version}，点击托盘菜单更新。")
+        elif announce:
+            _notify(icon, "当前已是最新版本。")
+
+    def _run_update_apply(icon: Any) -> None:
+        from local_proxy import updater
+
+        info = update_state["info"]
+        if info is None or not info.has_update:
+            return
+        if not update_supported():
+            webbrowser.open(info.release_url)
+            _notify(icon, "当前平台请手动下载安装最新版本。")
+            return
+        update_state["busy"] = True
+        icon.update_menu()
+        try:
+            new_executable = updater.download_asset(info, updates_directory())
+        except updater.UpdateError as exc:
+            update_state["busy"] = False
+            icon.update_menu()
+            _notify(icon, f"更新失败：{exc}")
+            return
+        tray_holder["update_apply_path"] = str(new_executable)
+        _notify(icon, "更新已就绪，正在重启到新版本…")
+        server.request_stop()
+        icon.stop()
+
+    def on_update_clicked(icon: Any, item: Any = None) -> None:
+        if update_state["busy"]:
+            return
+        info = update_state["info"]
+        if info is not None and info.has_update:
+            threading.Thread(
+                target=_run_update_apply, args=(icon,), daemon=True
+            ).start()
+        else:
+            threading.Thread(
+                target=_run_update_check,
+                args=(icon,),
+                kwargs={"announce": True},
+                daemon=True,
+            ).start()
+
     menu_items = [
         pystray.MenuItem(
             "默认打开 Codex 控制台",
@@ -434,6 +512,12 @@ def _run_tray(
         )
     menu_items.extend(
         (
+            pystray.MenuItem(
+                update_menu_text,
+                on_update_clicked,
+                enabled=update_menu_enabled,
+            ),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("重启本地中转", restart_proxy),
             pystray.MenuItem("退出本地中转", exit_proxy),
         )
@@ -446,6 +530,12 @@ def _run_tray(
         menu=pystray.Menu(*menu_items),
     )
     tray_holder["icon"] = icon
+
+    def _startup_check() -> None:
+        time.sleep(3)
+        _run_update_check(icon, announce=False)
+
+    threading.Thread(target=_startup_check, daemon=True).start()
     icon.run()
     return restart_requested.is_set()
 
@@ -474,6 +564,102 @@ def launch_replacement_process() -> None:
     else:
         options["start_new_session"] = True
     subprocess.Popen(command, **options)
+
+
+def update_supported() -> bool:
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def updates_directory() -> Path:
+    return data_directory() / "updates"
+
+
+def _spawn_detached(command: list[str], working_directory: Path) -> None:
+    options: dict[str, Any] = {
+        "cwd": str(working_directory),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        options["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+        )
+    else:
+        options["start_new_session"] = True
+    subprocess.Popen(command, **options)
+
+
+def _process_alive(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            return False
+        return True
+    import ctypes
+
+    still_active = 259
+    query_limited = 0x1000
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(query_limited, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def launch_update_helper(new_executable: Path) -> None:
+    """Hand the running new-version binary the swap-then-relaunch job."""
+
+    target = Path(sys.executable).resolve()
+    command = [
+        str(new_executable),
+        "--finalize-update",
+        "--target",
+        str(target),
+        "--wait-pid",
+        str(os.getpid()),
+    ]
+    _spawn_detached(command, new_executable.parent)
+
+
+def finalize_update(target: Path, wait_pid: int) -> int:
+    """Wait for the old process to exit, swap in this binary, then relaunch it."""
+
+    deadline = time.time() + 60
+    while wait_pid > 0 and time.time() < deadline and _process_alive(wait_pid):
+        time.sleep(0.5)
+    source = Path(sys.executable).resolve()
+    target = target.resolve()
+    backup = target.with_name(target.name + ".bak")
+    try:
+        if target.exists():
+            shutil.copy2(target, backup)
+        shutil.copy2(source, target)
+    except OSError as exc:
+        if backup.exists():
+            try:
+                shutil.copy2(backup, target)
+            except OSError:
+                pass
+        show_startup_error(f"更新失败，已保留原版本：{exc}")
+        _relaunch_target(target)
+        return 1
+    _relaunch_target(target)
+    backup.unlink(missing_ok=True)
+    return 0
+
+
+def _relaunch_target(target: Path) -> None:
+    _spawn_detached([str(target), "--no-browser", "--tray"], target.parent)
 
 
 def create_app_icon() -> Any:
@@ -548,8 +734,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tray", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--write-icon", type=Path)
+    parser.add_argument("--finalize-update", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--target", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--wait-pid", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=APP_VERSION)
     args = parser.parse_args(argv)
+    if args.finalize_update:
+        if args.target is None:
+            print("--finalize-update 需要 --target", file=sys.stderr)
+            return 1
+        return finalize_update(args.target, args.wait_pid or 0)
     if args.write_icon is not None:
         try:
             write_app_icon(args.write_icon)
