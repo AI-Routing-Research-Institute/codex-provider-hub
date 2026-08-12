@@ -71,7 +71,7 @@ REQUEST_HEADERS_TO_REPLACE = HOP_BY_HOP_HEADERS | {
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
 MAX_CODEX_TURN_METADATA_CHARS = 32 * 1024
 RESPONSE_HEADERS_TO_DROP = HOP_BY_HOP_HEADERS | {"content-length"}
-RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {403, 500, 502, 503, 504}
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(authorization|api[-_ ]?key|access[-_ ]?token|token|secret)\b"
     r"[\"']?(\s*[:=]\s*)[\"']?(?:bearer\s+)?[^\s,;\"'}]+[\"']?"
@@ -3057,18 +3057,11 @@ async def _forward_request(
                 if upstream_response.is_stream_consumed:
                     first_chunk = upstream_response.content or None
                     stream = _empty_async_iterator()
-                    response_body_decoded = (
-                        upstream_response.status_code == 400
-                        and retry_policy.enabled
-                        and "content-encoding" in upstream_response.headers
-                    )
+                    response_body_decoded = "content-encoding" in upstream_response.headers
                 else:
-                    if (
-                        upstream_response.status_code == 400
-                        and retry_policy.enabled
-                    ):
+                    response_body_decoded = "content-encoding" in upstream_response.headers
+                    if response_body_decoded:
                         stream = upstream_response.aiter_bytes()
-                        response_body_decoded = True
                     else:
                         stream = upstream_response.aiter_raw()
                     try:

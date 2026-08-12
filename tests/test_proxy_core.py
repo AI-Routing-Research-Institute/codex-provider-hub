@@ -1491,6 +1491,72 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content, b"upstream unavailable")
         self.assertEqual(attempts, 1)
 
+    async def test_http_403_is_retried_before_reaching_client(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(403, content=b"temporary forbidden")
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().last_retry_kind, "http_403")
+
+    async def test_http_403_exhausts_configured_attempts(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(403, content=b"still forbidden")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().total_retries, 1)
+        self.assertEqual(router.status().last_error, "http_403")
+
     async def test_retry_policy_control_api_validates_updates_and_hides_secrets(self) -> None:
         changed: list[RetryPolicy] = []
         store = RetryPolicyStore()
@@ -2308,6 +2374,49 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("content-encoding", response.headers)
         self.assertEqual(attempts, 1)
         self.assertEqual(router.status().total_retries, 0)
+
+    async def test_gzip_http_403_is_decoded_when_retry_is_disabled(self) -> None:
+        attempts = 0
+        body = b"<html><title>Just a moment...</title></html>"
+        compressed_body = gzip.compress(body)
+
+        class GzipForbidden(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield compressed_body
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                403,
+                headers={
+                    "content-encoding": "gzip",
+                    "content-type": "text/html; charset=utf-8",
+                    "cf-mitigated": "challenge",
+                },
+                stream=GzipForbidden(),
+            )
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(enabled=False),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.content, body)
+        self.assertNotIn("content-encoding", response.headers)
+        self.assertEqual(response.headers["cf-mitigated"], "challenge")
+        self.assertEqual(attempts, 1)
 
     async def test_http_400_inspection_preserves_bytes_past_limit(self) -> None:
         first_chunk = b"a" * (RETRY_ERROR_BODY_BYTES - 4)
