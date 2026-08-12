@@ -2,7 +2,7 @@
 id = "2026-08-12-ruleset-policy-sync"
 type = "chore"
 release_bump = "none"
-status = "implemented"
+status = "verified"
 +++
 
 # 同步 Ruleset 校验与门禁配置
