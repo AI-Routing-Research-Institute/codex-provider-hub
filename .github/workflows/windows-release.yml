@@ -66,6 +66,20 @@ jobs:
         shell: pwsh
         run: python -m unittest discover -s tests -p "test_*.py"
 
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check proxy_static/app.js
+          node --check provider_status/static/app.js
+
+      - name: Run JavaScript tests
+        shell: pwsh
+        run: |
+          Get-ChildItem tests -Filter *.test.js | ForEach-Object {
+            node --test $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Build Windows executable
         shell: pwsh
         run: |
