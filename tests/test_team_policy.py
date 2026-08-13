@@ -272,19 +272,16 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
         ):
             self.assertIn(f"## {section}", template)
 
-    def test_pull_request_workflow_has_stable_required_jobs(self) -> None:
-        workflow = (ROOT / ".github/workflows/pr-policy.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("pull_request:", workflow)
-        self.assertIn("contents: read", workflow)
-        for job in ("policy:", "tests-windows:", "tests-macos:"):
-            self.assertIn(job, workflow)
-        self.assertIn("validate-pr", workflow)
-        self.assertIn("python -m unittest discover", workflow)
-        self.assertIn("node --check proxy_static/app.js", workflow)
-        self.assertIn("node --check provider_status/static/app.js", workflow)
-        self.assertNotIn("pull_request_target", workflow)
+    def test_release_workflows_run_full_test_suite_on_tag(self) -> None:
+        for name in ("windows-release.yml", "macos-release.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("push:", workflow)
+            self.assertIn("tags:", workflow)
+            self.assertIn("python -m unittest discover", workflow)
+            self.assertIn("node --check proxy_static/app.js", workflow)
+            self.assertIn("node --check provider_status/static/app.js", workflow)
 
     def test_ruleset_payload_protects_main_without_approvals(self) -> None:
         payload = build_ruleset_payload()

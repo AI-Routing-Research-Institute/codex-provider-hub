@@ -66,6 +66,19 @@ jobs:
         shell: bash
         run: python -m unittest discover -s tests -p "test_*.py"
 
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          node --check proxy_static/app.js
+          node --check provider_status/static/app.js
+
+      - name: Run JavaScript tests
+        shell: bash
+        run: |
+          for test_file in tests/*.test.js; do
+            node --test "$test_file"
+          done
+
       - name: Build macOS app bundle
         shell: bash
         run: |
