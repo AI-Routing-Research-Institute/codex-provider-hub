@@ -2,7 +2,7 @@
 id = "2026-08-13-ci-trigger-on-release-only"
 type = "chore"
 release_bump = "none"
-status = "implemented"
+status = "verified"
 +++
 
 # CI 仅在 release/tag 时触发
