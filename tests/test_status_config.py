@@ -319,6 +319,28 @@ class StatusConfigTests(unittest.TestCase):
                 resolver=rebinding_resolver,
             )
 
+    def test_allows_temporary_dns_resolution_failure_at_startup(self) -> None:
+        def unavailable_resolver(
+            host: str, port: int, *args: object, **kwargs: object
+        ) -> list[tuple]:
+            del host, port, args, kwargs
+            raise socket.gaierror(socket.EAI_NONAME, "name not known")
+
+        config = self.load_text(
+            service_config(provider_block()),
+            resolver=unavailable_resolver,
+        )
+
+        self.assertEqual(config.providers[0].provider_id, "provider-alpha")
+
+    def test_allows_empty_dns_answer_at_startup(self) -> None:
+        config = self.load_text(
+            service_config(provider_block()),
+            resolver=lambda *args, **kwargs: [],
+        )
+
+        self.assertEqual(config.providers[0].base_url, "https://alpha.example.com/v1")
+
     def test_rejects_duplicate_provider_id(self) -> None:
         text = service_config(
             provider_block(),
