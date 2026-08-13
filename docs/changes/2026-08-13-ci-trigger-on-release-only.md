@@ -48,7 +48,8 @@ PR 阶段不再运行 CI 测试;合并门槛只保留"无代码冲突"与 PR 流
 - 删除 `.github/workflows/pr-policy.yml`
 - 修改 `.github/workflows/windows-release.yml`、`.github/workflows/macos-release.yml`:补入 JS 语法检查与 JS 测试步骤
 - 修改 `.githooks/commit-msg`、`.githooks/pre-commit`、`.githooks/pre-push`:Python 解释器检测改为实测版本
-- 规则集 `agent-delivery-main`(id 20543407):移除 `required_status_checks` 规则
+- 规则集 `agent-delivery-main`(id 20543407):按 `team_policy.py build_ruleset_payload()` 官方定义重置,仅含 deletion 与 pull_request(无 required_status_checks,PR 无冲突即可合并)
+- 更新 `tests/test_team_policy.py`:移除对 pr-policy.yml 的引用,新增 release 工作流 tag 触发全量测试断言
 
 ## 验证结果
 
