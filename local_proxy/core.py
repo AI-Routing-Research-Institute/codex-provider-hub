@@ -1718,14 +1718,30 @@ class ProviderRouter:
     ) -> tuple[RouteSnapshot, bool]:
         with self._lock:
             detail = self._active_request_details.get(snapshot.request_id)
-            override_id = snapshot.session_provider_id
+            override_id = (
+                self._session_provider_overrides.get(detail.thread_id or "")
+                if detail is not None
+                else snapshot.session_provider_id
+            )
             provider = (
                 self._providers.get(override_id)
                 if override_id is not None
                 else self.current_provider()
             )
-            if provider is None or provider.provider_id == snapshot.provider.provider_id:
+            if provider is None:
                 return snapshot, False
+
+            if provider.provider_id == snapshot.provider.provider_id:
+                return (
+                    RouteSnapshot(
+                        request_id=snapshot.request_id,
+                        provider=provider,
+                        started_at=snapshot.started_at,
+                        started_wall_at=snapshot.started_wall_at,
+                        session_provider_id=override_id,
+                    ),
+                    False,
+                )
 
             previous_id = snapshot.provider.provider_id
             remaining = max(0, self._active.get(previous_id, 1) - 1)
@@ -1762,7 +1778,7 @@ class ProviderRouter:
                     provider=provider,
                     started_at=snapshot.started_at,
                     started_wall_at=snapshot.started_wall_at,
-                    session_provider_id=snapshot.session_provider_id,
+                    session_provider_id=override_id,
                 ),
                 True,
             )
