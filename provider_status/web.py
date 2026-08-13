@@ -364,9 +364,22 @@ def _provider_sort_key(
     if streak > 0:
         return (0, -streak, 0.0, original_index)
 
-    last_success = _parse_datetime(model.get("last_success_at"))
-    if last_success is not None:
-        return (1, 0, -last_success.timestamp(), original_index)
+    provider_id = str(provider.get("provider_id"))
+    success_times = [
+        success_at
+        for success_at in (
+            _parse_datetime(model.get("last_success_at")),
+            _manual_probe_last_success_at(
+                provider_id,
+                model_name,
+                manual_jobs,
+                manual_histories,
+            ),
+        )
+        if success_at is not None
+    ]
+    if success_times:
+        return (1, 0, -max(success_times).timestamp(), original_index)
     return (2, 0, 0.0, original_index)
 
 
@@ -385,7 +398,7 @@ def _manual_probe_sort_key(
     )
     if latest_success is None:
         return (2, 0, 0.0, original_index)
-    return (2, 0, -latest_success.timestamp(), original_index)
+    return (1, 0, -latest_success.timestamp(), original_index)
 
 
 def _manual_probe_last_success_at(
