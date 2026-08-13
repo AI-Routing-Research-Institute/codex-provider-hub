@@ -113,7 +113,12 @@ def load_config(
         provider_ids.add(provider_id)
 
         base_url = _required_string(raw_provider, "base_url", provider_id)
-        _validate_public_https_endpoint(base_url, provider_id, active_resolver)
+        validate_public_https_endpoint(
+            base_url,
+            provider_id,
+            active_resolver,
+            allow_resolution_failure=True,
+        )
         healthy_interval_seconds = _positive_number(
             raw_provider,
             "healthy_interval_seconds",
@@ -128,11 +133,12 @@ def load_config(
         model_clients = _model_clients(raw_provider, provider_id, models)
         claude_base_url = _optional_string(raw_provider, "claude_base_url")
         if claude_base_url is not None:
-            _validate_public_https_endpoint(
+            validate_public_https_endpoint(
                 claude_base_url,
                 provider_id,
                 active_resolver,
                 field_name="claude_base_url",
+                allow_resolution_failure=True,
             )
         if (
             any(client == PROBE_CLIENT_CLAUDE for _, client in model_clients)
@@ -402,12 +408,13 @@ def _timeout_seconds(
     return value
 
 
-def _validate_public_https_endpoint(
+def validate_public_https_endpoint(
     base_url: str,
     provider_id: str,
     resolver: Resolver,
     *,
     field_name: str = "base_url",
+    allow_resolution_failure: bool = False,
 ) -> None:
     error_prefix = (
         f"provider {provider_id!r} {field_name} must be a public HTTPS endpoint"
@@ -444,10 +451,18 @@ def _validate_public_https_endpoint(
     try:
         answers = resolver(hostname, port, type=socket.SOCK_STREAM)
         addresses = tuple(_resolved_addresses(answers))
-    except (OSError, TypeError, ValueError) as exc:
+    except OSError as exc:
+        if allow_resolution_failure:
+            return
         raise ValueError(f"{error_prefix}: hostname resolution failed") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{error_prefix}: invalid hostname resolution result") from exc
 
-    if not addresses or any(not address.is_global for address in addresses):
+    if not addresses:
+        if allow_resolution_failure:
+            return
+        raise ValueError(f"{error_prefix}: hostname resolution returned no addresses")
+    if any(not address.is_global for address in addresses):
         raise ValueError(error_prefix)
 
 

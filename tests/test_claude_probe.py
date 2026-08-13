@@ -243,7 +243,11 @@ class ClaudeHealthProbeTests(unittest.TestCase):
 
         codex = FakeProbe("codex")
         claude = FakeProbe("claude")
-        router = ProviderHealthProbe(codex, claude)
+        router = ProviderHealthProbe(
+            codex,
+            claude,
+            resolver=lambda *args, **kwargs: ["8.8.8.8"],
+        )
 
         self.assertEqual(router.run(make_provider(), "gpt-5.6-sol", API_KEY), "codex")
         self.assertEqual(
@@ -252,6 +256,51 @@ class ClaudeHealthProbeTests(unittest.TestCase):
         )
         self.assertEqual(codex.calls, ["gpt-5.6-sol"])
         self.assertEqual(claude.calls, ["claude-opus-5"])
+
+    def test_provider_router_blocks_unresolved_endpoint_before_client(self) -> None:
+        class FakeProbe:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run(self, provider, model, api_key):
+                del provider, model, api_key
+                self.calls += 1
+                raise AssertionError("client must not run for an unresolved endpoint")
+
+        def unavailable_resolver(*args, **kwargs):
+            del args, kwargs
+            raise OSError("name resolution failed")
+
+        codex = FakeProbe()
+        claude = FakeProbe()
+        router = ProviderHealthProbe(codex, claude, resolver=unavailable_resolver)
+
+        result = router.run(make_provider(), "gpt-5.6-sol", API_KEY)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "network_error")
+        self.assertEqual(result.failure_stage, "probe_setup")
+        self.assertEqual(result.diagnostic_source, "probe_router")
+        self.assertEqual(codex.calls, 0)
+        self.assertEqual(claude.calls, 0)
+
+    def test_provider_router_blocks_private_dns_answer_before_client(self) -> None:
+        class FakeProbe:
+            def run(self, provider, model, api_key):
+                del provider, model, api_key
+                raise AssertionError("client must not run for a private endpoint")
+
+        router = ProviderHealthProbe(
+            FakeProbe(),
+            FakeProbe(),
+            resolver=lambda *args, **kwargs: ["127.0.0.1"],
+        )
+
+        result = router.run(make_provider(), "claude-opus-5", API_KEY)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "network_error")
+        self.assertIn("public HTTPS endpoint", result.error_summary)
 
 
 class ClaudeProcessTests(unittest.TestCase):

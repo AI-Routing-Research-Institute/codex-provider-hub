@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import tempfile
 import time
@@ -19,6 +20,8 @@ from provider_status.config import (
     PROBE_CLIENT_CLAUDE,
     PROBE_CLIENT_CODEX,
     ProviderConfig,
+    Resolver,
+    validate_public_https_endpoint,
 )
 from provider_status.store import sanitize_error_summary
 from provider_status.tui_probe import (
@@ -71,9 +74,12 @@ class ProviderHealthProbe:
         self,
         codex_probe: Any,
         claude_probe: Any | None = None,
+        *,
+        resolver: Resolver = socket.getaddrinfo,
     ) -> None:
         self._codex_probe = codex_probe
         self._claude_probe = claude_probe
+        self._resolver = resolver
 
     def run(
         self,
@@ -82,6 +88,32 @@ class ProviderHealthProbe:
         api_key: str,
     ) -> HealthProbeResult:
         client = provider.probe_client(model)
+        endpoint = (
+            provider.claude_base_url
+            if client == PROBE_CLIENT_CLAUDE
+            else provider.base_url
+        )
+        if endpoint:
+            try:
+                validate_public_https_endpoint(
+                    endpoint,
+                    provider.provider_id,
+                    self._resolver,
+                    field_name=(
+                        "claude_base_url"
+                        if client == PROBE_CLIENT_CLAUDE
+                        else "base_url"
+                    ),
+                )
+            except ValueError as exc:
+                return HealthProbeResult(
+                    success=False,
+                    latency_ms=0,
+                    error_code="network_error",
+                    error_summary=str(exc),
+                    failure_stage="probe_setup",
+                    diagnostic_source="probe_router",
+                )
         if client == PROBE_CLIENT_CODEX:
             return self._codex_probe.run(provider, model, api_key)
         if client == PROBE_CLIENT_CLAUDE and self._claude_probe is not None:
