@@ -187,6 +187,35 @@ class ProviderRouterTests(unittest.TestCase):
         self.assertEqual(following.provider.provider_id, "first")
         router.finish_request(following, status_code=200)
 
+    def test_retry_uses_session_override_changed_after_request_started(self) -> None:
+        router = ProviderRouter((provider("first", current=True), provider("second")))
+        request = router.begin_request(thread_id="thread-a")
+
+        router.set_session_provider_override("thread-a", "second")
+        rerouted, changed = router.route_retry_to_current(request)
+
+        self.assertTrue(changed)
+        self.assertEqual(rerouted.provider.provider_id, "second")
+        self.assertEqual(rerouted.session_provider_id, "second")
+        self.assertEqual(router.status().active_by_provider, {"second": 1})
+        router.finish_request(rerouted, status_code=200)
+
+    def test_retry_follows_current_provider_after_session_override_is_removed(self) -> None:
+        router = ProviderRouter(
+            (provider("first", current=True), provider("second")),
+            session_provider_overrides={"thread-a": "second"},
+        )
+        request = router.begin_request(thread_id="thread-a")
+
+        router.set_session_provider_override("thread-a", None)
+        rerouted, changed = router.route_retry_to_current(request)
+
+        self.assertTrue(changed)
+        self.assertEqual(rerouted.provider.provider_id, "first")
+        self.assertIsNone(rerouted.session_provider_id)
+        self.assertEqual(router.status().active_by_provider, {"first": 1})
+        router.finish_request(rerouted, status_code=200)
+
     def test_draining_requests_respect_each_sessions_effective_provider(self) -> None:
         router = ProviderRouter(
             (provider("first", current=True), provider("second")),
@@ -2637,6 +2666,46 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(attempts, 2)
+
+    async def test_retry_refreshes_session_route_changed_during_retry_delay(self) -> None:
+        attempts: list[str] = []
+        thread_id = "thread-route-changed-during-request"
+        router = ProviderRouter((provider("first", current=True), provider("second")))
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.host)
+            if request.url.host == "first.example.test":
+                return httpx.Response(503, json={"error": {"message": "retry"}})
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            router.set_session_provider_override(thread_id, "second")
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=no_wait,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            headers={
+                "x-codex-turn-metadata": json.dumps({"thread_id": thread_id})
+            },
+            json={"model": "test"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, ["first.example.test", "second.example.test"])
+        self.assertEqual(router.status().total_retries, 1)
 
     async def test_retries_rate_limit_without_retry_after(self) -> None:
         attempts = 0
