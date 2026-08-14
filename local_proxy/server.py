@@ -449,9 +449,15 @@ def _register_control_routes(
             return JSONResponse(status_code=422, content={"detail": "provider_id 必须是字符串或 null"})
         thread_id = profile.router.thread_id_for_session_key(session_key)
         if thread_id is None:
-            thread_id = profile.usage_store.thread_id_for_session_key(session_key)
+            thread_id = await asyncio.to_thread(
+                profile.usage_store.thread_id_for_session_key,
+                session_key,
+            )
         if thread_id is None and profile.session_key_resolver is not None:
-            thread_id = profile.session_key_resolver(session_key)
+            thread_id = await asyncio.to_thread(
+                profile.session_key_resolver,
+                session_key,
+            )
         if thread_id is None:
             return JSONResponse(status_code=404, content={"detail": "未找到该会话"})
         if provider_id is not None:
