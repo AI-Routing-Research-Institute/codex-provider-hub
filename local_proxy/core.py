@@ -46,6 +46,7 @@ RECOVERY_HISTORY_API_LIMIT = 500
 RECOVERY_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 USAGE_HISTORY_PAGE_LIMIT = 50
 REQUEST_HISTORY_HOURS = 7 * 24
+REQUEST_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 REQUEST_HISTORY_PAGE_LIMIT = 50
 REQUEST_HISTORY_WINDOWS = {"1h", "6h", "24h", "7d", "custom"}
 SSE_RETRY_EVENT_PARSE_BYTES = 256 * 1024
@@ -172,6 +173,7 @@ class UsageStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.Lock()
+        self._last_request_history_cleanup_at = 0.0
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -369,10 +371,7 @@ class UsageStore:
                 """,
                 values,
             )
-            connection.execute(
-                "DELETE FROM request_history WHERE finished_at < ?",
-                (completed_at - REQUEST_HISTORY_HOURS * 3600,),
-            )
+            self._cleanup_request_history_if_due(connection, completed_at)
 
     def request_history(
         self,
@@ -472,11 +471,9 @@ class UsageStore:
         count_params = params[:-3] if cursor else params
         with self._lock, closing(self._connect()) as connection:
             connection.row_factory = sqlite3.Row
-            with connection:
-                connection.execute(
-                    "DELETE FROM request_history WHERE finished_at < ?",
-                    (timestamp - REQUEST_HISTORY_HOURS * 3600,),
-                )
+            if self._request_history_cleanup_due(timestamp):
+                with connection:
+                    self._delete_expired_request_history(connection, timestamp)
             total_count = int(
                 connection.execute(
                     f"{common_table} SELECT COUNT(*) FROM items WHERE {' AND '.join(count_clauses)}",
@@ -538,6 +535,32 @@ class UsageStore:
                 else f"{float(last_row['sort_at']).hex()}@{int(last_row['cursor_id'])}"
             ),
         }
+
+    def _request_history_cleanup_due(self, now: float) -> bool:
+        return (
+            now < self._last_request_history_cleanup_at
+            or now - self._last_request_history_cleanup_at
+            >= REQUEST_HISTORY_CLEANUP_INTERVAL_SECONDS
+        )
+
+    def _cleanup_request_history_if_due(
+        self,
+        connection: sqlite3.Connection,
+        now: float,
+    ) -> None:
+        if self._request_history_cleanup_due(now):
+            self._delete_expired_request_history(connection, now)
+
+    def _delete_expired_request_history(
+        self,
+        connection: sqlite3.Connection,
+        now: float,
+    ) -> None:
+        connection.execute(
+            "DELETE FROM request_history WHERE finished_at < ?",
+            (now - REQUEST_HISTORY_HOURS * 3600,),
+        )
+        self._last_request_history_cleanup_at = now
 
     def thread_id_for_session_key(self, session_key: str) -> str | None:
         with self._lock, closing(self._connect()) as connection:
@@ -2269,9 +2292,12 @@ def create_proxy_app(
             return JSONResponse(status_code=422, content={"detail": "provider_id 必须是字符串或 null"})
         thread_id = router.thread_id_for_session_key(session_key)
         if thread_id is None:
-            thread_id = usage_store.thread_id_for_session_key(session_key)
+            thread_id = await asyncio.to_thread(
+                usage_store.thread_id_for_session_key,
+                session_key,
+            )
         if thread_id is None and session_key_resolver is not None:
-            thread_id = session_key_resolver(session_key)
+            thread_id = await asyncio.to_thread(session_key_resolver, session_key)
         if thread_id is None:
             return JSONResponse(status_code=404, content={"detail": "未找到该会话"})
         if provider_id is not None:
@@ -2969,6 +2995,102 @@ def _record_request_event(
         pass
 
 
+async def _record_recovery_event_async(
+    store: RecoveryHistoryStore | None,
+    **event: Any,
+) -> None:
+    if store is None:
+        return
+    await asyncio.to_thread(_record_recovery_event, store, **event)
+
+
+async def _record_request_event_async(
+    store: UsageStore | None,
+    **event: Any,
+) -> None:
+    if store is None:
+        return
+    await asyncio.to_thread(_record_request_event, store, **event)
+
+
+def _record_stream_completion(
+    usage_store: UsageStore | None,
+    recovery_history_store: RecoveryHistoryStore | None,
+    *,
+    snapshot: RouteSnapshot,
+    thread_id: str | None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None,
+    model: str,
+    reasoning_effort: str | None,
+    usage: TokenUsage | None,
+    status_code: int,
+    successful: bool,
+    retry_count: int,
+    error_kind: str | None,
+    error_summary: str | None,
+    stream_failure: tuple[str, str] | None,
+    attempt: int,
+    max_attempts: int,
+) -> None:
+    if stream_failure is not None:
+        kind, summary = stream_failure
+        _record_recovery_event(
+            recovery_history_store,
+            snapshot=snapshot,
+            provider_id=snapshot.provider.provider_id,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            delay_seconds=None,
+            kind=kind,
+            summary=summary,
+            stage="after_output",
+            outcome="passed_through",
+        )
+    usage_id: int | None = None
+    if usage_store is not None and usage is not None:
+        try:
+            usage_id = usage_store.record(
+                provider_id=snapshot.provider.provider_id,
+                model=model,
+                usage=usage,
+                status_code=status_code,
+                successful=successful,
+            )
+        except (OSError, sqlite3.Error):
+            pass
+    _record_request_event(
+        usage_store,
+        snapshot=snapshot,
+        thread_id=thread_id,
+        session_name_resolver=session_name_resolver,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        status_code=status_code,
+        successful=successful,
+        outcome="succeeded" if successful else "failed",
+        retry_count=retry_count,
+        error_kind=error_kind,
+        error_summary=error_summary,
+        usage=usage,
+        usage_id=usage_id,
+    )
+
+
+async def _record_stream_completion_async(
+    usage_store: UsageStore | None,
+    recovery_history_store: RecoveryHistoryStore | None,
+    **event: Any,
+) -> None:
+    if usage_store is None and recovery_history_store is None:
+        return
+    await asyncio.to_thread(
+        _record_stream_completion,
+        usage_store,
+        recovery_history_store,
+        **event,
+    )
+
+
 async def _forward_request(
     router: ProviderRouter,
     client: httpx.AsyncClient,
@@ -2998,7 +3120,8 @@ async def _forward_request(
         )
     provider = snapshot.provider
     if not provider.has_credentials:
-        _record_request_event(
+        router.finish_request(snapshot, status_code=503, error="credential_missing")
+        await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
             thread_id=thread_id,
@@ -3011,14 +3134,14 @@ async def _forward_request(
             error_kind="credential_missing",
             error_summary="当前供应商没有可用认证配置",
         )
-        router.finish_request(snapshot, status_code=503, error="credential_missing")
         return JSONResponse(
             status_code=503,
             content={"error": {"message": "当前供应商没有可用认证配置"}},
         )
 
     if _would_proxy_to_itself(provider, request):
-        _record_request_event(
+        router.finish_request(snapshot, status_code=508, error="proxy_loop")
+        await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
             thread_id=thread_id,
@@ -3031,7 +3154,6 @@ async def _forward_request(
             error_kind="proxy_loop",
             error_summary="当前供应商地址指向本地中转自身",
         )
-        router.finish_request(snapshot, status_code=508, error="proxy_loop")
         return JSONResponse(
             status_code=508,
             content={"error": {"message": "当前供应商地址指向本地中转自身"}},
@@ -3040,7 +3162,8 @@ async def _forward_request(
     try:
         request_body = await _read_request_body(request)
     except ValueError:
-        _record_request_event(
+        router.finish_request(snapshot, status_code=413, error="request_too_large")
+        await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
             thread_id=thread_id,
@@ -3053,7 +3176,6 @@ async def _forward_request(
             error_kind="request_too_large",
             error_summary="请求体超过本地中转允许的大小",
         )
-        router.finish_request(snapshot, status_code=413, error="request_too_large")
         return JSONResponse(
             status_code=413,
             content={"error": {"message": "请求体超过本地中转允许的大小"}},
@@ -3234,7 +3356,7 @@ async def _forward_request(
             upstream_response = None
         if not can_retry:
             if retry_kind is not None:
-                _record_recovery_event(
+                await _record_recovery_event_async(
                     recovery_history_store,
                     snapshot=snapshot,
                     provider_id=snapshot.provider.provider_id,
@@ -3264,7 +3386,7 @@ async def _forward_request(
             error_summary=retry_summary,
             error_provider_id=failed_provider_id,
         )
-        _record_recovery_event(
+        await _record_recovery_event_async(
             recovery_history_store,
             snapshot=snapshot,
             provider_id=failed_provider_id,
@@ -3281,7 +3403,8 @@ async def _forward_request(
 
     if upstream_response is None or stream is None:
         router.record_outcome(snapshot, transient_failure=True, policy=retry_policy)
-        _record_request_event(
+        router.finish_request(snapshot, status_code=502, error=final_error)
+        await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
             thread_id=thread_id,
@@ -3295,7 +3418,6 @@ async def _forward_request(
             error_kind=final_error,
             error_summary=final_summary or _retry_kind_summary(final_error),
         )
-        router.finish_request(snapshot, status_code=502, error=final_error)
         return JSONResponse(
             status_code=502,
             content={"error": {"message": "当前供应商临时不可用，自动重试后仍未恢复"}},
@@ -3335,6 +3457,8 @@ async def _forward_request(
         stream_failure: tuple[str, str] | None = None
         stream_completed = False
         history_kind: str | None = None
+        history_summary: str | None = None
+        persistence_ready = False
         try:
             if first_chunk is not None:
                 if usage_capture is not None:
@@ -3357,47 +3481,14 @@ async def _forward_request(
             )
             raise
         finally:
+            usage: TokenUsage | None = None
             try:
                 if failure_capture is not None:
                     embedded_failure = failure_capture.finalize()
                     if embedded_failure is not None:
                         stream_failure = embedded_failure
-                if stream_failure is not None:
-                    kind, summary = stream_failure
-                    _record_recovery_event(
-                        recovery_history_store,
-                        snapshot=snapshot,
-                        provider_id=snapshot.provider.provider_id,
-                        attempt=attempt,
-                        max_attempts=retry_policy.max_attempts,
-                        delay_seconds=None,
-                        kind=kind,
-                        summary=summary,
-                        stage="after_output",
-                        outcome="passed_through",
-                    )
-                usage: TokenUsage | None = None
-                usage_id: int | None = None
                 if usage_capture is not None and usage_store is not None:
                     usage = usage_capture.finalize(upstream_response.status_code)
-                    terminal_success = bool(
-                        getattr(usage_capture, "saw_successful_terminal_event", False)
-                    )
-                    if usage is not None:
-                        try:
-                            usage_id = usage_store.record(
-                                provider_id=snapshot.provider.provider_id,
-                                model=usage_capture.model,
-                                usage=usage,
-                                status_code=upstream_response.status_code,
-                                successful=(
-                                    (stream_completed or terminal_success)
-                                    and stream_failure is None
-                                    and 200 <= upstream_response.status_code < 300
-                                ),
-                            )
-                        except (OSError, sqlite3.Error):
-                            pass
                 successful = (
                     (
                         stream_completed
@@ -3421,22 +3512,7 @@ async def _forward_request(
                     else:
                         history_kind = f"http_{upstream_response.status_code}"
                         history_summary = f"HTTP {upstream_response.status_code}"
-                _record_request_event(
-                    usage_store,
-                    snapshot=snapshot,
-                    thread_id=thread_id,
-                    session_name_resolver=session_name_resolver,
-                    model=usage_capture.model if usage_capture is not None else model,
-                    reasoning_effort=reasoning_effort,
-                    status_code=upstream_response.status_code,
-                    successful=successful,
-                    outcome="succeeded" if successful else "failed",
-                    retry_count=max(0, attempt - 1),
-                    error_kind=history_kind,
-                    error_summary=history_summary,
-                    usage=usage,
-                    usage_id=usage_id,
-                )
+                persistence_ready = True
             finally:
                 try:
                     await upstream_response.aclose()
@@ -3446,6 +3522,29 @@ async def _forward_request(
                         status_code=upstream_response.status_code,
                         error=history_kind,
                     )
+                    if persistence_ready:
+                        await _record_stream_completion_async(
+                            usage_store,
+                            recovery_history_store,
+                            snapshot=snapshot,
+                            thread_id=thread_id,
+                            session_name_resolver=session_name_resolver,
+                            model=(
+                                usage_capture.model
+                                if usage_capture is not None
+                                else model
+                            ),
+                            reasoning_effort=reasoning_effort,
+                            usage=usage,
+                            status_code=upstream_response.status_code,
+                            successful=successful,
+                            retry_count=max(0, attempt - 1),
+                            error_kind=history_kind,
+                            error_summary=history_summary,
+                            stream_failure=stream_failure,
+                            attempt=attempt,
+                            max_attempts=retry_policy.max_attempts,
+                        )
 
     return DisconnectAwareStreamingResponse(
         response_body(),
