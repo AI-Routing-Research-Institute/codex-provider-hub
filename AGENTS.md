@@ -1,6 +1,6 @@
 # 项目级 AI 强制约束
 
-本文件适用于整个仓库。所有 AI Agent 必须遵守；禁止以“小改动”“用户很着急”“hooks 可跳过”或“CI 会兜底”等理由省略步骤。任一条件无法验证时，必须停止并报告阻塞，禁止猜测、静默跳过、`--no-verify`、强推或直接修改远端状态绕过门禁。
+本文件适用于整个仓库。所有 AI Agent 必须遵守；禁止以“小改动”“用户很着急”“hooks 可跳过”“本地测试没跑过”或“release CI 会兜底”等理由省略步骤。任一条件无法验证时，必须停止并报告阻塞，禁止猜测、静默跳过、`--no-verify`、强推或直接修改远端状态绕过门禁。
 
 ## 唯一交付入口
 
@@ -31,19 +31,18 @@ python scripts/team_policy.py install-hooks
 - 每次提交前必须检查完整 staged/unstaged diff，并按独立关注点拆分。
 - commit 标题必须为前置 emoji 的 Conventional Commit 中文描述；正文必须包含非空的 `功能修改`、`影响范围`、`验证结果`。
 - 禁止直接推送 `main` 和任何标签。功能分支必须 rebase 到最新 `origin/main` 并针对准确 HEAD 重新完整验证。
-- Agent 必须创建或更新 PR、填写功能说明和验证证据，并尝试启用 auto-merge。
-- PR 不要求人工审批；`policy`、`tests-windows`、`tests-macos` 三个 required checks 全部成功后才允许自动合并。
-- 如果启用 auto-merge 失败，只有 GitHub 明确报告 PR 已处于 `clean` 状态时允许进入 fallback；任何其他错误都必须停止并报告，禁止直接合并、重试绕过或猜测状态。
-- 进入 `clean` fallback 前，Agent 必须重新查询 PR 的准确 head SHA，并逐项确认 `policy`、`tests-windows`、`tests-macos` 当前针对该 SHA 全部成功；缺少任一检查、检查不是成功状态或 head SHA 发生变化，都必须停止。
-- 仅在上述条件全部满足后，才允许使用该准确 head SHA 执行 squash merge，并在合并后验证目标提交；禁止使用分支名、旧 SHA、模糊 ref 或无 SHA 合并。
+- Agent 必须创建或更新 PR、填写功能说明和验证证据，并尝试启用 auto-merge（当前规则集未开放 `allow_auto_merge`，启用失败属预期）。
+- PR 阶段不运行 CI，PR 不要求人工审批、无 required status checks；合并仅要求 PR 存在且无冲突。
+- 完整测试（Python 单测、JS 语法检查、JS 测试）在 release tag 时由 `windows-release.yml` / `macos-release.yml` 全量执行并阻塞发布。
+- 合并一律使用 `gh pr merge --squash` 以 PR 的最新准确 head SHA 执行，合并后验证目标提交；禁止使用分支名、旧 SHA、模糊 ref 或无 SHA 合并，禁止绕过门禁直接改动远端。
 
 ## 自动版本与自动发版
 
 - Agent 在功能说明中根据兼容性选择 `major`、`minor`、`patch` 或 `none`，并在说明中给出理由，不等待人工决定版本号。
 - PR 合并后由 `auto-release` 工作流读取自上个标签以来新增且 `verified` 的说明，选择最高 bump、生成 release notes、创建唯一标签，并显式触发 Windows 与 macOS 发布工作流。
 - 正常流程禁止 Agent 手工创建或推送标签。只有自动发布工作流可以执行标签操作。
-- Agent 必须跟踪 PR checks、auto-merge 或 `clean` fallback、自动发布和两个平台发布结果，报告 URL、状态和具体失败步骤。
+- Agent 必须跟踪 PR 状态（无 CI 检查）、squash 合并、自动发布和两个平台发布结果，报告 URL、状态和具体失败步骤。
 
 ## 硬停止条件
 
-以下任一情况必须停止：主线未同步；处于受保护分支；功能说明缺失或状态不匹配；diff 含不理解/无关/敏感文件；测试未运行或失败；required checks 未配置；Ruleset 未验证；自动合并或发布权限不足。不得声称流程完成。
+以下任一情况必须停止：主线未同步；处于受保护分支；功能说明缺失或状态不匹配；diff 含不理解/无关/敏感文件；本地测试未运行或失败；Ruleset 未验证；合并或发布权限不足。不得声称流程完成。
