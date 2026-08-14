@@ -73,4 +73,4 @@ HTTP 接口、配置和 SQLite 表结构保持不变，无需数据迁移。历�
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/31
