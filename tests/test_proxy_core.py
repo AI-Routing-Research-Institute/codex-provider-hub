@@ -545,6 +545,37 @@ class UsageTests(unittest.TestCase):
                 now=now,
             )
 
+    def test_request_history_cleanup_is_throttled(self) -> None:
+        now = 2_000_000.0
+        self.store.request_history(now=now)
+        expired_at = now - 7 * 24 * 3600 - 1
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO request_history (
+                    started_at, finished_at, provider_id, session_name, model,
+                    succeeded, outcome, duration_ms, retry_count
+                ) VALUES (?, ?, 'provider-a', 'expired', 'gpt-5', 1,
+                          'succeeded', 0, 0)
+                """,
+                (expired_at, expired_at),
+            )
+
+        self.store.request_history(now=now + 1)
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            retained_count = connection.execute(
+                "SELECT COUNT(*) FROM request_history WHERE session_name = 'expired'"
+            ).fetchone()[0]
+
+        self.store.request_history(now=now + 3600)
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            cleaned_count = connection.execute(
+                "SELECT COUNT(*) FROM request_history WHERE session_name = 'expired'"
+            ).fetchone()[0]
+
+        self.assertEqual(retained_count, 1)
+        self.assertEqual(cleaned_count, 0)
+
     def test_request_history_includes_failures_and_paginates(self) -> None:
         now = 2_000_000.0
         records = (
@@ -1033,6 +1064,103 @@ api-version = "2026-07-01"
 
 
 class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_persistence_lock_does_not_block_following_upstream_request(self) -> None:
+        class LockingUsageStore(UsageStore):
+            def __init__(self, path: Path) -> None:
+                super().__init__(path)
+                self.history_locked = threading.Event()
+                self.persistence_waiting = threading.Event()
+                self.release_history = threading.Event()
+
+            def request_history(self, **kwargs):
+                with self._lock:
+                    self.history_locked.set()
+                    self.release_history.wait(timeout=2)
+                return {
+                    "window": kwargs["window"],
+                    "start_at": None,
+                    "end_at": None,
+                    "total_count": 0,
+                    "items": [],
+                    "next_cursor": None,
+                }
+
+            def record(self, **kwargs):
+                self.persistence_waiting.set()
+                return super().record(**kwargs)
+
+            def record_request(self, **kwargs):
+                self.persistence_waiting.set()
+                return super().record_request(**kwargs)
+
+        upstream_count = 0
+        second_upstream_started = threading.Event()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal upstream_count
+            upstream_count += 1
+            if upstream_count == 2:
+                second_upstream_started.set()
+            return httpx.Response(
+                200,
+                json={
+                    "id": f"response-{upstream_count}",
+                    "output": [],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            usage_store = LockingUsageStore(Path(temp_dir) / "usage.sqlite3")
+            upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = create_proxy_app(
+                ProviderRouter((provider("selected", current=True),)),
+                client=upstream_client,
+                usage_store=usage_store,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            )
+            history_task = asyncio.create_task(client.get("/control/api/requests"))
+            first_task = None
+            second_task = None
+            watchdog = threading.Timer(1, usage_store.release_history.set)
+            try:
+                self.assertTrue(
+                    await asyncio.to_thread(usage_store.history_locked.wait, 1)
+                )
+                watchdog.start()
+                first_task = asyncio.create_task(
+                    client.post(
+                        "/v1/responses",
+                        json={"model": "gpt-test", "input": "first"},
+                    )
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(usage_store.persistence_waiting.wait, 2)
+                )
+                second_task = asyncio.create_task(
+                    client.post(
+                        "/v1/responses",
+                        json={"model": "gpt-test", "input": "second"},
+                    )
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(second_upstream_started.wait, 2)
+                )
+                self.assertFalse(usage_store.release_history.is_set())
+            finally:
+                usage_store.release_history.set()
+                watchdog.cancel()
+                tasks = [task for task in (history_task, first_task, second_task) if task]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                await client.aclose()
+                await upstream_client.aclose()
+
+        self.assertTrue(all(isinstance(result, httpx.Response) for result in results))
+        self.assertTrue(all(result.status_code == 200 for result in results))
+
     async def test_request_api_hides_thread_id_and_persists_session_route(self) -> None:
         seen_hosts: list[str] = []
 
@@ -3396,6 +3524,101 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(history["items"][0]["succeeded"])
         self.assertIsNone(history["items"][0]["error_kind"])
         self.assertEqual(history["items"][0]["reasoning_effort"], "high")
+
+    async def test_cancelled_persistence_keeps_usage_and_request_history_linked(self) -> None:
+        class BlockingUsageStore(UsageStore):
+            def __init__(self, path: Path) -> None:
+                super().__init__(path)
+                self.usage_started = threading.Event()
+                self.release_usage = threading.Event()
+
+            def record(self, **kwargs):
+                self.usage_started.set()
+                self.release_usage.wait(timeout=2)
+                return super().record(**kwargs)
+
+        class CompletedStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (
+                    b'data: {"type":"response.completed","response":{"usage":'
+                    b'{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}\n\n'
+                )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=CompletedStream(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = BlockingUsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+            usage_store=usage_store,
+        )
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, receive))
+        iterator = response.body_iterator
+        self.assertIn(b"response.completed", await anext(iterator))
+        close_task = asyncio.create_task(iterator.aclose())
+        try:
+            self.assertTrue(await asyncio.to_thread(usage_store.usage_started.wait, 1))
+            close_task.cancel()
+            usage_store.release_usage.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await close_task
+        finally:
+            usage_store.release_usage.set()
+
+        linked_usage_id = None
+        for _ in range(100):
+            with closing(sqlite3.connect(usage_store.path)) as connection:
+                row = connection.execute(
+                    "SELECT usage_id FROM request_history ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                linked_usage_id = None if row is None else row[0]
+            if linked_usage_id is not None:
+                break
+            await asyncio.sleep(0.01)
+        await upstream_client.aclose()
+
+        with closing(sqlite3.connect(usage_store.path)) as connection:
+            usage_count = connection.execute(
+                "SELECT COUNT(*) FROM request_usage"
+            ).fetchone()[0]
+            history_count = connection.execute(
+                "SELECT COUNT(*) FROM request_history"
+            ).fetchone()[0]
+        self.assertEqual(usage_count, 1)
+        self.assertEqual(history_count, 1)
+        self.assertIsNotNone(linked_usage_id)
 
     async def test_client_close_before_terminal_event_uses_short_cancel_summary(self) -> None:
         class PartialStream(httpx.AsyncByteStream):
