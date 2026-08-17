@@ -339,6 +339,12 @@ class CodexDiagnosticsTests(unittest.TestCase):
                 "client_blocked",
                 "供应商拒绝当前客户端。",
             ),
+            (
+                403,
+                "用户额度不足, 剩余额度: $0.00",
+                "rate_limited",
+                "供应商触发限流。",
+            ),
             (429, "rate limit exceeded", "rate_limited", "供应商触发限流。"),
             (
                 503,

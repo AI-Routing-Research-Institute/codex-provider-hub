@@ -23,6 +23,7 @@ from provider_status.config import (
     Resolver,
     validate_public_https_endpoint,
 )
+from provider_status.error_semantics import has_usage_limit_semantics
 from provider_status.store import sanitize_error_summary
 from provider_status.tui_probe import (
     CodexTuiClient,
@@ -174,13 +175,20 @@ class CodexHealthProbe:
             )
             latency_ms = self._elapsed_ms(started_at)
             if turn.error_code:
+                summary = _turn_summary(turn)
+                error_code = turn.error_code
+                if (
+                    error_code == "client_blocked"
+                    and has_usage_limit_semantics(summary)
+                ):
+                    error_code = "rate_limited"
                 return self._resolve_failure(
                     started_at,
                     provider,
                     model,
                     api_key,
-                    turn.error_code,
-                    _turn_summary(turn),
+                    error_code,
+                    summary,
                     turn.http_status_code,
                 )
             if turn.timed_out:
@@ -520,20 +528,12 @@ def _classify_error(http_status_code: int | None, summary: str) -> str:
         )
     ):
         return "auth_failed"
+    if http_status_code == 429 or has_usage_limit_semantics(normalized):
+        return "rate_limited"
     if http_status_code == 403 and (
         "channel" in normalized or "client" in normalized
     ):
         return "client_blocked"
-    if http_status_code == 429 or any(
-        phrase in normalized
-        for phrase in (
-            "usage limit",
-            "rate limit",
-            "too many requests",
-            "quota exceeded",
-        )
-    ):
-        return "rate_limited"
     if "no available channel" in normalized:
         return "no_channel"
     if http_status_code in {502, 503, 504} or (
