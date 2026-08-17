@@ -28,6 +28,8 @@ let retryFormLoaded = false;
 let latestRuntimeSettings = null;
 let latestRecoveryHistory = null;
 let recoveryHistoryRequestActive = false;
+let recoveryHistoryLoadFailed = false;
+let recoveryHistoryRetryAfter = 0;
 let recoveryDetailsPinned = false;
 let recoveryHideTimer = null;
 let manageProvidersMode = false;
@@ -176,6 +178,7 @@ const timeRangeApply = document.querySelector("#time-range-apply");
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 let themeStorageKey = "local-proxy-theme";
 const RECOVERY_HISTORY_PAGE_SIZE = 50;
+const RECOVERY_HISTORY_RETRY_DELAY_MS = 2000;
 
 function text(selector, value) {
   const element = document.querySelector(selector);
@@ -724,6 +727,51 @@ function sameRecoveryHistorySnapshot(left, right) {
     && Number(leftLatest || 0) === Number(rightLatest || 0);
 }
 
+function recoveryHistoryNeedsDetail(detail, summary) {
+  if (!summary || typeof summary !== "object") return false;
+  const summaryItems = Array.isArray(summary.items) ? summary.items : [];
+  const totalCount = Number(summary.total_count);
+  const hasMore = Boolean(summary.truncated)
+    || (Number.isFinite(totalCount) && totalCount > summaryItems.length);
+  return hasMore && (!detail || !sameRecoveryHistorySnapshot(detail, summary));
+}
+
+function shouldRequestRecoveryHistory(
+  detail,
+  summary,
+  {
+    popoverOpen = false,
+    requestActive = false,
+    retryAfter = 0,
+    now = Date.now(),
+  } = {},
+) {
+  return popoverOpen
+    && !requestActive
+    && Number(now) >= Number(retryAfter || 0)
+    && recoveryHistoryNeedsDetail(detail, summary);
+}
+
+function recoveryHistoryStatusText(
+  history,
+  { detailLoaded = false, requestActive = false, loadFailed = false } = {},
+) {
+  const items = Array.isArray(history?.items) ? history.items : [];
+  const totalCount = Number.isFinite(Number(history?.total_count))
+    ? Number(history.total_count)
+    : items.length;
+  const windowHours = Number(history?.window_hours) || 24;
+  if (!detailLoaded && requestActive) {
+    return `近 ${windowHours} 小时 · 正在加载恢复记录`;
+  }
+  if (!detailLoaded && loadFailed) {
+    return `近 ${windowHours} 小时 · 加载失败，正在重试`;
+  }
+  return history?.truncated
+    ? `近 ${windowHours} 小时 · 显示最新 ${items.length}/${totalCount} 条`
+    : `近 ${windowHours} 小时 · ${totalCount} 条`;
+}
+
 function recoveryHistoryEntryKey(entry) {
   return [
     entry?.recorded_at,
@@ -810,8 +858,14 @@ async function readRecoveryHistory({ loadMore = false, refresh = false } = {}) {
   const summary = latestStatus?.retry?.history;
   if (recoveryHistoryRequestActive) return;
   if (loadMore && !latestRecoveryHistory?.next_cursor) return;
-  if (!loadMore && sameRecoveryHistorySnapshot(latestRecoveryHistory, summary)) return;
+  if (!loadMore && !recoveryHistoryNeedsDetail(latestRecoveryHistory, summary)) return;
   recoveryHistoryRequestActive = true;
+  if (!loadMore) {
+    recoveryHistoryLoadFailed = false;
+    recoveryHistoryRetryAfter = 0;
+    if (latestStatus?.retry) renderRecoveryErrors(latestStatus.retry);
+  }
+  let pageLoaded = false;
   try {
     const params = new URLSearchParams({ limit: String(RECOVERY_HISTORY_PAGE_SIZE) });
     if (loadMore) params.set("cursor", latestRecoveryHistory.next_cursor);
@@ -823,14 +877,18 @@ async function readRecoveryHistory({ loadMore = false, refresh = false } = {}) {
       : refresh
         ? refreshRecoveryHistoryPages(latestRecoveryHistory, page)
         : page;
-    if (latestStatus?.retry) {
-      renderRecoveryErrors(latestStatus.retry, { appended: loadMore });
-    }
-    if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
+    pageLoaded = true;
   } catch {
-    // Keep the last complete snapshot instead of falling back to the one-item summary.
+    if (!loadMore) {
+      recoveryHistoryLoadFailed = true;
+      recoveryHistoryRetryAfter = Date.now() + RECOVERY_HISTORY_RETRY_DELAY_MS;
+    }
   } finally {
     recoveryHistoryRequestActive = false;
+    if (latestStatus?.retry && (pageLoaded || !loadMore)) {
+      renderRecoveryErrors(latestStatus.retry, { appended: pageLoaded && loadMore });
+    }
+    if (recoveryPopover.classList.contains("show")) positionRecoveryPopover();
   }
 }
 
@@ -838,25 +896,19 @@ function renderRecoveryErrors(retry, { appended = false } = {}) {
   const historySummary = retry.history && typeof retry.history === "object"
     ? retry.history
     : null;
-  const historyNeedsRefresh = Boolean(
-    latestRecoveryHistory
-    && !sameRecoveryHistorySnapshot(latestRecoveryHistory, historySummary),
-  );
   const history = recoveryHistoryForDisplay(latestRecoveryHistory, historySummary);
   const historyItems = Array.isArray(history?.items)
     ? history.items
     : Array.isArray(retry.recent_errors) ? retry.recent_errors : [];
-  const totalCount = Number.isFinite(Number(history?.total_count))
-    ? Number(history.total_count)
-    : historyItems.length;
-  const windowHours = Number(history?.window_hours) || 24;
   const hasDetails = historyItems.length > 0;
   recovery.classList.toggle("has-details", hasDetails);
   recoveryDetailsButton.hidden = !hasDetails;
   if (!hasDetails) hideRecoveryDetails({ force: true });
-  recoveryHistoryMeta.textContent = history?.truncated
-    ? `近 ${windowHours} 小时 · 显示最新 ${historyItems.length}/${totalCount} 条`
-    : `近 ${windowHours} 小时 · ${totalCount} 条`;
+  recoveryHistoryMeta.textContent = recoveryHistoryStatusText(history, {
+    detailLoaded: Boolean(latestRecoveryHistory),
+    requestActive: recoveryHistoryRequestActive,
+    loadFailed: recoveryHistoryLoadFailed,
+  });
   const previousScrollTop = recoveryErrorList.scrollTop;
   const previousScrollHeight = recoveryErrorList.scrollHeight;
   recoveryErrorList.replaceChildren();
@@ -880,12 +932,12 @@ function renderRecoveryErrors(retry, { appended = false } = {}) {
     recoveryErrorList.scrollTop = previousScrollTop
       + Math.max(0, recoveryErrorList.scrollHeight - previousScrollHeight);
   }
-  if (
-    historyNeedsRefresh
-    && recoveryPopover.classList.contains("show")
-    && !recoveryHistoryRequestActive
-  ) {
-    void readRecoveryHistory({ refresh: true });
+  if (shouldRequestRecoveryHistory(latestRecoveryHistory, historySummary, {
+    popoverOpen: recoveryPopover.classList.contains("show"),
+    requestActive: recoveryHistoryRequestActive,
+    retryAfter: recoveryHistoryRetryAfter,
+  })) {
+    void readRecoveryHistory({ refresh: Boolean(latestRecoveryHistory) });
   }
 }
 

@@ -16,7 +16,7 @@ assert.notEqual(end, -1);
 const context = vm.createContext({ RECOVERY_HISTORY_DISPLAY_LIMIT: 500 });
 vm.runInContext(
   `${source.slice(start, end)}\n` +
-    "this.api = { recoveryMetaText, sameRecoveryHistorySnapshot, mergeRecoveryHistoryPages, refreshRecoveryHistoryPages, recoveryHistoryForDisplay };",
+    "this.api = { recoveryMetaText, sameRecoveryHistorySnapshot, recoveryHistoryNeedsDetail, shouldRequestRecoveryHistory, recoveryHistoryStatusText, mergeRecoveryHistoryPages, refreshRecoveryHistoryPages, recoveryHistoryForDisplay };",
   context,
   { filename: sourcePath },
 );
@@ -138,6 +138,70 @@ test("reuses the loaded detail when the summary snapshot is unchanged", () => {
 
   assert.equal(context.api.sameRecoveryHistorySnapshot(detail, summary), true);
   assert.equal(context.api.recoveryHistoryForDisplay(detail, summary), detail);
+});
+
+test("requests missing recovery detail with retry throttling", () => {
+  const summary = {
+    window_hours: 24,
+    total_count: 1654,
+    truncated: true,
+    items: [entry(1654, 5000)],
+  };
+  const detail = {
+    window_hours: 24,
+    total_count: 1654,
+    truncated: true,
+    items: [entry(1654, 5000), entry(1653, 4999)],
+  };
+
+  assert.equal(context.api.recoveryHistoryNeedsDetail(null, summary), true);
+  assert.equal(context.api.shouldRequestRecoveryHistory(null, summary, {
+    popoverOpen: true,
+    retryAfter: 1000,
+    now: 999,
+  }), false);
+  assert.equal(context.api.shouldRequestRecoveryHistory(null, summary, {
+    popoverOpen: true,
+    retryAfter: 1000,
+    now: 1000,
+  }), true);
+  assert.equal(context.api.shouldRequestRecoveryHistory(null, summary, {
+    popoverOpen: false,
+    now: 1000,
+  }), false);
+  assert.equal(context.api.shouldRequestRecoveryHistory(null, summary, {
+    popoverOpen: true,
+    requestActive: true,
+    now: 1000,
+  }), false);
+  assert.equal(context.api.recoveryHistoryNeedsDetail(detail, summary), false);
+  assert.equal(context.api.recoveryHistoryNeedsDetail(null, {
+    total_count: 1,
+    truncated: false,
+    items: [entry(1)],
+  }), false);
+});
+
+test("labels initial recovery detail loading and retry states", () => {
+  const summary = {
+    window_hours: 24,
+    total_count: 1654,
+    truncated: true,
+    items: [entry(1654)],
+  };
+
+  assert.equal(
+    context.api.recoveryHistoryStatusText(summary, { requestActive: true }),
+    "近 24 小时 · 正在加载恢复记录",
+  );
+  assert.equal(
+    context.api.recoveryHistoryStatusText(summary, { loadFailed: true }),
+    "近 24 小时 · 加载失败，正在重试",
+  );
+  assert.equal(
+    context.api.recoveryHistoryStatusText(summary, { detailLoaded: true }),
+    "近 24 小时 · 显示最新 1/1654 条",
+  );
 });
 
 test("labels failure and request start times while keeping old records compatible", () => {
