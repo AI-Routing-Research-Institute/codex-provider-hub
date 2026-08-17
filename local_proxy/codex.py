@@ -19,6 +19,7 @@ from local_proxy.core import (
     ProxyProvider,
     _normalize_base_url,
 )
+from local_proxy.provider_catalog import ProviderCatalog
 
 
 def load_proxy_providers(db_path: Path = DEFAULT_DATABASE) -> tuple[ProxyProvider, ...]:
@@ -51,6 +52,24 @@ def load_proxy_providers(db_path: Path = DEFAULT_DATABASE) -> tuple[ProxyProvide
             providers.append(_proxy_provider(record, common_config))
         except (json.JSONDecodeError, tomllib.TOMLDecodeError, ProviderConfigurationError) as exc:
             errors.append(f"{row['name']}: {exc}")
+    if not providers and errors:
+        raise ProviderConfigurationError("；".join(errors))
+    return tuple(providers)
+
+
+def load_local_proxy_providers(catalog: ProviderCatalog) -> tuple[ProxyProvider, ...]:
+    """Load providers from the independent local catalog only."""
+    providers: list[ProxyProvider] = []
+    errors: list[str] = []
+    common_config = catalog.common_config()
+    for entry in catalog.list_records():
+        record = entry.as_probe_record()
+        try:
+            if not record.is_api_provider:
+                continue
+            providers.append(_proxy_provider(record, common_config))
+        except (json.JSONDecodeError, tomllib.TOMLDecodeError, ProviderConfigurationError) as exc:
+            errors.append(f"{record.name}: {exc}")
     if not providers and errors:
         raise ProviderConfigurationError("；".join(errors))
     return tuple(providers)

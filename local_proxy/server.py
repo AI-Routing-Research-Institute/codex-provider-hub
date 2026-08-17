@@ -70,7 +70,9 @@ UI_CONFIG_FIELDS = frozenset(
         "features",
     }
 )
-UI_FEATURE_FIELDS = frozenset({"usage_history", "session_routing", "provider_launch_command"})
+UI_FEATURE_FIELDS = frozenset(
+    {"usage_history", "session_routing", "provider_launch_command", "provider_catalog"}
+)
 
 
 @dataclass
@@ -107,6 +109,8 @@ class ProxyProfile:
     provider_selectable: Callable[[ProxyProvider], bool] | None = None
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None
     provider_launch_command: Callable[[ProxyProvider], Mapping[str, str]] | None = None
+    provider_catalog: Any | None = None
+    provider_catalog_import: Callable[[bool], Mapping[str, Any]] | None = None
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None
     session_catalog: Callable[[float], Iterable[Mapping[str, Any]]] | None = None
     session_key_resolver: Callable[[str], str | None] | None = None
@@ -291,6 +295,27 @@ def _register_control_routes(
         except ValueError:
             return public_status("today")
         return public_status(window, start_at, end_at)
+
+    async def reload_catalog_providers() -> None:
+        if profile.reload_providers is None:
+            raise RuntimeError("provider catalog reload is unavailable")
+        current = profile.router.current_provider()
+        previous_id = current.provider_id if current is not None else None
+        providers = await asyncio.to_thread(profile.reload_providers)
+        with profile.preferences_lock:
+            providers = order_proxy_providers(providers, profile.active_provider_order)
+        selected = profile.router.replace_providers(
+            providers,
+            preferred_id=current.provider_id if current else None,
+        )
+        if selected is not None and selected.provider_id != previous_id:
+            if profile.on_provider_selected is not None:
+                profile.on_provider_selected(selected.provider_id)
+
+    def catalog_result_status(request: Request, result: Mapping[str, Any]) -> JSONResponse:
+        payload = public_status_for_request(request)
+        payload["catalog"] = dict(result)
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     async def control_page() -> FileResponse:
         return FileResponse(control_asset_dir / "index.html")
@@ -617,6 +642,80 @@ def _register_control_routes(
             profile.on_provider_order_changed(saved_order)
         return public_status_for_request(request)
 
+    async def control_provider_detail(provider_id: str):
+        if profile.provider_catalog is None:
+            return JSONResponse(status_code=404, content={"detail": "Provider catalog unavailable"})
+        provider = await asyncio.to_thread(profile.provider_catalog.get_record, provider_id)
+        if provider is None:
+            return JSONResponse(status_code=404, content={"detail": "Provider not found"})
+        return JSONResponse(
+            content=await asyncio.to_thread(profile.provider_catalog.editable_fields, provider),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def control_provider_create(request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.provider_catalog is None:
+            return JSONResponse(status_code=503, content={"detail": "Provider catalog unavailable"})
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Provider payload must be an object")
+            created = await asyncio.to_thread(profile.provider_catalog.create_from_payload, payload)
+            await reload_catalog_providers()
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error, ProviderConfigurationError) as exc:
+            return JSONResponse(status_code=503, content={"detail": str(exc)})
+        return catalog_result_status(request, {"action": "created", "provider_id": created.provider_id})
+
+    async def control_provider_update(provider_id: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.provider_catalog is None:
+            return JSONResponse(status_code=503, content={"detail": "Provider catalog unavailable"})
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Provider payload must be an object")
+            updated = await asyncio.to_thread(
+                profile.provider_catalog.update_from_payload,
+                provider_id,
+                payload,
+            )
+            await reload_catalog_providers()
+        except KeyError:
+            return JSONResponse(status_code=404, content={"detail": "Provider not found"})
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error, ProviderConfigurationError) as exc:
+            return JSONResponse(status_code=503, content={"detail": str(exc)})
+        return catalog_result_status(request, {"action": "updated", "provider_id": updated.provider_id})
+
+    async def control_provider_import(request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.provider_catalog_import is None:
+            return JSONResponse(status_code=503, content={"detail": "CC Switch import unavailable"})
+        try:
+            payload = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return JSONResponse(status_code=422, content={"detail": "Import payload must be valid JSON"})
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or not isinstance(payload.get("overwrite", False), bool):
+            return JSONResponse(status_code=422, content={"detail": "overwrite must be boolean"})
+        try:
+            result = await asyncio.to_thread(
+                profile.provider_catalog_import,
+                bool(payload.get("overwrite", False)),
+            )
+            await reload_catalog_providers()
+        except (OSError, sqlite3.Error, ValueError, ProviderConfigurationError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        return catalog_result_status(request, result)
+
     async def control_refresh(request: Request):
         if not _valid_control_request(request):
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
@@ -756,6 +855,30 @@ def _register_control_routes(
         f"{prefix}/api/providers/{{provider_id}}/visibility",
         control_visibility,
         methods=["POST"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers/import/cc-switch",
+        control_provider_import,
+        methods=["POST"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers",
+        control_provider_create,
+        methods=["POST"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers/{{provider_id}}",
+        control_provider_detail,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers/{{provider_id}}",
+        control_provider_update,
+        methods=["PUT"],
         include_in_schema=False,
     )
     app.add_api_route(f"{prefix}/api/providers/order", control_provider_order, methods=["POST"], include_in_schema=False)

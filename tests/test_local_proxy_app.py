@@ -26,6 +26,7 @@ from local_proxy.core import ProviderConfigurationError, ProxyProvider
 from local_proxy.codex_profile import load_settings as load_codex_settings
 from local_proxy.shared_settings import (
     migrate_runtime_data,
+    protocol_provider_catalog_path,
     protocol_settings_path,
     protocol_usage_database_path,
 )
@@ -38,6 +39,7 @@ class LocalProxySettingsTests(unittest.TestCase):
         self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/claude/")
         self.assertEqual(config["config_endpoint"], "/control/codex/api/codex-config")
         self.assertTrue(config["features"]["provider_launch_command"])
+        self.assertTrue(config["features"]["provider_catalog"])
 
     def test_shared_settings_round_trip_and_corrupt_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -116,6 +118,10 @@ class LocalProxySettingsTests(unittest.TestCase):
             self.assertEqual(
                 protocol_usage_database_path(service_id),
                 data_directory() / f"{service_id}-usage.sqlite3",
+            )
+            self.assertEqual(
+                protocol_provider_catalog_path(service_id),
+                data_directory() / f"{service_id}-providers.sqlite3",
             )
 
     def test_fallback_legacy_data_is_split_and_removed_after_migration(self) -> None:
