@@ -45,6 +45,11 @@ def protocol_usage_database_path(service_id: str, root: Path | None = None) -> P
     return (root or data_directory()) / f"{service_id}-usage.sqlite3"
 
 
+def protocol_provider_catalog_path(service_id: str, root: Path | None = None) -> Path:
+    _validate_service_id(service_id)
+    return (root or data_directory()) / f"{service_id}-providers.sqlite3"
+
+
 def _validate_service_id(service_id: str) -> None:
     if service_id not in SERVICE_IDS:
         raise ValueError(f"未知协议：{service_id}")
