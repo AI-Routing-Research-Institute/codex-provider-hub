@@ -375,7 +375,10 @@
       <label class="provider-editor-field"><span>HTTP Headers <small>JSON 对象</small></span><textarea id="provider-editor-headers" rows="3" spellcheck="false">{}</textarea></label>
       <label class="provider-editor-field"><span>Query Params <small>JSON 对象</small></span><textarea id="provider-editor-query" rows="3" spellcheck="false">{}</textarea></label>
       <p id="provider-editor-error" class="provider-editor-error" role="alert" hidden></p>
-      <div class="provider-editor-actions"><button id="provider-editor-cancel" class="secondary-button" type="button">取消</button><button id="provider-editor-save" class="primary-button" type="submit">保存</button></div>
+      <div class="provider-editor-actions">
+        <button id="provider-editor-delete" class="danger-button" type="button" hidden>删除供应商</button>
+        <div class="provider-editor-primary-actions"><button id="provider-editor-cancel" class="secondary-button" type="button">取消</button><button id="provider-editor-save" class="primary-button" type="submit">保存</button></div>
+      </div>
     </form>
   </dialog>
 

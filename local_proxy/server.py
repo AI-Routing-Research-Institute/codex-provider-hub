@@ -693,6 +693,41 @@ def _register_control_routes(
             return JSONResponse(status_code=503, content={"detail": str(exc)})
         return catalog_result_status(request, {"action": "updated", "provider_id": updated.provider_id})
 
+    async def control_provider_delete(provider_id: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.provider_catalog is None:
+            return JSONResponse(status_code=503, content={"detail": "Provider catalog unavailable"})
+        current = profile.router.current_provider()
+        if current is not None and current.provider_id == provider_id:
+            return JSONResponse(status_code=409, content={"detail": "当前供应商不能删除，请先切换"})
+        try:
+            deleted = await asyncio.to_thread(profile.provider_catalog.delete_record, provider_id)
+            await reload_catalog_providers()
+        except KeyError:
+            return JSONResponse(status_code=404, content={"detail": "Provider not found"})
+        except (OSError, sqlite3.Error, ProviderConfigurationError) as exc:
+            return JSONResponse(status_code=503, content={"detail": str(exc)})
+        with profile.preferences_lock:
+            profile.active_hidden_provider_ids.discard(provider_id)
+            profile.active_provider_order[:] = [
+                item for item in profile.active_provider_order if item != provider_id
+            ]
+            saved_hidden = tuple(
+                item.provider_id
+                for item in profile.router.providers()
+                if item.provider_id in profile.active_hidden_provider_ids
+            )
+            saved_order = tuple(profile.active_provider_order)
+        if profile.on_hidden_provider_ids_changed is not None:
+            profile.on_hidden_provider_ids_changed(saved_hidden)
+        if profile.on_provider_order_changed is not None:
+            profile.on_provider_order_changed(saved_order)
+        return catalog_result_status(
+            request,
+            {"action": "deleted", "provider_id": deleted.provider_id},
+        )
+
     async def control_provider_import(request: Request):
         if not _valid_control_request(request):
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
@@ -879,6 +914,12 @@ def _register_control_routes(
         f"{prefix}/api/providers/{{provider_id}}",
         control_provider_update,
         methods=["PUT"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers/{{provider_id}}",
+        control_provider_delete,
+        methods=["DELETE"],
         include_in_schema=False,
     )
     app.add_api_route(f"{prefix}/api/providers/order", control_provider_order, methods=["POST"], include_in_schema=False)

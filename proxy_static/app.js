@@ -147,6 +147,7 @@ const providerEditorHeaders = document.querySelector("#provider-editor-headers")
 const providerEditorQuery = document.querySelector("#provider-editor-query");
 const providerEditorError = document.querySelector("#provider-editor-error");
 const providerEditorSave = document.querySelector("#provider-editor-save");
+const providerEditorDelete = document.querySelector("#provider-editor-delete");
 const providerEditorClose = document.querySelector("#provider-editor-close");
 const providerEditorCancel = document.querySelector("#provider-editor-cancel");
 const requestList = document.querySelector("#request-list");
@@ -2804,6 +2805,8 @@ async function openProviderEditor(providerId = "") {
   providerEditorQuery.value = "{}";
   setProviderEditorError();
   providerEditorSave.disabled = true;
+  providerEditorDelete.hidden = !providerId;
+  providerEditorDelete.disabled = true;
   if (providerId) {
     try {
       const response = await fetch(
@@ -2823,6 +2826,10 @@ async function openProviderEditor(providerId = "") {
     }
   }
   providerEditorSave.disabled = false;
+  providerEditorDelete.disabled = providerId === latestStatus.current_provider_id;
+  providerEditorDelete.title = providerEditorDelete.disabled
+    ? "当前供应商不能删除，请先切换"
+    : "永久删除本地供应商";
   if (typeof providerEditor.showModal === "function") {
     providerEditor.showModal();
   } else {
@@ -2879,6 +2886,37 @@ async function saveProviderEditor(event) {
     setProviderEditorError(error?.message || "保存供应商失败");
   } finally {
     providerEditorSave.disabled = false;
+  }
+}
+
+async function deleteProviderEditor() {
+  const providerId = providerEditorId.value;
+  if (!providerId || uiConfig.features.provider_catalog !== true) return;
+  const providerName = providerEditorName.value.trim() || "该供应商";
+  if (!window.confirm(`删除“${providerName}”吗？此操作无法撤销。`)) return;
+  setProviderEditorError();
+  providerEditorDelete.disabled = true;
+  providerEditorSave.disabled = true;
+  try {
+    const response = await fetch(
+      controlUrl(`/api/providers/${encodeURIComponent(providerId)}`),
+      {
+        method: "DELETE",
+        headers: CONTROL_HEADER,
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) throw new Error(await responseDetail(response, "删除供应商失败"));
+    const status = await response.json();
+    renderedListSignature = null;
+    renderStatus(status);
+    closeProviderEditor();
+    showToast("供应商已删除", `${providerName} 已从本地供应商目录移除`);
+  } catch (error) {
+    setProviderEditorError(error?.message || "删除供应商失败");
+  } finally {
+    providerEditorSave.disabled = false;
+    providerEditorDelete.disabled = providerId === latestStatus.current_provider_id;
   }
 }
 
@@ -3300,6 +3338,7 @@ manageProvidersButton.addEventListener("click", toggleProviderManagement);
 addProviderButton?.addEventListener("click", () => void openProviderEditor());
 importProvidersButton?.addEventListener("click", () => void importProvidersFromCcSwitch());
 providerEditorForm?.addEventListener("submit", saveProviderEditor);
+providerEditorDelete?.addEventListener("click", () => void deleteProviderEditor());
 providerEditorClose?.addEventListener("click", closeProviderEditor);
 providerEditorCancel?.addEventListener("click", closeProviderEditor);
 healthRefreshButton.addEventListener("click", () => readHealthStatus());
