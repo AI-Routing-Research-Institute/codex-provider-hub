@@ -224,6 +224,15 @@ class HealthProbeTests(unittest.TestCase):
                     error_text="This channel does not allow the current client",
                 ),
             ),
+            (
+                "rate_limited",
+                make_turn(
+                    turn_status="failed",
+                    http_status_code=403,
+                    error_code="client_blocked",
+                    error_text="用户额度不足, 剩余额度: $0.00",
+                ),
+            ),
             ("rate_limited", make_turn(turn_status="failed", http_status_code=429)),
             ("rate_limited", make_turn(turn_status="failed", error_text="usage limit reached")),
             (
