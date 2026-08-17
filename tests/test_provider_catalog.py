@@ -163,6 +163,24 @@ class ProviderCatalogTests(unittest.TestCase):
         self.assertEqual(loaded.configured_headers["Authorization"], "Bearer fixture-header-key")
         self.assertEqual(loaded.default_query["api_key"], "fixture-query-key")
 
+    def test_delete_removes_provider_and_rejects_unknown_id(self) -> None:
+        self.catalog.initialize()
+        created = self.catalog.create_from_payload(
+            {
+                "name": "Disposable Provider",
+                "base_url": "https://disposable.example.test/v1",
+                "headers": {},
+                "query_params": {},
+            }
+        )
+
+        deleted = self.catalog.delete_record(created.provider_id)
+
+        self.assertEqual(deleted.name, "Disposable Provider")
+        self.assertIsNone(self.catalog.get_record(created.provider_id))
+        with self.assertRaises(KeyError):
+            self.catalog.delete_record(created.provider_id)
+
     def test_missing_ccs_database_creates_empty_catalog_with_indexes(self) -> None:
         result = self.catalog.initialize(self.source)
         create_ccs_database(self.source)
@@ -248,6 +266,22 @@ class ProviderCatalogApiTests(unittest.IsolatedAsyncioTestCase):
             headers={"X-Local-Proxy-Control": "1"},
             json={"overwrite": True},
         )
+        current_delete = await self.client.delete(
+            f"/control/codex/api/providers/{self.provider_id}",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
+        created_id = created.json()["catalog"]["provider_id"]
+        forbidden_delete = await self.client.delete(
+            f"/control/codex/api/providers/{created_id}",
+        )
+        deleted = await self.client.delete(
+            f"/control/codex/api/providers/{created_id}",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
+        missing_delete = await self.client.delete(
+            f"/control/codex/api/providers/{created_id}",
+            headers={"X-Local-Proxy-Control": "1"},
+        )
 
         self.assertEqual(detail.status_code, 200)
         self.assertTrue(detail.json()["has_api_key"])
@@ -264,6 +298,13 @@ class ProviderCatalogApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(imported.status_code, 200)
         self.assertEqual(imported.json()["catalog"]["overwritten"], 1)
         self.assertEqual(self.import_modes, [True])
+        self.assertEqual(current_delete.status_code, 409)
+        self.assertEqual(forbidden_delete.status_code, 403)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["catalog"]["action"], "deleted")
+        self.assertEqual([provider["name"] for provider in deleted.json()["providers"]], ["Initial"])
+        self.assertNotIn("fixture-created-key", deleted.text)
+        self.assertEqual(missing_delete.status_code, 404)
 
 
 if __name__ == "__main__":
