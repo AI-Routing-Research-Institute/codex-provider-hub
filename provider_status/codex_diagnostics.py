@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, urlsplit
 
+from provider_status.error_semantics import has_usage_limit_semantics
+
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+", re.IGNORECASE)
 _STATUS_RE = re.compile(
@@ -46,8 +48,8 @@ _NETWORK_ERROR_PHRASES = (
 _PRIORITY = {
     "model_unavailable": 0,
     "auth_failed": 1,
-    "client_blocked": 2,
-    "rate_limited": 3,
+    "rate_limited": 2,
+    "client_blocked": 3,
     "no_channel": 4,
     "upstream_unavailable": 5,
     "network_error": 6,
@@ -328,7 +330,7 @@ def _effective_port(url: SplitResult) -> int | None:
 
 
 def _classify(text: str) -> _DiagnosticEvent | None:
-    normalized = text.casefold()
+    normalized = _semantic_text(text).casefold()
     status_code = _extract_status_code(text)
     if any(phrase in normalized for phrase in _MODEL_ERROR_PHRASES) or (
         "does not exist" in normalized and "model" in normalized
@@ -345,13 +347,10 @@ def _classify(text: str) -> _DiagnosticEvent | None:
         )
     ):
         return _DiagnosticEvent("auth_failed", status_code)
+    if status_code == 429 or has_usage_limit_semantics(normalized):
+        return _DiagnosticEvent("rate_limited", status_code)
     if status_code == 403 or "does not allow the current client" in normalized:
         return _DiagnosticEvent("client_blocked", status_code)
-    if status_code == 429 or any(
-        phrase in normalized
-        for phrase in ("rate limit", "too many requests", "quota exceeded")
-    ):
-        return _DiagnosticEvent("rate_limited", status_code)
     if "no available channel" in normalized:
         return _DiagnosticEvent("no_channel", status_code)
     if status_code in {502, 503, 504}:
@@ -359,6 +358,14 @@ def _classify(text: str) -> _DiagnosticEvent | None:
     if any(phrase in normalized for phrase in _NETWORK_ERROR_PHRASES):
         return _DiagnosticEvent("network_error", status_code)
     return None
+
+
+def _semantic_text(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    return f"{text}\n{json.dumps(payload, ensure_ascii=False)}"
 
 
 def _extract_status_code(text: str) -> int | None:
