@@ -91,6 +91,7 @@ let uiConfig = {
     usage_history: true,
     session_routing: false,
     provider_launch_command: false,
+    provider_catalog: false,
   },
 };
 
@@ -99,6 +100,11 @@ const emptyState = document.querySelector("#empty-state");
 const searchInput = document.querySelector("#search");
 const usageWindow = document.querySelector("#usage-window");
 const manageProvidersButton = document.querySelector("#manage-providers");
+const providerCatalogActions = document.querySelector("#provider-catalog-actions");
+const addProviderButton = document.querySelector("#add-provider");
+const importProvidersButton = document.querySelector("#import-providers");
+const providerImportMode = document.querySelector("#provider-import-mode");
+const providerMetaHeader = document.querySelector("#provider-meta-header");
 const healthSource = document.querySelector("#health-source");
 const healthSourceDot = document.querySelector("#health-source-dot");
 const healthSourceText = document.querySelector("#health-source-text");
@@ -127,6 +133,22 @@ const usageHistoryList = document.querySelector("#usage-history-list");
 const usageHistoryMore = document.querySelector("#usage-history-more");
 const usageHistoryClose = document.querySelector("#usage-history-close");
 const historyDetailPopover = document.querySelector("#history-detail-popover");
+const providerEditor = document.querySelector("#provider-editor");
+const providerEditorForm = document.querySelector("#provider-editor-form");
+const providerEditorTitle = document.querySelector("#provider-editor-title");
+const providerEditorMode = document.querySelector("#provider-editor-mode");
+const providerEditorId = document.querySelector("#provider-editor-id");
+const providerEditorName = document.querySelector("#provider-editor-name");
+const providerEditorBaseUrl = document.querySelector("#provider-editor-base-url");
+const providerEditorWireApi = document.querySelector("#provider-editor-wire-api");
+const providerEditorApiKey = document.querySelector("#provider-editor-api-key");
+const providerEditorClearKey = document.querySelector("#provider-editor-clear-key");
+const providerEditorHeaders = document.querySelector("#provider-editor-headers");
+const providerEditorQuery = document.querySelector("#provider-editor-query");
+const providerEditorError = document.querySelector("#provider-editor-error");
+const providerEditorSave = document.querySelector("#provider-editor-save");
+const providerEditorClose = document.querySelector("#provider-editor-close");
+const providerEditorCancel = document.querySelector("#provider-editor-cancel");
 const requestList = document.querySelector("#request-list");
 const requestTableShell = document.querySelector(".request-table-shell");
 const requestsEmpty = document.querySelector("#requests-empty");
@@ -169,6 +191,18 @@ function normalizeViewName(viewName, requestsEnabled = true) {
   return viewName === "requests" && !requestsEnabled ? "providers" : viewName;
 }
 
+function renderProviderManagementState() {
+  if (typeof providerCatalogActions === "undefined" || !providerCatalogActions) return;
+  const managing = typeof manageProvidersMode !== "undefined" && manageProvidersMode;
+  providerCatalogActions.toggleAttribute(
+    "hidden",
+    uiConfig.features.provider_catalog !== true || !managing,
+  );
+  if (typeof providerMetaHeader !== "undefined" && providerMetaHeader) {
+    providerMetaHeader.textContent = managing ? "认证与操作" : "认证";
+  }
+}
+
 function applyUiConfig(config) {
   if (!config || typeof config !== "object") return;
   uiConfig = {
@@ -181,7 +215,12 @@ function applyUiConfig(config) {
   document.querySelector(".app-window").setAttribute("aria-label", `${uiConfig.display_name}控制台`);
   text(".brand-mark", uiConfig.brand_mark);
   text(".brand-copy h1", uiConfig.display_name);
-  text(".brand-copy p", `从 CC Switch 读取供应商，切换后无需重启 ${uiConfig.client_name}`);
+  text(
+    ".brand-copy p",
+    uiConfig.features.provider_catalog === true
+      ? `使用本地供应商目录，切换后无需重启 ${uiConfig.client_name}`
+      : `从 CC Switch 读取供应商，切换后无需重启 ${uiConfig.client_name}`,
+  );
   const peerLink = document.querySelector(".console-link");
   peerLink.href = uiConfig.peer_console_url || "#";
   peerLink.textContent = uiConfig.peer_console_label || "切换控制台";
@@ -218,6 +257,13 @@ function applyUiConfig(config) {
     "hidden",
     uiConfig.features.provider_launch_command !== true,
   );
+  renderProviderManagementState();
+  const refreshButton = document.querySelector("#refresh-button");
+  if (uiConfig.features.provider_catalog === true) {
+    refreshButton.title = "重新读取本地供应商目录";
+    refreshButton.setAttribute("aria-label", "重新读取本地供应商目录");
+    text("#runtime-database-hint", "CC Switch 数据库仅作为手动导入来源");
+  }
 }
 
 function requestsViewEnabled() {
@@ -932,7 +978,11 @@ function renderRuntimeSettings(settings) {
   runtimeDatabaseInput.value = settings.database_path || "~/.cc-switch/cc-switch.db";
   runtimeHealthUrlInput.value = settings.health_status_url || "";
   runtimeShowLaunchCommandInput.checked = settings.show_provider_launch_command !== false;
-  document.querySelector("#database-path").textContent = runtimeDatabaseInput.value;
+  document.querySelector("#database-path").textContent = (
+    uiConfig.features.provider_catalog === true
+      ? settings.provider_catalog
+      : runtimeDatabaseInput.value
+  ) || runtimeDatabaseInput.value;
   document.querySelector("#runtime-data-directory").textContent = settings.data_directory || uiConfig.data_directory;
   document.querySelector("#runtime-config-location").textContent = settings.codex_config_file || settings.claude_config_file || uiConfig.config_location;
   const restartRequired = settings.restart_required === true;
@@ -2388,17 +2438,34 @@ function renderProviderList() {
     auth.textContent = provider.has_credentials ? "已配置" : "缺失";
     meta.append(auth);
     if (manageProvidersMode) {
+      const actions = document.createElement("span");
+      actions.className = "provider-row-actions";
       const visibility = document.createElement("button");
       visibility.type = "button";
-      visibility.className = "visibility-button";
+      visibility.className = "provider-action-button visibility-button";
       visibility.textContent = provider.hidden ? "恢复" : "隐藏";
       visibility.disabled = provider.current;
       visibility.title = provider.current ? "请先切换供应商再隐藏" : visibility.textContent;
+      visibility.setAttribute("aria-label", `${visibility.textContent}供应商 ${provider.name}`);
       visibility.addEventListener("click", (event) => {
         event.stopPropagation();
         setProviderHidden(provider, !provider.hidden);
       });
-      meta.append(visibility);
+      actions.append(visibility);
+      if (uiConfig.features.provider_catalog === true) {
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.className = "provider-action-button provider-edit-button";
+        editButton.textContent = "编辑";
+        editButton.title = "编辑本地供应商配置";
+        editButton.setAttribute("aria-label", `编辑供应商 ${provider.name}`);
+        editButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          void openProviderEditor(provider.provider_id);
+        });
+        actions.append(editButton);
+      }
+      meta.append(actions);
     }
     row.append(state, copy, requestCell, healthCell, tokenCell, meta);
     providerSelect.addEventListener("click", (event) => {
@@ -2695,11 +2762,161 @@ async function saveProviderOrder(providerIds) {
   }
 }
 
+function setProviderEditorError(message = "") {
+  providerEditorError.textContent = message;
+  providerEditorError.hidden = !message;
+}
+
+function parseProviderEditorObject(value, fieldName) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value || "{}");
+  } catch (error) {
+    throw new Error(`${fieldName} 必须是有效的 JSON 对象`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${fieldName} 必须是 JSON 对象`);
+  }
+  return parsed;
+}
+
+function closeProviderEditor() {
+  setProviderEditorError();
+  if (providerEditor.open && typeof providerEditor.close === "function") {
+    providerEditor.close();
+  } else {
+    providerEditor.removeAttribute("open");
+  }
+}
+
+async function openProviderEditor(providerId = "") {
+  if (uiConfig.features.provider_catalog !== true) return;
+  providerEditorId.value = providerId;
+  providerEditorTitle.textContent = providerId ? "编辑供应商" : "新增供应商";
+  providerEditorMode.textContent = providerId ? "修改本地副本" : "新增本地供应商";
+  providerEditorName.value = "";
+  providerEditorBaseUrl.value = "";
+  providerEditorWireApi.value = "responses";
+  providerEditorApiKey.value = "";
+  providerEditorClearKey.checked = false;
+  providerEditorClearKey.disabled = !providerId;
+  providerEditorHeaders.value = "{}";
+  providerEditorQuery.value = "{}";
+  setProviderEditorError();
+  providerEditorSave.disabled = true;
+  if (providerId) {
+    try {
+      const response = await fetch(
+        controlUrl(`/api/providers/${encodeURIComponent(providerId)}`),
+        { cache: "no-store" },
+      );
+      if (!response.ok) throw new Error(await responseDetail(response, "无法读取供应商"));
+      const provider = await response.json();
+      providerEditorName.value = provider.name || "";
+      providerEditorBaseUrl.value = provider.base_url || "";
+      providerEditorWireApi.value = provider.wire_api || "responses";
+      providerEditorHeaders.value = JSON.stringify(provider.headers || {}, null, 2);
+      providerEditorQuery.value = JSON.stringify(provider.query_params || {}, null, 2);
+    } catch (error) {
+      showToast("无法打开供应商", error?.message || "无法读取本地供应商配置", "error");
+      return;
+    }
+  }
+  providerEditorSave.disabled = false;
+  if (typeof providerEditor.showModal === "function") {
+    providerEditor.showModal();
+  } else {
+    providerEditor.setAttribute("open", "");
+  }
+  providerEditorName.focus();
+}
+
+async function saveProviderEditor(event) {
+  event.preventDefault();
+  setProviderEditorError();
+  let headers;
+  let queryParams;
+  try {
+    headers = parseProviderEditorObject(providerEditorHeaders.value, "HTTP Headers");
+    queryParams = parseProviderEditorObject(providerEditorQuery.value, "Query Params");
+  } catch (error) {
+    setProviderEditorError(error?.message || "配置格式无效");
+    return;
+  }
+  const payload = {
+    name: providerEditorName.value.trim(),
+    base_url: providerEditorBaseUrl.value.trim(),
+    wire_api: providerEditorWireApi.value,
+    headers,
+    query_params: queryParams,
+    clear_api_key: providerEditorClearKey.checked,
+  };
+  const apiKey = providerEditorApiKey.value.trim();
+  if (apiKey) payload.api_key = apiKey;
+  if (!payload.name || !payload.base_url) {
+    setProviderEditorError("名称和 Base URL 不能为空");
+    return;
+  }
+  const providerId = providerEditorId.value;
+  providerEditorSave.disabled = true;
+  try {
+    const response = await fetch(
+      controlUrl(providerId ? `/api/providers/${encodeURIComponent(providerId)}` : "/api/providers"),
+      {
+        method: providerId ? "PUT" : "POST",
+        headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) throw new Error(await responseDetail(response, "保存供应商失败"));
+    const status = await response.json();
+    renderedListSignature = null;
+    renderStatus(status);
+    closeProviderEditor();
+    showToast(providerId ? "供应商已更新" : "供应商已新增", "本地供应商目录已保存，路由已立即刷新");
+  } catch (error) {
+    setProviderEditorError(error?.message || "保存供应商失败");
+  } finally {
+    providerEditorSave.disabled = false;
+  }
+}
+
+async function importProvidersFromCcSwitch() {
+  if (uiConfig.features.provider_catalog !== true) return;
+  const overwrite = providerImportMode?.value === "overwrite";
+  importProvidersButton.disabled = true;
+  try {
+    const response = await fetch(controlUrl("/api/providers/import/cc-switch"), {
+      method: "POST",
+      headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+      body: JSON.stringify({ overwrite }),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(await responseDetail(response, "CC Switch 导入失败"));
+    const status = await response.json();
+    renderedListSignature = null;
+    renderStatus(status);
+    const result = status.catalog || {};
+    showToast(
+      "CC Switch 导入完成",
+      overwrite
+        ? `新增 ${Number(result.added || 0)} 个，覆盖 ${Number(result.overwritten || 0)} 个`
+        : `新增 ${Number(result.added || 0)} 个，跳过 ${Number(result.skipped || 0)} 个，未覆盖本地修改`,
+    );
+  } catch (error) {
+    showToast("CC Switch 导入失败", error?.message || "无法读取 CCS 数据库", "error");
+  } finally {
+    importProvidersButton.disabled = false;
+  }
+}
+
 function toggleProviderManagement() {
   manageProvidersMode = !manageProvidersMode;
   manageProvidersButton.setAttribute("aria-pressed", String(manageProvidersMode));
-  manageProvidersButton.textContent = manageProvidersMode ? "完成管理" : "管理列表";
+  manageProvidersButton.textContent = manageProvidersMode ? "完成" : "管理";
   document.querySelector("#manage-hint").hidden = !manageProvidersMode;
+  renderProviderManagementState();
   renderedListSignature = null;
   renderProviderList();
 }
@@ -2743,9 +2960,9 @@ async function refreshProviders() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const status = await response.json();
     if (requestSequence === statusRequestSequence) renderStatus(status);
-    showToast("已重新读取 CC Switch", `供应商列表已更新，共 ${latestStatus.providers.length} 个。`);
+    showToast("已重新读取本地目录", `供应商列表已更新，共 ${latestStatus.providers.length} 个。`);
   } catch (error) {
-    showToast("刷新失败", "无法读取 CC Switch 数据库。", "error");
+    showToast("刷新失败", "无法读取本地供应商目录。", "error");
   } finally {
     controlRequestActive = false;
     button.disabled = false;
@@ -3080,6 +3297,11 @@ usageWindow.addEventListener("change", () => {
   refreshForTimeRange("usage");
 });
 manageProvidersButton.addEventListener("click", toggleProviderManagement);
+addProviderButton?.addEventListener("click", () => void openProviderEditor());
+importProvidersButton?.addEventListener("click", () => void importProvidersFromCcSwitch());
+providerEditorForm?.addEventListener("submit", saveProviderEditor);
+providerEditorClose?.addEventListener("click", closeProviderEditor);
+providerEditorCancel?.addEventListener("click", closeProviderEditor);
 healthRefreshButton.addEventListener("click", () => readHealthStatus());
 document.querySelector("#refresh-button").addEventListener("click", refreshProviders);
 document.querySelector("#copy-config").addEventListener("click", copyConfig);

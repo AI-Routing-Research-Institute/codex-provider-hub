@@ -8,7 +8,11 @@ from typing import Any, Iterable, Mapping
 
 import httpx
 
-from local_proxy.codex import codex_cli_launch_command, load_proxy_providers
+from local_proxy.codex import (
+    codex_cli_launch_command,
+    load_local_proxy_providers,
+    load_proxy_providers,
+)
 from local_proxy.codex_sessions import CodexSessionNameIndex
 from local_proxy.core import (
     DEFAULT_PORT,
@@ -22,12 +26,14 @@ from local_proxy.core import (
 )
 from local_proxy.paths import display_path
 from local_proxy.server import ProxyProfile
+from local_proxy.provider_catalog import ProviderCatalog
 from local_proxy.shared_settings import (
     PROTOCOL_SETTINGS_VERSION,
     data_directory,
     default_protocol_settings,
     load_protocol_settings,
     protocol_settings_path,
+    protocol_provider_catalog_path,
     protocol_usage_database_path,
     save_protocol_settings,
 )
@@ -124,6 +130,7 @@ def codex_ui_config(port: int, root: Path | None = None) -> dict[str, Any]:
             "usage_history": True,
             "session_routing": True,
             "provider_launch_command": True,
+            "provider_catalog": True,
         },
     }
 
@@ -146,6 +153,8 @@ def build_codex_profile(
         else load_settings(active_settings_path)
     )
     settings_lock = threading.RLock()
+    provider_catalog = ProviderCatalog(protocol_provider_catalog_path("codex", root))
+    provider_catalog.initialize(database)
     active_database_path = database.expanduser().resolve()
 
     def load_prepared_providers(source: Path) -> tuple:
@@ -155,9 +164,13 @@ def build_codex_profile(
         return order_proxy_providers(loaded, provider_order)
 
     def prepared_providers() -> tuple:
+        loaded = filter_self_referencing_providers(
+            load_local_proxy_providers(provider_catalog),
+            port,
+        )
         with settings_lock:
-            source = active_database_path
-        return load_prepared_providers(source)
+            provider_order = tuple(settings.get("provider_order", ()))
+        return order_proxy_providers(loaded, provider_order)
 
     providers = prepared_providers()
     router = ProviderRouter(
@@ -200,11 +213,14 @@ def build_codex_profile(
 
     def apply_database(source: Path, loaded: tuple) -> None:
         nonlocal active_database_path
+        del loaded
+        provider_catalog.import_from_cc_switch(source)
+        local_loaded = prepared_providers()
         with settings_lock:
             active_database_path = source
         current = router.current_provider()
         selected = router.replace_providers(
-            loaded,
+            local_loaded,
             preferred_id=current.provider_id if current else None,
         )
         selected_id = selected.provider_id if selected is not None else None
@@ -218,6 +234,8 @@ def build_codex_profile(
             "data_directory": display_path(root),
             "settings_file": display_path(active_settings_path),
             "usage_database": display_path(active_usage_path),
+            "provider_catalog": display_path(provider_catalog.path),
+            "provider_catalog_source": display_path(active_database_path),
             "codex_config_file": "~/.codex/config.toml",
             "show_provider_launch_command": bool(show_launch_command),
         }
@@ -266,4 +284,9 @@ def build_codex_profile(
         session_catalog=session_catalog,
         session_key_resolver=session_name_index.thread_id_for_session_key,
         config_endpoint_name="codex-config",
+        provider_catalog=provider_catalog,
+        provider_catalog_import=lambda overwrite: provider_catalog.import_from_cc_switch(
+            active_database_path,
+            overwrite=overwrite,
+        ),
     )

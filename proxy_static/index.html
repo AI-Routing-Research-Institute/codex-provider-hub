@@ -96,8 +96,21 @@
                 <span class="search-icon" aria-hidden="true">⌕</span>
                 <input id="search" type="search" placeholder="搜索名称或地址" autocomplete="off">
               </label>
-              <button id="manage-providers" class="secondary-button" type="button" aria-pressed="false">管理列表</button>
+              <button id="manage-providers" class="secondary-button" type="button" aria-pressed="false">管理</button>
               <button id="refresh-button" class="icon-button" type="button" title="重新读取 CC Switch" aria-label="重新读取 CC Switch">↻</button>
+            </div>
+            <div id="provider-catalog-actions" class="provider-management-bar" hidden>
+              <div class="provider-management-heading">
+                <strong>供应商管理</strong>
+                <span>本地目录</span>
+              </div>
+              <div class="provider-catalog-controls">
+                <button id="add-provider" class="secondary-button provider-add-button" type="button"><span aria-hidden="true">＋</span>新增</button>
+                <div class="provider-import-actions">
+                  <label class="provider-import-mode"><span>导入方式</span><select id="provider-import-mode" title="CCS 导入方式" aria-label="CCS 导入方式"><option value="skip">仅新增</option><option value="overwrite">覆盖已有</option></select></label>
+                  <button id="import-providers" class="secondary-button" type="button">导入 CCS</button>
+                </div>
+              </div>
             </div>
           </div>
           <div class="usage-summary" aria-live="polite">
@@ -109,7 +122,7 @@
           </div>
           <div class="provider-list-shell">
             <div class="manage-hint" id="manage-hint" hidden>拖动左侧手柄调整顺序；搜索时暂停拖动。隐藏的供应商仅在管理模式显示。</div>
-            <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>请求</span><span>服务器检测</span><span>Token 用量</span><span>认证</span></div>
+            <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>请求</span><span>服务器检测</span><span>Token 用量</span><span id="provider-meta-header">认证</span></div>
             <div id="provider-list" class="provider-list" aria-live="polite"></div>
             <div id="empty-state" class="empty-state" hidden>没有匹配的供应商</div>
           </div>
@@ -252,7 +265,7 @@
             <input id="runtime-port" type="number" min="1024" max="65535" step="1" inputmode="numeric" required>
           </label>
           <div class="setting-row">
-            <label for="runtime-database-path"><strong>供应商数据源</strong><small>默认只读加载 CC Switch 数据库</small></label>
+            <label for="runtime-database-path"><strong>供应商数据源</strong><small id="runtime-database-hint">默认只读加载 CC Switch 数据库</small></label>
             <div class="setting-control-with-action">
               <input id="runtime-database-path" type="text" spellcheck="false" autocomplete="off" required>
               <button id="validate-database" class="secondary-button setting-action-button" type="button">验证</button>
@@ -346,6 +359,25 @@
     <button id="usage-history-more" class="usage-history-more" type="button" hidden>加载更早记录</button>
   </div>
   <div id="history-detail-popover" class="history-detail-popover" role="tooltip"></div>
+
+  <dialog id="provider-editor" class="provider-editor" aria-labelledby="provider-editor-title">
+    <form id="provider-editor-form" method="dialog">
+      <div class="provider-editor-heading">
+        <div><strong id="provider-editor-title">供应商</strong><span id="provider-editor-mode">新增本地供应商</span></div>
+        <button id="provider-editor-close" class="usage-history-close" type="button" title="关闭供应商编辑" aria-label="关闭供应商编辑">×</button>
+      </div>
+      <input id="provider-editor-id" type="hidden">
+      <label class="provider-editor-field"><span>名称</span><input id="provider-editor-name" type="text" maxlength="240" required autocomplete="off"></label>
+      <label class="provider-editor-field"><span>Base URL</span><input id="provider-editor-base-url" type="url" required spellcheck="false" autocomplete="off" placeholder="https://api.example.com/v1"></label>
+      <label class="provider-editor-field"><span>Wire API</span><select id="provider-editor-wire-api"><option value="responses">responses</option></select></label>
+      <label class="provider-editor-field"><span>API Key</span><input id="provider-editor-api-key" type="password" autocomplete="new-password" placeholder="新增时填写，编辑时留空表示保留"></label>
+      <label class="provider-editor-check"><input id="provider-editor-clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
+      <label class="provider-editor-field"><span>HTTP Headers <small>JSON 对象</small></span><textarea id="provider-editor-headers" rows="3" spellcheck="false">{}</textarea></label>
+      <label class="provider-editor-field"><span>Query Params <small>JSON 对象</small></span><textarea id="provider-editor-query" rows="3" spellcheck="false">{}</textarea></label>
+      <p id="provider-editor-error" class="provider-editor-error" role="alert" hidden></p>
+      <div class="provider-editor-actions"><button id="provider-editor-cancel" class="secondary-button" type="button">取消</button><button id="provider-editor-save" class="primary-button" type="submit">保存</button></div>
+    </form>
+  </dialog>
 
   <script src="./static/app.js?v=31" defer></script>
 </body>
