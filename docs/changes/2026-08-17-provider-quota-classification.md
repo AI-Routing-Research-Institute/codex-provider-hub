@@ -59,4 +59,4 @@ Codex SQLite 诊断会优先把任意 HTTP 403 归类为 `client_blocked`，且�
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/32
