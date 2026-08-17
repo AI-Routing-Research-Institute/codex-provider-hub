@@ -169,6 +169,24 @@ class ProviderCatalog:
             )
         return self.get_record(provider_id)  # type: ignore[return-value]
 
+    def delete_record(self, provider_id: str) -> CatalogProvider:
+        self._ensure_schema()
+        with self._lock, closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                """
+                SELECT provider_id, name, is_current, endpoint_url,
+                       common_config_enabled, raw_config, auth_json, meta_json,
+                       sort_index, created_at
+                FROM providers WHERE provider_id = ?
+                """,
+                (provider_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(provider_id)
+            deleted = self._row_to_record(row)
+            connection.execute("DELETE FROM providers WHERE provider_id = ?", (provider_id,))
+        return deleted
+
     def import_from_cc_switch(self, source: Path, *, overwrite: bool = False) -> dict[str, int | str]:
         source_path = Path(source).expanduser().resolve()
         if not source_path.is_file():
