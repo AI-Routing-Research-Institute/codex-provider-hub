@@ -54,7 +54,7 @@ SSH 初始化失败、主机指纹变化、远程服务重启失败和重复 ID 
 
 ## 验证结果
 
-已通过：`python -m unittest discover -s tests -p "test_*.py"`（449 项）；全部 `tests/*.test.js`（44 项）；`node --check proxy_static/app.js`；`git diff --check`；本地 `--smoke-test`。
+已通过：`python -m unittest discover -s tests -p "test_*.py"`（449 项）；全部 `tests/*.test.js`（44 项）；`node --check proxy_static/app.js`；`git diff --check`；源码和 PyInstaller 打包后的 `--smoke-test` 均通过。
 
 ## PR
 
