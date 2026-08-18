@@ -463,9 +463,10 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   color: var(--text);
   text-align: left;
 }
-.provider-title { min-width: 0; gap: 7px; }
+.provider-title { min-width: 0; flex-wrap: wrap; gap: 7px; }
 .provider-select {
   min-width: 0;
+  flex: 1 1 120px;
   display: block;
   flex: 0 1 auto;
   padding: 0;
@@ -493,6 +494,23 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 }
 .copy-command:hover, .copy-command:focus-visible { border-color: var(--teal); color: var(--teal); outline: none; }
 .copy-command:disabled { cursor: not-allowed; opacity: .5; }
+.status-upload-modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgb(15 23 29 / .42); }
+.status-upload-modal[hidden] { display: none; }
+.status-upload-dialog { width: min(520px, 100%); max-height: min(720px, calc(100vh - 40px)); overflow: auto; padding: 20px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); box-shadow: 0 20px 60px rgb(0 0 0 / .22); }
+.status-upload-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.status-upload-heading strong { display: block; font-size: 16px; }
+.status-upload-heading span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.status-upload-help { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.status-upload-models { display: grid; gap: 8px; margin: 12px 0; }
+.status-upload-model-row { display: flex; gap: 8px; }
+.status-upload-model-input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-soft); color: var(--text); }
+.status-upload-remove { flex: 0 0 auto; width: 32px; min-height: 32px; }
+.status-upload-ssh { display: grid; gap: 8px; margin-top: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
+.status-upload-ssh label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.status-upload-ssh input { min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); }
+.status-upload-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.status-upload-error { margin: 12px 0 0; color: #b33a3a; font-size: 12px; }
+.status-upload-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .provider-copy code { display: block; margin-top: 5px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .provider-request-cell { min-width: 0; display: grid; place-items: center; padding-inline: 8px; }
 .provider-request-empty { color: var(--muted); font-size: 11px; }

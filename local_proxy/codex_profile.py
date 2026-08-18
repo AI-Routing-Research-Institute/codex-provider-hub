@@ -27,6 +27,11 @@ from local_proxy.core import (
 from local_proxy.paths import display_path
 from local_proxy.server import ProxyProfile
 from local_proxy.provider_catalog import ProviderCatalog
+from local_proxy.status_upload import (
+    StatusUploadManager,
+    build_provider_upload_payload,
+    provider_upload_preview,
+)
 from local_proxy.shared_settings import (
     PROTOCOL_SETTINGS_VERSION,
     data_directory,
@@ -143,6 +148,7 @@ def build_codex_profile(
     settings_data: dict[str, Any] | None = None,
     retry_policy_store: RetryPolicyStore | None = None,
     health_status_url_store: HealthStatusUrlStore | None = None,
+    status_upload_manager: StatusUploadManager | None = None,
 ) -> ProxyProfile:
     root = (data_root or data_directory()).expanduser().resolve()
     active_settings_path = protocol_settings_path("codex", root)
@@ -269,6 +275,15 @@ def build_codex_profile(
         usage_store=usage_store,
         recovery_history_store=RecoveryHistoryStore(active_usage_path),
         health_status_url_store=health_status_url_store or HealthStatusUrlStore(),
+        status_upload_manager=status_upload_manager,
+        status_upload_preview=(
+            lambda provider, models: provider_upload_preview(provider, "codex", models)
+            if status_upload_manager is not None else None
+        ),
+        status_upload_payload=(
+            lambda provider, models: build_provider_upload_payload(provider, "codex", models)
+            if status_upload_manager is not None else None
+        ),
         load_runtime_database=load_prepared_providers,
         apply_runtime_database=apply_database,
         database_validation_summary=lambda loaded: {
@@ -280,6 +295,15 @@ def build_codex_profile(
         runtime_metadata=runtime_metadata,
         apply_runtime_preferences=apply_runtime_preferences,
         ui_config=lambda: codex_ui_config(port, root),
+        provider_public_fields=lambda provider: {
+            "status_upload_supported": bool(provider.api_key and not provider.configured_headers),
+            "status_upload_reason": (
+                "该供应商使用自定义请求头，暂不支持上传"
+                if provider.configured_headers else
+                "没有可上传的标准 API Key" if not provider.api_key else ""
+            ),
+            "credential_kind": str(getattr(provider, "credential_kind", "api_key")),
+        },
         session_name_resolver=session_name_index.resolve,
         session_catalog=session_catalog,
         session_key_resolver=session_name_index.thread_id_for_session_key,

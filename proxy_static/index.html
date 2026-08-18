@@ -381,6 +381,23 @@
       </div>
     </form>
   </dialog>
+  <div id="status-upload-modal" class="status-upload-modal" role="dialog" aria-modal="true" aria-labelledby="status-upload-title" hidden>
+    <div class="status-upload-dialog">
+      <div class="status-upload-heading"><div><strong id="status-upload-title">上传到服务器检测</strong><span id="status-upload-provider"></span></div><button id="status-upload-close" class="usage-history-close" type="button" title="关闭上传窗口" aria-label="关闭上传窗口">×</button></div>
+      <p id="status-upload-help" class="status-upload-help">选择要检测的模型。API Key 或 Auth Token 只会通过受限 SSH 命令发送到服务器，不会显示在页面。</p>
+      <div id="status-upload-models" class="status-upload-models"></div>
+      <button id="status-upload-add-model" class="secondary-button" type="button">添加模型</button>
+      <button id="status-upload-change-target" class="text-button" type="button" hidden>更换服务器</button>
+      <div id="status-upload-ssh" class="status-upload-ssh" hidden>
+        <strong>首次连接服务器</strong>
+        <label>服务器地址<input id="status-upload-host" type="text" value="118.195.178.173" autocomplete="off"></label>
+        <div class="status-upload-inline"><label>SSH 端口<input id="status-upload-port" type="number" min="1" max="65535" value="22"></label><label>用户名<input id="status-upload-user" type="text" value="ubuntu" autocomplete="username"></label></div>
+        <label>服务器密码<input id="status-upload-password" type="password" autocomplete="current-password"></label>
+      </div>
+      <p id="status-upload-error" class="status-upload-error" role="alert" hidden></p>
+      <div class="status-upload-actions"><button id="status-upload-cancel" class="secondary-button" type="button">取消</button><button id="status-upload-submit" class="primary-button" type="button">上传</button></div>
+    </div>
+  </div>
 
   <script src="./static/app.js?v=31" defer></script>
 </body>

@@ -110,6 +110,47 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         await self.codex_client.aclose()
         await self.claude_client.aclose()
 
+    async def test_status_upload_routes_preview_and_send_backend_payload(self) -> None:
+        class FakeManager:
+            def __init__(self):
+                self.payload = None
+
+            def public_settings(self):
+                return {"host": "status.example", "port": 22, "initialized": True}
+
+            def upload(self, payload):
+                self.payload = payload
+                return {"status": "imported", "provider_id": payload["provider_id"]}
+
+        manager = FakeManager()
+        self.codex_profile.status_upload_manager = manager
+        self.codex_profile.status_upload_preview = lambda provider, models: {
+            "supported": True,
+            "suggested_models": list(models) or ["gpt-test"],
+        }
+        self.codex_profile.status_upload_payload = lambda provider, models: {
+            "provider_id": provider.provider_id,
+            "models": list(models),
+            "credential": provider.api_key,
+        }
+
+        settings = await self.client.get("/control/codex/api/status-upload/settings")
+        preview = await self.client.post(
+            "/control/codex/api/providers/codex-a/status-upload/preview",
+            headers={"X-Local-Proxy-Control": "1"},
+            json={"models": []},
+        )
+        uploaded = await self.client.post(
+            "/control/codex/api/providers/codex-a/status-upload",
+            headers={"X-Local-Proxy-Control": "1"},
+            json={"models": ["gpt-test"]},
+        )
+
+        self.assertEqual(settings.status_code, 200)
+        self.assertEqual(preview.json()["suggested_models"], ["gpt-test"])
+        self.assertEqual(uploaded.json()["status"], "imported")
+        self.assertEqual(manager.payload["credential"], "codex-secret")
+
     async def test_routes_messages_to_claude_and_other_v1_paths_to_codex(self) -> None:
         responses = await self.client.post("/v1/responses", json={"model": "gpt-test"})
         messages = await self.client.post("/v1/messages", json={"model": "claude-test"})

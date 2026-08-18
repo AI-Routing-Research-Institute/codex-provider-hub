@@ -175,6 +175,15 @@ const timeRangeError = document.querySelector("#time-range-error");
 const timeRangeClose = document.querySelector("#time-range-close");
 const timeRangeCancel = document.querySelector("#time-range-cancel");
 const timeRangeApply = document.querySelector("#time-range-apply");
+const statusUploadModal = document.querySelector("#status-upload-modal");
+const statusUploadProviderLabel = document.querySelector("#status-upload-provider");
+const statusUploadModels = document.querySelector("#status-upload-models");
+const statusUploadSsh = document.querySelector("#status-upload-ssh");
+const statusUploadError = document.querySelector("#status-upload-error");
+const statusUploadSubmit = document.querySelector("#status-upload-submit");
+const statusUploadChangeTarget = document.querySelector("#status-upload-change-target");
+let statusUploadProvider = null;
+let statusUploadPreview = null;
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 let themeStorageKey = "local-proxy-theme";
 const RECOVERY_HISTORY_PAGE_SIZE = 50;
@@ -183,6 +192,100 @@ const RECOVERY_HISTORY_RETRY_DELAY_MS = 2000;
 function text(selector, value) {
   const element = document.querySelector(selector);
   if (element && value != null) element.textContent = String(value);
+}
+
+function closeStatusUploadModal() {
+  if (!statusUploadModal) return;
+  statusUploadModal.hidden = true;
+  statusUploadProvider = null;
+  statusUploadPreview = null;
+}
+
+function setStatusUploadError(message) {
+  if (!statusUploadError) return;
+  statusUploadError.hidden = !message;
+  statusUploadError.textContent = message || "";
+}
+
+function renderUploadModelFields(models) {
+  statusUploadModels.replaceChildren();
+  for (const model of models) {
+    const row = document.createElement("div");
+    row.className = "status-upload-model-row";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = model;
+    input.placeholder = "模型名称";
+    input.className = "status-upload-model-input";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button status-upload-remove";
+    remove.textContent = "×";
+    remove.title = "删除模型";
+    remove.addEventListener("click", () => row.remove());
+    row.append(input, remove);
+    statusUploadModels.append(row);
+  }
+}
+
+async function openStatusUpload(provider) {
+  statusUploadProvider = provider;
+  setStatusUploadError("");
+  statusUploadProviderLabel.textContent = provider.name;
+  statusUploadSsh.hidden = true;
+  statusUploadSubmit.disabled = true;
+  statusUploadModal.hidden = false;
+  try {
+    const settingsResponse = await fetch(controlUrl("/api/status-upload/settings"), { cache: "no-store" });
+    const settings = settingsResponse.ok ? await settingsResponse.json() : {};
+    const previewResponse = await fetch(controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/status-upload/preview`), {
+      method: "POST", headers: { ...CONTROL_HEADER, "Content-Type": "application/json" }, body: JSON.stringify({ models: [] }), cache: "no-store",
+    });
+    const preview = await previewResponse.json().catch(() => ({}));
+    if (!previewResponse.ok || preview.supported !== true) throw new Error(preview.detail || preview.reason || "该供应商不支持上传");
+    statusUploadPreview = preview;
+    renderUploadModelFields(preview.suggested_models || []);
+    statusUploadSsh.hidden = settings.initialized === true;
+    statusUploadChangeTarget.hidden = settings.initialized !== true;
+    document.querySelector("#status-upload-host").value = settings.host || "118.195.178.173";
+    document.querySelector("#status-upload-port").value = settings.port || 22;
+    document.querySelector("#status-upload-user").value = settings.username || "ubuntu";
+    statusUploadSubmit.disabled = false;
+  } catch (error) {
+    setStatusUploadError(error?.message || "无法读取上传配置");
+  }
+}
+
+async function submitStatusUpload() {
+  if (!statusUploadProvider) return;
+  const models = [...statusUploadModels.querySelectorAll("input")].map((input) => input.value.trim()).filter(Boolean);
+  if (!models.length) { setStatusUploadError("至少填写一个检测模型"); return; }
+  statusUploadSubmit.disabled = true;
+  setStatusUploadError("");
+  try {
+    if (!statusUploadSsh.hidden) {
+      const bootstrapResponse = await fetch(controlUrl("/api/status-upload/bootstrap"), {
+        method: "POST", headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({ host: document.querySelector("#status-upload-host").value.trim(), port: Number(document.querySelector("#status-upload-port").value), username: document.querySelector("#status-upload-user").value.trim(), password: document.querySelector("#status-upload-password").value }),
+        cache: "no-store",
+      });
+      if (!bootstrapResponse.ok) throw new Error((await bootstrapResponse.json().catch(() => ({}))).detail || "SSH 初始化失败");
+      statusUploadSsh.hidden = true;
+      statusUploadChangeTarget.hidden = false;
+    }
+    const response = await fetch(controlUrl(`/api/providers/${encodeURIComponent(statusUploadProvider.provider_id)}/status-upload`), {
+      method: "POST", headers: { ...CONTROL_HEADER, "Content-Type": "application/json" }, body: JSON.stringify({ models }), cache: "no-store",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+    const uploadedName = statusUploadProvider.name;
+    closeStatusUploadModal();
+    showToast("上传成功", `${uploadedName} 已加入服务器检测配置。状态页：${payload.status_url || "服务器 /codex-status/"}`);
+  } catch (error) {
+    setStatusUploadError(error?.message || "上传失败");
+  } finally {
+    statusUploadSubmit.disabled = false;
+  }
 }
 
 function viewStorageKey(serviceId = uiConfig.service_id || "local") {
@@ -2373,6 +2476,21 @@ function renderProviderList() {
       });
       title.append(launchButton);
     }
+    const uploadButton = document.createElement("button");
+    uploadButton.type = "button";
+    uploadButton.className = "copy-command status-upload-button";
+    uploadButton.textContent = "上传检测";
+    const uploadSupported = provider.status_upload_supported !== false && provider.has_credentials;
+    uploadButton.disabled = !uploadSupported;
+    uploadButton.title = uploadSupported
+      ? "上传此供应商到服务器检测配置"
+      : (provider.status_upload_reason || "该供应商没有可上传的标准凭据");
+    uploadButton.setAttribute("aria-label", `上传 ${provider.name} 到状态服务`);
+    uploadButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (uploadSupported) void openStatusUpload(provider);
+    });
+    title.append(uploadButton);
     const endpoint = document.createElement("code");
     endpoint.textContent = escapeText(provider.endpoint);
     const usage = providerUsage(provider.provider_id);
@@ -3415,6 +3533,19 @@ runtimeForm.addEventListener("submit", saveRuntimeSettings);
 document.querySelector("#validate-database").addEventListener("click", validateRuntimeDatabase);
 document.querySelector("#test-health-url").addEventListener("click", testRuntimeHealthUrl);
 document.querySelector("#copy-data-directory").addEventListener("click", copyDataDirectory);
+document.querySelector("#status-upload-close").addEventListener("click", closeStatusUploadModal);
+document.querySelector("#status-upload-cancel").addEventListener("click", closeStatusUploadModal);
+document.querySelector("#status-upload-submit").addEventListener("click", () => void submitStatusUpload());
+document.querySelector("#status-upload-add-model").addEventListener("click", () => {
+  const models = [...statusUploadModels.querySelectorAll("input")].map((input) => input.value);
+  renderUploadModelFields([...models, ""]);
+  statusUploadModels.lastElementChild?.querySelector("input")?.focus();
+});
+statusUploadChangeTarget.addEventListener("click", () => {
+  statusUploadSsh.hidden = false;
+  statusUploadChangeTarget.hidden = true;
+  document.querySelector("#status-upload-password").focus();
+});
 usageHistoryClose.addEventListener("click", closeUsageHistoryPopover);
 usageHistoryMore.addEventListener("click", () => void readUsageHistory());
 usageHistoryList.addEventListener("scroll", () => {
@@ -3554,6 +3685,10 @@ document.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && statusUploadModal && !statusUploadModal.hidden) {
+    closeStatusUploadModal();
+    return;
+  }
   if (event.key === "Escape" && !timeRangePopover.hidden) {
     closeTimeRangePopover({ restoreSelection: true });
     return;

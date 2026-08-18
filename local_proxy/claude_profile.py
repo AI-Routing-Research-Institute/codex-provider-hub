@@ -21,6 +21,11 @@ from local_proxy.core import (
 from local_proxy.paths import display_path
 from local_proxy.protocols.claude_messages import ClaudeMessagesProtocol
 from local_proxy.server import ProxyProfile
+from local_proxy.status_upload import (
+    StatusUploadManager,
+    build_provider_upload_payload,
+    provider_upload_preview,
+)
 from local_proxy.shared_settings import (
     PROTOCOL_SETTINGS_VERSION,
     data_directory,
@@ -109,6 +114,7 @@ def build_claude_profile(
     settings_data: dict[str, Any] | None = None,
     retry_policy_store: RetryPolicyStore | None = None,
     health_status_url_store: HealthStatusUrlStore | None = None,
+    status_upload_manager: StatusUploadManager | None = None,
 ) -> ProxyProfile:
     root = (data_root or data_directory()).expanduser().resolve()
     active_settings_path = protocol_settings_path("claude", root)
@@ -201,6 +207,15 @@ def build_claude_profile(
         usage_store=UsageStore(active_usage_path),
         recovery_history_store=RecoveryHistoryStore(active_usage_path),
         health_status_url_store=health_status_url_store or HealthStatusUrlStore(),
+        status_upload_manager=status_upload_manager,
+        status_upload_preview=(
+            lambda provider, models: provider_upload_preview(provider, "claude", models)
+            if status_upload_manager is not None else None
+        ),
+        status_upload_payload=(
+            lambda provider, models: build_provider_upload_payload(provider, "claude", models)
+            if status_upload_manager is not None else None
+        ),
         load_runtime_database=load_prepared_providers,
         apply_runtime_database=apply_database,
         database_validation_summary=lambda loaded: {
@@ -218,6 +233,15 @@ def build_claude_profile(
             "compatible": bool(getattr(provider, "compatible", False)),
             "api_format": str(getattr(provider, "api_format", "anthropic")),
             "default_models": dict(getattr(provider, "default_models", {})),
+            "status_upload_supported": bool(
+                getattr(provider, "compatible", False) and provider.api_key
+            ),
+            "status_upload_reason": (
+                "该供应商不是 Anthropic Messages 协议"
+                if not getattr(provider, "compatible", False)
+                else "没有可上传的标准 API Key 或 Auth Token" if not provider.api_key else ""
+            ),
+            "credential_kind": str(getattr(provider, "credential_kind", "api_key")),
         },
         config_endpoint_name="claude-config",
     )

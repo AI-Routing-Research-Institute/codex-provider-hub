@@ -111,6 +111,9 @@ class ProxyProfile:
     provider_launch_command: Callable[[ProxyProvider], Mapping[str, str]] | None = None
     provider_catalog: Any | None = None
     provider_catalog_import: Callable[[bool], Mapping[str, Any]] | None = None
+    status_upload_manager: Any | None = None
+    status_upload_preview: Callable[[ProxyProvider, tuple[str, ...]], Mapping[str, Any]] | None = None
+    status_upload_payload: Callable[[ProxyProvider, tuple[str, ...]], Mapping[str, Any]] | None = None
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None
     session_catalog: Callable[[float], Iterable[Mapping[str, Any]]] | None = None
     session_key_resolver: Callable[[str], str | None] | None = None
@@ -800,6 +803,86 @@ def _register_control_routes(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def control_status_upload_settings():
+        if profile.status_upload_manager is None:
+            return JSONResponse(status_code=503, content={"detail": "状态服务上传功能不可用"})
+        return JSONResponse(profile.status_upload_manager.public_settings(), headers={"Cache-Control": "no-store"})
+
+    async def control_status_upload_bootstrap(request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.status_upload_manager is None:
+            return JSONResponse(status_code=503, content={"detail": "状态服务上传功能不可用"})
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("初始化参数必须是对象")
+            host = payload.get("host")
+            port = payload.get("port", 22)
+            username = payload.get("username")
+            password = payload.get("password")
+            if not isinstance(host, str) or not host.strip():
+                raise ValueError("服务器地址不能为空")
+            if not isinstance(port, int) or not 1 <= port <= 65535:
+                raise ValueError("SSH 端口无效")
+            if not isinstance(username, str) or not username.strip():
+                raise ValueError("SSH 用户名不能为空")
+            if not isinstance(password, str) or not password:
+                raise ValueError("首次初始化需要服务器密码")
+            result = await run_in_threadpool(
+                profile.status_upload_manager.bootstrap,
+                host.strip(),
+                port,
+                username.strip(),
+                password,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except Exception as exc:
+            return JSONResponse(status_code=502, content={"detail": str(exc) or "SSH 初始化失败"})
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    async def control_status_upload_preview(provider_id: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.status_upload_preview is None:
+            return JSONResponse(status_code=503, content={"detail": "状态服务上传功能不可用"})
+        provider = next((item for item in profile.router.providers() if item.provider_id == provider_id), None)
+        if provider is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到该供应商"})
+        try:
+            payload = await request.json()
+            models = payload.get("models", []) if isinstance(payload, dict) else []
+            if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
+                raise ValueError("models 必须是字符串数组")
+            result = profile.status_upload_preview(provider, tuple(models))
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        return JSONResponse(dict(result), headers={"Cache-Control": "no-store"})
+
+    async def control_status_upload(provider_id: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.status_upload_manager is None or profile.status_upload_payload is None:
+            return JSONResponse(status_code=503, content={"detail": "状态服务上传功能不可用"})
+        provider = next((item for item in profile.router.providers() if item.provider_id == provider_id), None)
+        if provider is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到该供应商"})
+        try:
+            payload = await request.json()
+            models = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
+                raise ValueError("models 必须是字符串数组")
+            export = profile.status_upload_payload(provider, tuple(models))
+            result = await run_in_threadpool(profile.status_upload_manager.upload, dict(export))
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except Exception as exc:
+            message = str(exc) or "上传失败"
+            status = 409 if "重复" in message or "存在相同" in message else 502
+            return JSONResponse(status_code=status, content={"detail": message})
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
     async def control_update_status():
         if update_controller is None:
             return JSONResponse(
@@ -936,6 +1019,10 @@ def _register_control_routes(
         methods=["POST"],
         include_in_schema=False,
     )
+    app.add_api_route(f"{prefix}/api/status-upload/settings", control_status_upload_settings, methods=["GET"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/status-upload/bootstrap", control_status_upload_bootstrap, methods=["POST"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/providers/{{provider_id}}/status-upload/preview", control_status_upload_preview, methods=["POST"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/providers/{{provider_id}}/status-upload", control_status_upload, methods=["POST"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/shutdown", control_shutdown, methods=["POST"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/update", control_update_status, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/update/check", control_update_check, methods=["POST"], include_in_schema=False)

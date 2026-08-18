@@ -24,10 +24,16 @@ APP_VERSION = os.environ["CODEX_LOCAL_PROXY_VERSION"]
 
 hidden_imports = [
     "pystray._appkit",
+    "paramiko",
+    "paramiko.transport",
+    "cryptography.hazmat.primitives.asymmetric.ed25519",
     *collect_submodules("tiktoken_ext"),
 ]
 data_files = [
     (str(ROOT / "proxy_static"), "proxy_static"),
+    (str(ROOT / "scripts" / "status_provider_import.py"), "scripts"),
+    (str(ROOT / "provider_status" / "config.py"), "status_bootstrap"),
+    (str(ROOT / "provider_status" / "claude_probe.py"), "status_bootstrap"),
     *collect_data_files("tiktoken"),
 ]
 

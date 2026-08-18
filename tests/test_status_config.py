@@ -140,6 +140,32 @@ class StatusConfigTests(unittest.TestCase):
         self.assertEqual(provider.probe_client("gpt-5.6-sol"), "codex")
         self.assertIsNone(provider.claude_base_url)
 
+    def test_loads_provider_fragments_and_credential_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "providers.toml"
+            path.write_text(service_config(provider_block()), encoding="utf-8")
+            fragments = root / "providers.d"
+            fragments.mkdir()
+            fragments.joinpath("claude.toml").write_text(
+                provider_block(
+                    provider_id="claude-beta",
+                    base_url="https://beta.example.com/v1",
+                    models=("claude-sonnet-4-5",),
+                    model_clients={"claude-sonnet-4-5": "claude"},
+                    claude_base_url="https://beta.example.com",
+                ).replace(
+                    'credential_name = "provider-alpha-api-key"',
+                    'credential_name = "claude-beta.key"\ncredential_kind = "auth_token"',
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(path, resolver=public_resolver)
+
+        self.assertEqual([provider.provider_id for provider in config.providers], ["provider-alpha", "claude-beta"])
+        self.assertEqual(config.providers[1].credential_kind, "auth_token")
+
     def test_accepts_model_level_claude_client(self) -> None:
         config = self.load_text(
             service_config(
