@@ -240,6 +240,9 @@ timeout_seconds = 90
 
         self.assertEqual(text, "#!/usr/bin/python3\nprint('ok')\n")
 
+    def test_imported_credentials_dropin_loads_after_existing_credential_reset(self) -> None:
+        self.assertEqual(status_import.DROPIN_PATH.name, "zzzzz-imported-providers.conf")
+
 
 if __name__ == "__main__":
     unittest.main()
