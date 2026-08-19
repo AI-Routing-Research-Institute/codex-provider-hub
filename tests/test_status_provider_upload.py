@@ -8,7 +8,9 @@ from unittest import mock
 
 from local_proxy.core import ProxyProvider
 from local_proxy.status_upload import (
+    _ParamikoTransport,
     build_provider_upload_payload,
+    StatusUploadSettings,
     StatusUploadManager,
     load_settings,
     provider_upload_preview,
@@ -22,6 +24,38 @@ from scripts.status_provider_import import (
 
 
 class StatusProviderUploadTests(unittest.TestCase):
+    def test_remote_bootstrap_accepts_json_after_command_output(self) -> None:
+        class Channel:
+            def recv_exit_status(self):
+                return 0
+
+        class Stream:
+            def __init__(self, value: str):
+                self.value = value.encode("utf-8")
+                self.channel = Channel()
+
+            def read(self):
+                return self.value
+
+        class Stdin:
+            def write(self, _value):
+                return None
+
+            def flush(self):
+                return None
+
+        class Client:
+            def exec_command(self, _command, timeout):
+                self.timeout = timeout
+                return Stdin(), Stream("/etc/sudoers.d/codex-status-import: parsed OK\n{\"status\": \"initialized\"}\n"), Stream("")
+
+        transport = _ParamikoTransport(StatusUploadSettings(), password="server-password")
+        transport.client = Client()
+
+        result = transport._run("bootstrap")
+
+        self.assertEqual(result, {"status": "initialized"})
+
     def test_bootstrap_persists_key_and_fingerprint_without_password(self) -> None:
         transports = []
 

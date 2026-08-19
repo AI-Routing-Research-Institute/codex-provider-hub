@@ -356,10 +356,20 @@ class _ParamikoTransport:
             except (json.JSONDecodeError, AttributeError):
                 detail = None
             raise StatusUploadError(str(detail or error or raw.strip() or "远程导入命令失败"))
+        result: Any = None
         try:
             result = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise StatusUploadError("远程导入命令返回了无效结果") from exc
+        except json.JSONDecodeError:
+            # Bootstrap commands can emit a successful tool diagnostic before
+            # their final JSON response (for example, `visudo -c`).
+            for line in reversed(raw.splitlines()):
+                try:
+                    result = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                break
+        if result is None:
+            raise StatusUploadError("远程导入命令返回了无效结果")
         if not isinstance(result, dict):
             raise StatusUploadError("远程导入命令返回格式无效")
         return result

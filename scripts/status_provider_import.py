@@ -256,7 +256,12 @@ def bootstrap(
         f"{IMPORT_USER} ALL=(root) NOPASSWD: {IMPORT_PATH} --serve\n",
         0o440,
     )
-    subprocess.run(["visudo", "-cf", str(SUDOERS_PATH)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["visudo", "-cf", str(SUDOERS_PATH)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return {"status": "initialized", "host_key_fingerprint": ""}
 
 
