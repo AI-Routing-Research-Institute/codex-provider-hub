@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -190,6 +189,10 @@ def _atomic_write(path: Path, text: str, mode: int) -> None:
             pass
 
 
+def _importer_script_text(source: Path) -> str:
+    return source.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def bootstrap(
     public_key: str,
     config_module: str | None = None,
@@ -228,8 +231,7 @@ def bootstrap(
         except OSError:
             pass
         raise
-    shutil.copyfile(Path(__file__), IMPORT_PATH)
-    os.chmod(IMPORT_PATH, 0o755)
+    _atomic_write(IMPORT_PATH, _importer_script_text(Path(__file__)), 0o755)
     import pwd
 
     home = Path("/var/lib") / IMPORT_USER

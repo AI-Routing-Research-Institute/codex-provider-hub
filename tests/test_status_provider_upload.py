@@ -38,16 +38,24 @@ class StatusProviderUploadTests(unittest.TestCase):
                 return self.value
 
         class Stdin:
+            def __init__(self):
+                self.channel = self
+                self.shutdown_called = False
+
             def write(self, _value):
                 return None
 
             def flush(self):
                 return None
 
+            def shutdown_write(self):
+                self.shutdown_called = True
+
         class Client:
             def exec_command(self, _command, timeout):
                 self.timeout = timeout
-                return Stdin(), Stream("/etc/sudoers.d/codex-status-import: parsed OK\n{\"status\": \"initialized\"}\n"), Stream("")
+                self.stdin = Stdin()
+                return self.stdin, Stream("/etc/sudoers.d/codex-status-import: parsed OK\n{\"status\": \"initialized\"}\n"), Stream("")
 
         transport = _ParamikoTransport(StatusUploadSettings(), password="server-password")
         transport.client = Client()
@@ -55,6 +63,7 @@ class StatusProviderUploadTests(unittest.TestCase):
         result = transport._run("bootstrap")
 
         self.assertEqual(result, {"status": "initialized"})
+        self.assertTrue(transport.client.stdin.shutdown_called)
 
     def test_bootstrap_persists_key_and_fingerprint_without_password(self) -> None:
         transports = []
@@ -98,6 +107,7 @@ class StatusProviderUploadTests(unittest.TestCase):
         self.assertNotIn("server-password", saved)
         self.assertEqual(transports[0].password, "server-password")
         self.assertIsNone(transports[1].password)
+        self.assertEqual(transports[1].settings.username, "codex-status-import")
         self.assertEqual(result["status"], "imported")
 
     def test_preview_suggests_models_and_rejects_custom_headers(self) -> None:
@@ -220,6 +230,15 @@ timeout_seconds = 90
             self.assertFalse((fragments / "new-provider.toml").exists())
             self.assertFalse(dropin.exists())
             self.assertEqual(list(secrets.glob("*")), [])
+
+    def test_importer_script_text_normalizes_windows_newlines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "importer.py"
+            source.write_bytes(b"#!/usr/bin/python3\r\nprint('ok')\r\n")
+
+            text = status_import._importer_script_text(source)
+
+        self.assertEqual(text, "#!/usr/bin/python3\nprint('ok')\n")
 
 
 if __name__ == "__main__":

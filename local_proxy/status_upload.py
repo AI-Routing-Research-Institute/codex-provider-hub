@@ -9,7 +9,7 @@ import os
 import secrets
 import shlex
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -20,6 +20,7 @@ from local_proxy.shared_settings import data_directory
 DEFAULT_HOST = "118.195.178.173"
 DEFAULT_PORT = 22
 DEFAULT_USER = "ubuntu"
+IMPORT_USER = "codex-status-import"
 DEFAULT_STATUS_URL = f"http://{DEFAULT_HOST}/codex-status/"
 SETTINGS_VERSION = 1
 
@@ -241,7 +242,7 @@ class StatusUploadManager:
             settings = load_settings(self.path)
             if not settings.initialized or not settings.private_key_path:
                 raise StatusUploadError("请先完成服务器 SSH 初始化")
-            with self._transport(settings) as transport:
+            with self._transport(replace(settings, username=IMPORT_USER)) as transport:
                 result = dict(transport.upload(payload))
             result.setdefault("status_url", settings.status_url)
             return result
@@ -347,6 +348,9 @@ class _ParamikoTransport:
         if stdin_text:
             stdin.write(stdin_text)
         stdin.flush()
+        shutdown_write = getattr(getattr(stdin, "channel", None), "shutdown_write", None)
+        if callable(shutdown_write):
+            shutdown_write()
         raw = stdout.read().decode("utf-8", "replace")
         error = stderr.read().decode("utf-8", "replace").strip()
         status = stdout.channel.recv_exit_status()
