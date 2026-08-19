@@ -1637,6 +1637,10 @@ function monitorStateLabel(state) {
   return ({ healthy: "可用", degraded: "降级", down: "不可用", unknown: "未检测" })[state] || "未检测";
 }
 
+function monitorProbeStateLabel(state) {
+  return ({ queued: "排队中", running: "检测中" })[state] || "";
+}
+
 function renderMonitorManagement(statusPayload = null) {
   const list = document.querySelector("#monitor-list");
   const empty = document.querySelector("#monitor-empty");
@@ -1660,8 +1664,9 @@ function renderMonitorManagement(statusPayload = null) {
     models.className = "monitor-models";
     models.textContent = `模型：${(provider.display_models || provider.models || []).join("、") || "—"}`;
     const state = document.createElement("span");
-    state.className = `monitor-state ${status.state || "unknown"}`;
-    state.textContent = `${monitorStateLabel(status.state)}${status.last_checked ? ` · ${status.last_checked}` : ""}`;
+    const probeState = monitorProbeStateLabel(status.manual_probe?.status);
+    state.className = `monitor-state ${probeState ? "probing" : status.state || "unknown"}`;
+    state.textContent = probeState || `${monitorStateLabel(status.state)}${status.last_checked ? ` · ${status.last_checked}` : ""}`;
     main.append(name, endpoint, models, state);
     const controls = document.createElement("div");
     controls.className = "monitor-controls";
@@ -1670,6 +1675,7 @@ function renderMonitorManagement(statusPayload = null) {
       button.addEventListener("click", () => void moveMonitorProvider(index, action)); controls.append(button);
     }
     const probe = document.createElement("button"); probe.type = "button"; probe.textContent = "立即检测";
+    probe.disabled = Boolean(probeState);
     probe.addEventListener("click", () => void requestMonitorProbe(provider, probe)); controls.append(probe);
     const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "删除";
     remove.addEventListener("click", () => void deleteMonitorProvider(provider)); controls.append(remove);
@@ -1722,9 +1728,12 @@ async function deleteMonitorProvider(provider) {
 async function requestMonitorProbe(provider, button) {
   button.disabled = true;
   try {
-    const statusUrl = healthStatusUrl();
-    if (!statusUrl) throw new Error("未配置服务器检测地址");
-    const response = await fetch(statusUrl.replace(/\/api\/status(?:\?.*)?$/, "") + `/api/manual-probes/${encodeURIComponent(provider.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ models: provider.display_models || provider.models || [] }) });
+    const response = await fetch(controlUrl(`/api/status-management/providers/${encodeURIComponent(provider.id)}/probe`), {
+      method: "POST",
+      headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+      body: JSON.stringify({ models: provider.display_models || provider.models || [] }),
+      cache: "no-store",
+    });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
     showToast("检测已提交", "服务器正在检测该供应商，稍后刷新即可查看结果。");
@@ -2961,6 +2970,9 @@ async function readHealthStatus({ quiet = false } = {}) {
     if (requestSequence !== healthRequestSequence) return;
     latestHealthStatus = payload;
     healthStatusError = null;
+    if (!document.querySelector("#monitor-view")?.hidden) {
+      renderMonitorManagement(latestHealthStatus);
+    }
   } catch (error) {
     if (requestSequence !== healthRequestSequence) return;
     healthStatusError = error?.message || "无法读取服务器检测数据";

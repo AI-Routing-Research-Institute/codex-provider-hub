@@ -88,7 +88,7 @@ def delete_provider(
     config_path: Path = CONFIG_PATH,
     fragment_root: Path = FRAGMENT_ROOT,
     secret_root: Path = SECRET_ROOT,
-    public_database_path: Path = PUBLIC_DATABASE_PATH,
+    public_database_path: Path | None = PUBLIC_DATABASE_PATH,
 ) -> dict[str, str]:
     if not ID_RE.fullmatch(provider_id):
         raise ImportErrorDetail("provider_id 格式无效")
@@ -105,12 +105,14 @@ def delete_provider(
         credential_name, removed = _remove_main_provider(provider_id, config_path)
     if not removed:
         raise ImportErrorDetail("未找到指定供应商")
+    if credential_name and Path(credential_name).name != credential_name:
+        raise ImportErrorDetail("credential_name 格式无效")
     secret_path = secret_root / credential_name if credential_name else None
     old_secret = secret_path.read_bytes() if secret_path and secret_path.exists() else None
     if secret_path:
         secret_path.unlink(missing_ok=True)
     try:
-        if public_database_path.exists():
+        if public_database_path is not None and public_database_path.exists():
             import sqlite3
             with sqlite3.connect(public_database_path) as connection:
                 connection.execute("PRAGMA foreign_keys=ON")
@@ -135,6 +137,94 @@ def order_providers(provider_ids: list[str], *, fragment_root: Path = FRAGMENT_R
     fragment_root.mkdir(parents=True, exist_ok=True)
     _atomic_write(fragment_root / ".order.json", json.dumps(provider_ids, ensure_ascii=False) + "\n", 0o644)
     return {"status": "ordered", "provider_ids": provider_ids}
+
+
+def _delete_public_provider(provider_id: str, database_path: Path | None = None) -> None:
+    database_path = database_path or PUBLIC_DATABASE_PATH
+    if not database_path.exists():
+        return
+    import sqlite3
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+        connection.commit()
+
+
+def _restart_worker(*, check: bool = True) -> None:
+    subprocess.run(["systemctl", "daemon-reload"], check=check)
+    subprocess.run(["systemctl", "restart", "codex-provider-worker.service"], check=check)
+
+
+def _restore_management_files(backups: dict[Path, bytes | None]) -> None:
+    for path, content in backups.items():
+        _restore_file(path, content)
+    try:
+        _restart_worker(check=False)
+    except OSError:
+        pass
+
+
+def _delete_and_restart(provider_id: str) -> dict[str, str]:
+    fragment_path = FRAGMENT_ROOT / f"{provider_id}.toml"
+    source_path = fragment_path if fragment_path.is_file() else CONFIG_PATH
+    source_text = source_path.read_text(encoding="utf-8") if source_path.is_file() else ""
+    credential_name = _credential_from_block(
+        next(
+            (
+                block
+                for block, block_id in _provider_blocks(source_path)
+                if block_id == provider_id
+            ),
+            source_text,
+        )
+    )
+    if credential_name and Path(credential_name).name != credential_name:
+        raise ImportErrorDetail("credential_name 格式无效")
+    secret_path = SECRET_ROOT / credential_name if credential_name else None
+    paths = [CONFIG_PATH, fragment_path, ORDER_PATH, DROPIN_PATH]
+    if secret_path is not None:
+        paths.append(secret_path)
+    backups = {path: path.read_bytes() if path.exists() else None for path in paths}
+    try:
+        result = delete_provider(
+            provider_id,
+            config_path=CONFIG_PATH,
+            fragment_root=FRAGMENT_ROOT,
+            secret_root=SECRET_ROOT,
+            public_database_path=None,
+        )
+        if ORDER_PATH.is_file():
+            try:
+                current_order = json.loads(ORDER_PATH.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                current_order = []
+            if isinstance(current_order, list):
+                order_providers(
+                    [value for value in current_order if value != provider_id],
+                    fragment_root=FRAGMENT_ROOT,
+                )
+        _write_import_dropin()
+        _restart_worker()
+        _delete_public_provider(provider_id)
+        return result
+    except Exception:
+        _restore_management_files(backups)
+        raise
+
+
+def _order_and_restart(provider_ids: list[str]) -> dict[str, Any]:
+    existing = _provider_ids(CONFIG_PATH, FRAGMENT_ROOT)
+    if set(provider_ids) != existing:
+        raise ImportErrorDetail("provider_id 顺序列表必须包含服务器全部供应商")
+    old_order = ORDER_PATH.read_bytes() if ORDER_PATH.exists() else None
+    try:
+        result = order_providers(provider_ids, fragment_root=FRAGMENT_ROOT)
+        _restart_worker()
+        return result
+    except Exception:
+        _restore_management_files({ORDER_PATH: old_order})
+        raise
 
 
 def import_provider_fragment(
@@ -376,16 +466,6 @@ def bootstrap(
 def serve() -> dict[str, Any]:
     payload = json.load(sys.stdin)
     action = payload.get("action") if isinstance(payload, dict) else None
-    if action == "delete":
-        result = delete_provider(str(payload.get("provider_id") or ""))
-        subprocess.run(["systemctl", "daemon-reload"], check=True)
-        subprocess.run(["systemctl", "restart", "codex-provider-worker.service"], check=True)
-        return result
-    if action == "order":
-        result = order_providers(list(payload.get("provider_ids") or []))
-        subprocess.run(["systemctl", "daemon-reload"], check=True)
-        subprocess.run(["systemctl", "restart", "codex-provider-worker.service"], check=True)
-        return result
     if action == "list":
         providers: list[dict[str, Any]] = []
         if CONFIG_PATH.is_file():
@@ -410,7 +490,12 @@ def serve() -> dict[str, Any]:
             except (OSError, json.JSONDecodeError):
                 order = []
         positions = {value: index for index, value in enumerate(order) if isinstance(value, str)}
-        providers.sort(key=lambda item: (positions.get(str(item.get("id", item.get("provider_id", ""))), len(positions)), str(item.get("id", item.get("provider_id", "")))))
+        providers.sort(
+            key=lambda item: positions.get(
+                str(item.get("id", item.get("provider_id", ""))),
+                len(positions),
+            )
+        )
         public_providers = [_public_management_provider(item) for item in providers]
         return {"status": "ok", "providers": public_providers}
     import fcntl
@@ -418,6 +503,10 @@ def serve() -> dict[str, Any]:
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_PATH.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if action == "delete":
+            return _delete_and_restart(str(payload.get("provider_id") or ""))
+        if action == "order":
+            return _order_and_restart(list(payload.get("provider_ids") or []))
         return _import_and_restart(payload)
 
 

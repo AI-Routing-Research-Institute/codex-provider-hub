@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,7 @@ from local_proxy.status_upload import (
     StatusUploadManager,
     load_settings,
     provider_upload_preview,
+    status_manual_probe_url,
 )
 import scripts.status_provider_import as status_import
 from provider_status.config import load_config
@@ -24,6 +27,93 @@ from scripts.status_provider_import import (
 
 
 class StatusProviderUploadTests(unittest.TestCase):
+    def test_management_keeps_unlisted_source_order_with_partial_order_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "providers.toml"
+            config.write_text(
+                """[service]
+database_path = "private.sqlite3"
+public_database_path = "public.sqlite3"
+temp_root = "tmp"
+codex_bin = "codex"
+
+[[providers]]
+id = "zeta"
+name = "Zeta"
+base_url = "https://zeta.example/v1"
+credential_name = "zeta.key"
+models = ["gpt-test"]
+healthy_interval_seconds = 600
+unhealthy_interval_seconds = 120
+timeout_seconds = 90
+
+[[providers]]
+id = "alpha"
+name = "Alpha"
+base_url = "https://alpha.example/v1"
+credential_name = "alpha.key"
+models = ["gpt-test"]
+healthy_interval_seconds = 600
+unhealthy_interval_seconds = 120
+timeout_seconds = 90
+
+[[providers]]
+id = "beta"
+name = "Beta"
+base_url = "https://beta.example/v1"
+credential_name = "beta.key"
+models = ["gpt-test"]
+healthy_interval_seconds = 600
+unhealthy_interval_seconds = 120
+timeout_seconds = 90
+""",
+                encoding="utf-8",
+            )
+            (root / "providers.d").mkdir()
+            (root / "providers.d" / ".order.json").write_text(
+                '["alpha"]\n', encoding="utf-8"
+            )
+
+            loaded = load_config(config)
+
+        self.assertEqual(
+            [provider.provider_id for provider in loaded.providers],
+            ["alpha", "zeta", "beta"],
+        )
+
+    def test_manual_probe_url_preserves_status_service_subpath(self) -> None:
+        self.assertEqual(
+            status_manual_probe_url(
+                "http://status.example/codex-status/api/status?window=24h",
+                "provider-alpha",
+            ),
+            "http://status.example/codex-status/api/manual-probes/provider-alpha",
+        )
+
+    def test_manual_probe_posts_models_to_status_service(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_file = Path(directory) / "status-upload.json"
+            settings_file.write_text(
+                json.dumps({"status_url": "http://status.example/codex-status/"}),
+                encoding="utf-8",
+            )
+            manager = StatusUploadManager(path=settings_file)
+            response = mock.Mock()
+            response.is_success = True
+            response.status_code = 202
+            response.json.return_value = {"status": "queued", "job_id": "job-1"}
+
+            with mock.patch("local_proxy.status_upload.httpx.post", return_value=response) as post:
+                result = manager.manual_probe("provider-alpha", ("gpt-test",))
+
+        self.assertEqual(result["status"], "queued")
+        post.assert_called_once_with(
+            "http://status.example/codex-status/api/manual-probes/provider-alpha",
+            json={"models": ["gpt-test"]},
+            timeout=20.0,
+        )
+
     def test_status_management_orders_providers_from_order_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -300,6 +390,84 @@ timeout_seconds = 90
             self.assertFalse((fragments / "new-provider.toml").exists())
             self.assertFalse(dropin.exists())
             self.assertEqual(list(secrets.glob("*")), [])
+
+    def test_delete_restart_failure_restores_config_secret_and_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "providers.toml"
+            original_config = """[service]
+database_path = "private.sqlite3"
+
+[[providers]]
+id = "alpha"
+name = "Alpha"
+credential_name = "alpha.key"
+"""
+            config.write_text(original_config, encoding="utf-8")
+            secrets = root / "secrets"
+            secrets.mkdir()
+            (secrets / "alpha.key").write_text("secret\n", encoding="utf-8")
+            database = root / "status.sqlite3"
+            with contextlib.closing(sqlite3.connect(database)) as connection:
+                connection.execute("CREATE TABLE providers (id TEXT PRIMARY KEY)")
+                connection.execute("INSERT INTO providers VALUES ('alpha')")
+                connection.commit()
+
+            with (
+                mock.patch.object(status_import, "CONFIG_PATH", config),
+                mock.patch.object(status_import, "FRAGMENT_ROOT", root / "providers.d"),
+                mock.patch.object(status_import, "SECRET_ROOT", secrets),
+                mock.patch.object(status_import, "PUBLIC_DATABASE_PATH", database),
+                mock.patch.object(
+                    status_import.subprocess,
+                    "run",
+                    side_effect=[
+                        mock.DEFAULT,
+                        status_import.subprocess.CalledProcessError(1, "systemctl"),
+                        mock.DEFAULT,
+                        mock.DEFAULT,
+                    ],
+                ),
+            ):
+                with self.assertRaises(status_import.subprocess.CalledProcessError):
+                    status_import._delete_and_restart("alpha")
+
+            self.assertEqual(config.read_text(encoding="utf-8"), original_config)
+            self.assertEqual((secrets / "alpha.key").read_text(encoding="utf-8"), "secret\n")
+            with contextlib.closing(sqlite3.connect(database)) as connection:
+                rows = connection.execute("SELECT id FROM providers").fetchall()
+                self.assertEqual(rows, [("alpha",)])
+
+    def test_order_restart_failure_restores_previous_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fragments = root / "providers.d"
+            fragments.mkdir()
+            order = fragments / ".order.json"
+            order.write_text('["alpha", "beta"]\n', encoding="utf-8")
+            for provider_id in ("alpha", "beta"):
+                (fragments / f"{provider_id}.toml").write_text(
+                    f'[[providers]]\nid = "{provider_id}"\n', encoding="utf-8"
+                )
+
+            with (
+                mock.patch.object(status_import, "FRAGMENT_ROOT", fragments),
+                mock.patch.object(status_import, "ORDER_PATH", order),
+                mock.patch.object(
+                    status_import.subprocess,
+                    "run",
+                    side_effect=[
+                        mock.DEFAULT,
+                        status_import.subprocess.CalledProcessError(1, "systemctl"),
+                        mock.DEFAULT,
+                        mock.DEFAULT,
+                    ],
+                ),
+            ):
+                with self.assertRaises(status_import.subprocess.CalledProcessError):
+                    status_import._order_and_restart(["beta", "alpha"])
+
+            self.assertEqual(order.read_text(encoding="utf-8"), '["alpha", "beta"]\n')
 
     def test_importer_script_text_normalizes_windows_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

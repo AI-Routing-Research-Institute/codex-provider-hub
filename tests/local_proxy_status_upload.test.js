@@ -29,4 +29,8 @@ test("renders the remote monitoring management view", () => {
   assert.match(source, /api\/status-management/);
   assert.match(source, /立即检测/);
   assert.match(source, /删除服务器监控供应商/);
+  assert.match(source, /api\/status-management\/providers\/\$\{encodeURIComponent\(provider\.id\)\}\/probe/);
+  assert.doesNotMatch(source, /statusUrl\.replace\([^\n]+api\/manual-probes/);
+  assert.match(source, /queued: "排队中"/);
+  assert.match(source, /latestHealthStatus = payload;[\s\S]{0,400}renderMonitorManagement\(latestHealthStatus\)/);
 });

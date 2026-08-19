@@ -43,18 +43,18 @@ status = "verified"
 ## 实际改动
 
 - `provider_status/config.py`：读取 providers.d/.order.json 并按服务器顺序加载。
-- `scripts/status_provider_import.py`：增加 list/order/delete 管理动作，删除同步清理凭据和公开状态记录。
-- `local_proxy/status_upload.py`、`local_proxy/server.py`：增加受限 SSH 管理 API。
-- `proxy_static/index.html`、`proxy_static/app.js`、`proxy_static/styles.css`：新增监控管理页面、排序、删除、立即检测和刷新操作。
+- `scripts/status_provider_import.py`：增加 list/order/delete 管理动作，删除同步清理凭据、顺序、systemd 凭据清单和公开状态记录；Worker 重启失败时恢复修改前状态。
+- `local_proxy/status_upload.py`、`local_proxy/server.py`：增加受限 SSH 管理 API，并由本地后端代理立即检测请求，避免浏览器跨域预检失败。
+- `proxy_static/index.html`、`proxy_static/app.js`、`proxy_static/styles.css`：新增监控管理页面、排序、删除、立即检测、检测进度和刷新操作。
 - 服务器已部署新版受限管理命令，真实列表和排序操作验证通过。
 
 ## 验证结果
 
-已通过：`python -m unittest discover -s tests -p "test_*.py"`（455 项）；全部 `tests/*.test.js`；`node --check proxy_static/app.js`；`git diff --check`；PyInstaller EXE `--smoke-test`；真实服务器 list/order 操作成功，管理列表不返回凭据名称。
+已通过：`python -m unittest discover -s tests -p "test_*.py"`（461 项）；全部 `tests/*.test.js`；`node --check proxy_static/app.js`；`git diff --check`；PyInstaller EXE `--smoke-test`。新包在独立 `17892` 端口启动，浏览器验证监控管理页显示服务器全部 8 个供应商且无布局溢出；真实服务器管理列表和立即检测成功，管理列表不返回凭据名称，Worker 状态数据保持 fresh。
 
-测试包：`.tmp-dist-status-management/CodexLocalProxy-win-x64.exe`。
+测试包：`.tmp-dist-status-management-final/CodexLocalProxy-win-x64.exe`。
 
-SHA-256：`3c22e901871ef8aae7d772a94fa3f6eec78a4513876898c2dbb59fba838f68c6`。
+SHA-256：`6b485cfbd7c10c286a6d144efc2148886fb7b44583107fa036933636925e58d0`。
 
 ## PR
 

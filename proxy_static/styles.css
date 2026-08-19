@@ -518,6 +518,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .monitor-endpoint, .monitor-models { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .monitor-state { font-size: 12px; font-weight: 700; }
 .monitor-state.healthy { color: var(--green); }
+.monitor-state.probing { color: var(--teal); }
 .monitor-state.degraded, .monitor-state.down { color: #b33a3a; }
 .monitor-state.unknown { color: var(--muted); }
 .monitor-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }

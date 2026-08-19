@@ -241,7 +241,7 @@ def load_config(
             order = []
         if isinstance(order, list):
             positions = {value: index for index, value in enumerate(order) if isinstance(value, str)}
-            providers.sort(key=lambda item: (positions.get(item.provider_id, len(positions)), item.provider_id))
+            providers.sort(key=lambda item: positions.get(item.provider_id, len(positions)))
 
     return ServiceConfig(
         providers=tuple(providers),

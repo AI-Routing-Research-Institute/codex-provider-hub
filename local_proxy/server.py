@@ -900,6 +900,29 @@ def _register_control_routes(
             return JSONResponse(status_code=502, content={"detail": str(exc) or "状态服务管理失败"})
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
+    async def control_status_manual_probe(provider_id: str, request: Request):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        manager = profile.status_upload_manager
+        if manager is None:
+            return JSONResponse(status_code=503, content={"detail": "状态服务管理功能不可用"})
+        try:
+            payload = await request.json()
+            models = payload.get("models") if isinstance(payload, dict) else None
+            if (
+                not isinstance(models, list)
+                or not models
+                or any(not isinstance(model, str) or not model for model in models)
+                or len(models) != len(set(models))
+            ):
+                raise ValueError("models 必须是非空且不重复的字符串数组")
+            result = await run_in_threadpool(manager.manual_probe, provider_id, tuple(models))
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except Exception as exc:
+            return JSONResponse(status_code=502, content={"detail": str(exc) or "立即检测提交失败"})
+        return JSONResponse(result, status_code=202, headers={"Cache-Control": "no-store"})
+
     async def control_update_status():
         if update_controller is None:
             return JSONResponse(
@@ -1041,6 +1064,12 @@ def _register_control_routes(
     app.add_api_route(f"{prefix}/api/providers/{{provider_id}}/status-upload/preview", control_status_upload_preview, methods=["POST"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/providers/{{provider_id}}/status-upload", control_status_upload, methods=["POST"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/status-management", control_status_management, methods=["POST"], include_in_schema=False)
+    app.add_api_route(
+        f"{prefix}/api/status-management/providers/{{provider_id}}/probe",
+        control_status_manual_probe,
+        methods=["POST"],
+        include_in_schema=False,
+    )
     app.add_api_route(f"{prefix}/api/shutdown", control_shutdown, methods=["POST"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/update", control_update_status, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/update/check", control_update_check, methods=["POST"], include_in_schema=False)

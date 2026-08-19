@@ -12,6 +12,9 @@ import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote, urlsplit, urlunsplit
+
+import httpx
 
 from local_proxy.core import ProxyProvider
 from local_proxy.shared_settings import data_directory
@@ -27,6 +30,24 @@ SETTINGS_VERSION = 1
 
 class StatusUploadError(RuntimeError):
     pass
+
+
+def status_manual_probe_url(status_url: str, provider_id: str) -> str:
+    parsed = urlsplit(status_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise StatusUploadError("服务器检测地址无效")
+    path = parsed.path.rstrip("/")
+    if path.endswith("/api/status"):
+        path = path[: -len("/api/status")]
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            f"{path}/api/manual-probes/{quote(provider_id, safe='')}",
+            "",
+            "",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -256,6 +277,26 @@ class StatusUploadManager:
                 result = dict(transport.manage(payload))
             result.setdefault("status_url", settings.status_url)
             return result
+
+    def manual_probe(self, provider_id: str, models: tuple[str, ...]) -> dict[str, Any]:
+        if not provider_id or not models:
+            raise StatusUploadError("立即检测参数无效")
+        settings = load_settings(self.path)
+        url = status_manual_probe_url(settings.status_url, provider_id)
+        try:
+            response = httpx.post(url, json={"models": list(models)}, timeout=20.0)
+        except httpx.HTTPError as exc:
+            raise StatusUploadError(f"无法连接服务器检测接口：{exc}") from exc
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise StatusUploadError(f"服务器检测接口返回了无效响应（HTTP {response.status_code}）") from exc
+        if not response.is_success:
+            detail = result.get("detail") if isinstance(result, dict) else None
+            raise StatusUploadError(str(detail or f"服务器检测接口返回 HTTP {response.status_code}"))
+        if not isinstance(result, dict):
+            raise StatusUploadError("服务器检测接口返回了无效响应")
+        return result
 
 
 def _generate_keypair() -> tuple[str, str]:

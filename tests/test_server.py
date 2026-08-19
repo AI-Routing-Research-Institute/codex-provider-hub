@@ -151,6 +151,28 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(uploaded.json()["status"], "imported")
         self.assertEqual(manager.payload["credential"], "codex-secret")
 
+    async def test_status_management_proxies_manual_probe_through_backend(self) -> None:
+        class FakeManager:
+            def __init__(self):
+                self.probe = None
+
+            def manual_probe(self, provider_id, models):
+                self.probe = (provider_id, models)
+                return {"status": "queued", "provider_id": provider_id}
+
+        manager = FakeManager()
+        self.codex_profile.status_upload_manager = manager
+
+        response = await self.client.post(
+            "/control/codex/api/status-management/providers/remote-a/probe",
+            headers={"X-Local-Proxy-Control": "1"},
+            json={"models": ["gpt-test"]},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "queued")
+        self.assertEqual(manager.probe, ("remote-a", ("gpt-test",)))
+
     async def test_routes_messages_to_claude_and_other_v1_paths_to_codex(self) -> None:
         responses = await self.client.post("/v1/responses", json={"model": "gpt-test"})
         messages = await self.client.post("/v1/messages", json={"model": "claude-test"})
