@@ -247,6 +247,16 @@ class StatusUploadManager:
             result.setdefault("status_url", settings.status_url)
             return result
 
+    def manage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            settings = load_settings(self.path)
+            if not settings.initialized or not settings.private_key_path:
+                raise StatusUploadError("请先完成服务器 SSH 初始化")
+            with self._transport(replace(settings, username=IMPORT_USER)) as transport:
+                result = dict(transport.manage(payload))
+            result.setdefault("status_url", settings.status_url)
+            return result
+
 
 def _generate_keypair() -> tuple[str, str]:
     try:
@@ -337,6 +347,11 @@ class _ParamikoTransport:
         return self._fingerprint
 
     def upload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.client is None:
+            raise StatusUploadError("SSH 未连接")
+        return self._run("codex-status-import-provider", json.dumps(payload, ensure_ascii=False))
+
+    def manage(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.client is None:
             raise StatusUploadError("SSH 未连接")
         return self._run("codex-status-import-provider", json.dumps(payload, ensure_ascii=False))

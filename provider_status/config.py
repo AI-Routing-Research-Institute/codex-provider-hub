@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import math
 import socket
 from collections.abc import Callable, Iterable, Mapping
@@ -231,6 +232,16 @@ def load_config(
         for model in provider.models
     ):
         raise ValueError("service claude_bin is required for Claude models")
+
+    order_path = fragments_directory / ".order.json"
+    if order_path.is_file():
+        try:
+            order = json.loads(order_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            order = []
+        if isinstance(order, list):
+            positions = {value: index for index, value in enumerate(order) if isinstance(value, str)}
+            providers.sort(key=lambda item: (positions.get(item.provider_id, len(positions)), item.provider_id))
 
     return ServiceConfig(
         providers=tuple(providers),

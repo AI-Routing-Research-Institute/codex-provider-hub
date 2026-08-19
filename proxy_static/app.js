@@ -24,6 +24,8 @@ let statusRequestActive = false;
 let healthRequestSequence = 0;
 let controlRequestActive = false;
 let healthRequestActive = false;
+let monitorManagementLoading = false;
+let monitorProviders = [];
 let retryFormLoaded = false;
 let latestRuntimeSettings = null;
 let latestRecoveryHistory = null;
@@ -293,7 +295,7 @@ function viewStorageKey(serviceId = uiConfig.service_id || "local") {
 }
 
 function normalizeViewName(viewName, requestsEnabled = true) {
-  const allowed = ["providers", "requests", "settings", "runtime"];
+  const allowed = ["providers", "requests", "settings", "runtime", "monitor"];
   if (!allowed.includes(viewName)) return "providers";
   return viewName === "requests" && !requestsEnabled ? "providers" : viewName;
 }
@@ -1620,13 +1622,115 @@ function switchView(viewName, { persist = true } = {}) {
   document.querySelector("#requests-view").hidden = viewName !== "requests";
   document.querySelector("#settings-view").hidden = viewName !== "settings";
   document.querySelector("#runtime-view").hidden = viewName !== "runtime";
+  document.querySelector("#monitor-view").hidden = viewName !== "monitor";
   if (viewName === "runtime" && latestRuntimeSettings === null) {
     readRuntimeSettings();
   }
   if (viewName === "requests" && requestHistoryItems.length === 0 && !requestLoading) {
     readRequests({ reset: true });
   }
+  if (viewName === "monitor" && !monitorManagementLoading) void loadMonitorManagement();
   if (persist) persistView(viewName);
+}
+
+function monitorStateLabel(state) {
+  return ({ healthy: "可用", degraded: "降级", down: "不可用", unknown: "未检测" })[state] || "未检测";
+}
+
+function renderMonitorManagement(statusPayload = null) {
+  const list = document.querySelector("#monitor-list");
+  const empty = document.querySelector("#monitor-empty");
+  if (!list) return;
+  const statusByUrl = new Map((statusPayload?.providers || []).map((item) => [item.base_url, item]));
+  list.replaceChildren();
+  empty.hidden = monitorProviders.length !== 0;
+  for (const [index, provider] of monitorProviders.entries()) {
+    const status = statusByUrl.get(provider.base_url) || {};
+    const row = document.createElement("div");
+    row.className = "monitor-row";
+    const main = document.createElement("div");
+    main.className = "monitor-main";
+    const name = document.createElement("strong");
+    name.className = "monitor-name";
+    name.textContent = provider.name || provider.id;
+    const endpoint = document.createElement("code");
+    endpoint.className = "monitor-endpoint";
+    endpoint.textContent = provider.base_url || "—";
+    const models = document.createElement("span");
+    models.className = "monitor-models";
+    models.textContent = `模型：${(provider.display_models || provider.models || []).join("、") || "—"}`;
+    const state = document.createElement("span");
+    state.className = `monitor-state ${status.state || "unknown"}`;
+    state.textContent = `${monitorStateLabel(status.state)}${status.last_checked ? ` · ${status.last_checked}` : ""}`;
+    main.append(name, endpoint, models, state);
+    const controls = document.createElement("div");
+    controls.className = "monitor-controls";
+    for (const [label, action, disabled] of [["上移", "up", index === 0], ["下移", "down", index === monitorProviders.length - 1]]) {
+      const button = document.createElement("button"); button.type = "button"; button.textContent = label; button.disabled = disabled;
+      button.addEventListener("click", () => void moveMonitorProvider(index, action)); controls.append(button);
+    }
+    const probe = document.createElement("button"); probe.type = "button"; probe.textContent = "立即检测";
+    probe.addEventListener("click", () => void requestMonitorProbe(provider, probe)); controls.append(probe);
+    const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "删除";
+    remove.addEventListener("click", () => void deleteMonitorProvider(provider)); controls.append(remove);
+    row.append(main, controls); list.append(row);
+  }
+  text("#monitor-meta", `服务器监控供应商 ${monitorProviders.length} 个`);
+}
+
+async function monitorManagementRequest(payload) {
+  const response = await fetch(controlUrl("/api/status-management"), {
+    method: "POST", headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+    body: JSON.stringify(payload), cache: "no-store",
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+  return data;
+}
+
+async function loadMonitorManagement() {
+  monitorManagementLoading = true;
+  const error = document.querySelector("#monitor-error"); error.hidden = true;
+  try {
+    const result = await monitorManagementRequest({ action: "list" });
+    monitorProviders = Array.isArray(result.providers) ? result.providers : [];
+    renderMonitorManagement(latestHealthStatus);
+  } catch (err) {
+    error.hidden = false; error.textContent = err?.message || "无法读取服务器监控配置";
+  } finally { monitorManagementLoading = false; }
+}
+
+async function moveMonitorProvider(index, direction) {
+  const next = monitorProviders.slice();
+  const target = direction === "up" ? index - 1 : index + 1;
+  [next[index], next[target]] = [next[target], next[index]];
+  try {
+    await monitorManagementRequest({ action: "order", provider_ids: next.map((item) => item.id) });
+    monitorProviders = next; renderMonitorManagement(latestHealthStatus); showToast("排序已保存", "服务器监控顺序已更新。");
+  } catch (err) { showToast("排序失败", err?.message || "无法保存服务器监控顺序。", "error"); }
+}
+
+async function deleteMonitorProvider(provider) {
+  if (!window.confirm(`确定删除服务器监控供应商“${provider.name || provider.id}”吗？`)) return;
+  try {
+    await monitorManagementRequest({ action: "delete", provider_id: provider.id });
+    await loadMonitorManagement(); await readHealthStatus({ quiet: true });
+    showToast("已删除", `${provider.name || provider.id} 已从服务器监控中移除。`);
+  } catch (err) { showToast("删除失败", err?.message || "无法删除服务器监控供应商。", "error"); }
+}
+
+async function requestMonitorProbe(provider, button) {
+  button.disabled = true;
+  try {
+    const statusUrl = healthStatusUrl();
+    if (!statusUrl) throw new Error("未配置服务器检测地址");
+    const response = await fetch(statusUrl.replace(/\/api\/status(?:\?.*)?$/, "") + `/api/manual-probes/${encodeURIComponent(provider.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ models: provider.display_models || provider.models || [] }) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    showToast("检测已提交", "服务器正在检测该供应商，稍后刷新即可查看结果。");
+    window.setTimeout(() => void readHealthStatus({ quiet: true }), 2500);
+  } catch (err) { showToast("检测提交失败", err?.message || "无法提交立即检测。", "error"); }
+  finally { button.disabled = false; }
 }
 
 function escapeText(value) {
@@ -3532,6 +3636,7 @@ for (const control of runtimeForm.querySelectorAll("input")) {
 runtimeForm.addEventListener("submit", saveRuntimeSettings);
 document.querySelector("#validate-database").addEventListener("click", validateRuntimeDatabase);
 document.querySelector("#test-health-url").addEventListener("click", testRuntimeHealthUrl);
+document.querySelector("#monitor-refresh")?.addEventListener("click", () => { void loadMonitorManagement(); void readHealthStatus({ quiet: true }); });
 document.querySelector("#copy-data-directory").addEventListener("click", copyDataDirectory);
 document.querySelector("#status-upload-close").addEventListener("click", closeStatusUploadModal);
 document.querySelector("#status-upload-cancel").addEventListener("click", closeStatusUploadModal);

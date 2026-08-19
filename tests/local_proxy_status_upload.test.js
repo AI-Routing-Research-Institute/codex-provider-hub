@@ -22,3 +22,11 @@ test("supports one-time SSH initialization in the upload dialog", () => {
   assert.match(source, /statusUploadSsh\.hidden = settings\.initialized === true/);
   assert.match(source, /statusUploadChangeTarget\.addEventListener/);
 });
+
+test("renders the remote monitoring management view", () => {
+  assert.match(html, /data-view="monitor"/);
+  assert.match(html, /id="monitor-view"/);
+  assert.match(source, /api\/status-management/);
+  assert.match(source, /立即检测/);
+  assert.match(source, /删除服务器监控供应商/);
+});

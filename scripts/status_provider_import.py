@@ -21,6 +21,8 @@ CONFIG_PATH = Path("/etc/codex-provider-probe/providers.toml")
 SECRET_ROOT = Path("/etc/codex-provider-probe/secrets")
 FRAGMENT_ROOT = Path("/etc/codex-provider-probe/providers.d")
 DROPIN_PATH = Path("/etc/systemd/system/codex-provider-worker.service.d/zzzzz-imported-providers.conf")
+ORDER_PATH = FRAGMENT_ROOT / ".order.json"
+PUBLIC_DATABASE_PATH = Path("/var/lib/codex-provider-probe/public/status.sqlite3")
 LOCK_PATH = Path("/var/lib/codex-provider-probe/control/provider-import.lock")
 APP_ROOT = Path("/opt/codex-provider-probe/app/provider_status")
 VENV_PYTHON = Path("/opt/codex-provider-probe/venv/bin/python")
@@ -29,6 +31,110 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 class ImportErrorDetail(ValueError):
     pass
+
+
+def _provider_block_id(block: str) -> str | None:
+    match = re.search(r"(?m)^id\s*=\s*(['\"])([^'\"]+)\1\s*$", block)
+    return match.group(2).strip() if match else None
+
+
+def _provider_blocks(config_path: Path) -> list[tuple[str, str]]:
+    if not config_path.is_file():
+        return []
+    text = config_path.read_text(encoding="utf-8")
+    parts = re.split(r"(?m)(?=^\[\[providers\]\]\s*$)", text)
+    return [(part, _provider_block_id(part) or "") for part in parts]
+
+
+def _credential_from_block(block: str) -> str | None:
+    match = re.search(r"(?m)^credential_name\s*=\s*(['\"])([^'\"]+)\1\s*$", block)
+    return match.group(2).strip() if match else None
+
+
+def _public_management_provider(item: dict[str, Any]) -> dict[str, Any]:
+    models = item.get("models") if isinstance(item.get("models"), list) else []
+    display_models = item.get("display_models", models)
+    return {
+        "id": str(item.get("id", item.get("provider_id", ""))),
+        "name": str(item.get("name", "")),
+        "base_url": str(item.get("base_url", "")),
+        "models": list(models),
+        "display_models": list(display_models) if isinstance(display_models, list) else list(models),
+        "probe_mode": str(item.get("probe_mode", "automatic")),
+    }
+
+
+def _remove_main_provider(provider_id: str, config_path: Path) -> tuple[str | None, bool]:
+    blocks = _provider_blocks(config_path)
+    if not blocks:
+        return None, False
+    removed = False
+    credential = None
+    kept: list[str] = []
+    for block, block_id in blocks:
+        if block_id == provider_id:
+            removed = True
+            credential = _credential_from_block(block)
+        else:
+            kept.append(block)
+    if removed:
+        _atomic_write(config_path, "".join(kept), 0o644)
+    return credential, removed
+
+
+def delete_provider(
+    provider_id: str,
+    *,
+    config_path: Path = CONFIG_PATH,
+    fragment_root: Path = FRAGMENT_ROOT,
+    secret_root: Path = SECRET_ROOT,
+    public_database_path: Path = PUBLIC_DATABASE_PATH,
+) -> dict[str, str]:
+    if not ID_RE.fullmatch(provider_id):
+        raise ImportErrorDetail("provider_id 格式无效")
+    fragment_path = fragment_root / f"{provider_id}.toml"
+    old_fragment = fragment_path.read_bytes() if fragment_path.exists() else None
+    old_config = config_path.read_bytes() if config_path.exists() else None
+    credential_name = None
+    removed = False
+    if fragment_path.exists():
+        credential_name = _credential_from_block(fragment_path.read_text(encoding="utf-8"))
+        fragment_path.unlink()
+        removed = True
+    else:
+        credential_name, removed = _remove_main_provider(provider_id, config_path)
+    if not removed:
+        raise ImportErrorDetail("未找到指定供应商")
+    secret_path = secret_root / credential_name if credential_name else None
+    old_secret = secret_path.read_bytes() if secret_path and secret_path.exists() else None
+    if secret_path:
+        secret_path.unlink(missing_ok=True)
+    try:
+        if public_database_path.exists():
+            import sqlite3
+            with sqlite3.connect(public_database_path) as connection:
+                connection.execute("PRAGMA foreign_keys=ON")
+                connection.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+                connection.commit()
+    except Exception:
+        if old_config is None:
+            config_path.unlink(missing_ok=True)
+        else:
+            config_path.write_bytes(old_config)
+        if old_fragment is not None:
+            fragment_path.write_bytes(old_fragment)
+        if secret_path and old_secret is not None:
+            secret_path.write_bytes(old_secret)
+        raise
+    return {"status": "deleted", "provider_id": provider_id}
+
+
+def order_providers(provider_ids: list[str], *, fragment_root: Path = FRAGMENT_ROOT) -> dict[str, Any]:
+    if len(provider_ids) != len(set(provider_ids)) or any(not isinstance(value, str) or not ID_RE.fullmatch(value) for value in provider_ids):
+        raise ImportErrorDetail("provider_id 顺序列表无效")
+    fragment_root.mkdir(parents=True, exist_ok=True)
+    _atomic_write(fragment_root / ".order.json", json.dumps(provider_ids, ensure_ascii=False) + "\n", 0o644)
+    return {"status": "ordered", "provider_ids": provider_ids}
 
 
 def import_provider_fragment(
@@ -269,6 +375,44 @@ def bootstrap(
 
 def serve() -> dict[str, Any]:
     payload = json.load(sys.stdin)
+    action = payload.get("action") if isinstance(payload, dict) else None
+    if action == "delete":
+        result = delete_provider(str(payload.get("provider_id") or ""))
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "restart", "codex-provider-worker.service"], check=True)
+        return result
+    if action == "order":
+        result = order_providers(list(payload.get("provider_ids") or []))
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "restart", "codex-provider-worker.service"], check=True)
+        return result
+    if action == "list":
+        providers: list[dict[str, Any]] = []
+        if CONFIG_PATH.is_file():
+            with CONFIG_PATH.open("rb") as handle:
+                config = _load_toml(handle)
+            values = config.get("providers")
+            if values is None and isinstance(config.get("service"), dict):
+                values = config["service"].get("providers")
+            if isinstance(values, list):
+                providers.extend(value for value in values if isinstance(value, dict))
+        for fragment_path in sorted(FRAGMENT_ROOT.glob("*.toml")):
+            with fragment_path.open("rb") as handle:
+                fragment = _load_toml(handle)
+            values = fragment.get("providers")
+            if isinstance(values, list):
+                providers.extend(value for value in values if isinstance(value, dict))
+        order = []
+        if ORDER_PATH.is_file():
+            try:
+                raw_order = json.loads(ORDER_PATH.read_text(encoding="utf-8"))
+                order = raw_order if isinstance(raw_order, list) else []
+            except (OSError, json.JSONDecodeError):
+                order = []
+        positions = {value: index for index, value in enumerate(order) if isinstance(value, str)}
+        providers.sort(key=lambda item: (positions.get(str(item.get("id", item.get("provider_id", ""))), len(positions)), str(item.get("id", item.get("provider_id", "")))))
+        public_providers = [_public_management_provider(item) for item in providers]
+        return {"status": "ok", "providers": public_providers}
     import fcntl
 
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)

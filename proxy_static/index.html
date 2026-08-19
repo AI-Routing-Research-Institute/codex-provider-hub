@@ -61,6 +61,7 @@
         <button class="view-tab" type="button" data-view="requests" aria-selected="false">请求 <span id="request-tab-count" class="view-tab-count" hidden>0</span></button>
         <button class="view-tab" type="button" data-view="settings" aria-selected="false">重试设置</button>
         <button class="view-tab" type="button" data-view="runtime" aria-selected="false">运行设置</button>
+        <button class="view-tab" type="button" data-view="monitor" aria-selected="false">监控管理</button>
       </nav>
 
       <div id="providers-view" class="workspace view-panel">
@@ -313,6 +314,19 @@
           </div>
           <div id="update-result" class="setting-notice" hidden></div>
         </div>
+      </section>
+
+      <section id="monitor-view" class="settings-view view-panel" aria-labelledby="monitor-title" hidden>
+        <div class="settings-heading">
+          <div>
+            <h2 id="monitor-title">监控管理</h2>
+            <p id="monitor-meta">正在读取服务器上的全部监控供应商</p>
+          </div>
+          <div class="monitor-actions"><button id="monitor-refresh" class="icon-button" type="button" title="刷新监控列表" aria-label="刷新监控列表">↻</button></div>
+        </div>
+        <p id="monitor-error" class="status-upload-error" role="alert" hidden></p>
+        <div id="monitor-list" class="monitor-list" aria-live="polite"></div>
+        <div id="monitor-empty" class="empty-state" hidden>服务器上没有监控供应商</div>
       </section>
 
       <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>

@@ -24,6 +24,76 @@ from scripts.status_provider_import import (
 
 
 class StatusProviderUploadTests(unittest.TestCase):
+    def test_status_management_orders_providers_from_order_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "providers.toml"
+            config.write_text(
+                """[service]
+database_path = "private.sqlite3"
+public_database_path = "public.sqlite3"
+temp_root = "tmp"
+codex_bin = "codex"
+
+[[providers]]
+id = "first"
+name = "First"
+base_url = "https://first.example/v1"
+credential_name = "first.key"
+models = ["gpt-5.5"]
+healthy_interval_seconds = 600
+unhealthy_interval_seconds = 120
+timeout_seconds = 90
+
+[[providers]]
+id = "second"
+name = "Second"
+base_url = "https://second.example/v1"
+credential_name = "second.key"
+models = ["gpt-5.5"]
+healthy_interval_seconds = 600
+unhealthy_interval_seconds = 120
+timeout_seconds = 90
+""",
+                encoding="utf-8",
+            )
+            (root / "providers.d").mkdir()
+            (root / "providers.d" / ".order.json").write_text(
+                '["second", "first"]\n', encoding="utf-8"
+            )
+
+            loaded = load_config(config)
+
+        self.assertEqual([provider.provider_id for provider in loaded.providers], ["second", "first"])
+
+    def test_management_delete_removes_fragment_and_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fragment = root / "providers.d"
+            fragment.mkdir()
+            fragment_path = fragment / "alpha.toml"
+            fragment_path.write_text(
+                '[[providers]]\nid = "alpha"\nname = "Alpha"\n',
+                encoding="utf-8",
+            )
+            secret_root = root / "secrets"
+            secret_root.mkdir()
+            secret = secret_root / "imported_alpha.key"
+            secret.write_text("secret\n", encoding="utf-8")
+
+            result = status_import.delete_provider(
+                "alpha",
+                config_path=root / "providers.toml",
+                fragment_root=fragment,
+                secret_root=secret_root,
+            )
+
+        self.assertEqual(result["provider_id"], "alpha")
+        self.assertFalse(fragment_path.exists())
+        self.assertFalse(secret.exists())
+
+    def test_management_list_does_not_expose_credential_name(self) -> None:
+        self.assertNotIn("credential_name", status_import._public_management_provider({"id": "alpha", "credential_name": "secret.key"}))
     def test_remote_bootstrap_accepts_json_after_command_output(self) -> None:
         class Channel:
             def recv_exit_status(self):

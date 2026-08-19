@@ -511,6 +511,19 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .status-upload-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .status-upload-error { margin: 12px 0 0; color: #b33a3a; font-size: 12px; }
 .status-upload-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.monitor-list { display: grid; gap: 8px; margin-top: 16px; }
+.monitor-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
+.monitor-main { min-width: 0; display: grid; gap: 4px; }
+.monitor-name { font-weight: 700; }
+.monitor-endpoint, .monitor-models { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-state { font-size: 12px; font-weight: 700; }
+.monitor-state.healthy { color: var(--green); }
+.monitor-state.degraded, .monitor-state.down { color: #b33a3a; }
+.monitor-state.unknown { color: var(--muted); }
+.monitor-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.monitor-controls button { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); cursor: pointer; }
+.monitor-controls button:hover { border-color: var(--hover-border); }
+@media (max-width: 680px) { .monitor-row { grid-template-columns: 1fr; } .monitor-controls { justify-content: flex-start; } }
 .provider-copy code { display: block; margin-top: 5px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .provider-request-cell { min-width: 0; display: grid; place-items: center; padding-inline: 8px; }
 .provider-request-empty { color: var(--muted); font-size: 11px; }
