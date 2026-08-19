@@ -94,7 +94,12 @@ class ClaudeHealthProbe:
             run_directory, home, workspace = self._prepare_run()
             process = self._runner(
                 claude_bin=self._claude_bin,
-                env=_build_claude_env(home, provider.claude_base_url, api_key),
+                env=_build_claude_env(
+                    home,
+                    provider.claude_base_url,
+                    api_key,
+                    provider.credential_kind,
+                ),
                 workspace=workspace,
                 model=model,
                 prompt=HEALTH_PROMPT,
@@ -272,7 +277,12 @@ class ClaudeHealthProbe:
         )
 
 
-def _build_claude_env(home: Path, base_url: str, api_key: str) -> dict[str, str]:
+def _build_claude_env(
+    home: Path,
+    base_url: str,
+    api_key: str,
+    credential_kind: str = "api_key",
+) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
@@ -281,11 +291,11 @@ def _build_claude_env(home: Path, base_url: str, api_key: str) -> dict[str, str]
     env.update(
         {
             "HOME": str(home),
-            "ANTHROPIC_API_KEY": api_key,
             "ANTHROPIC_BASE_URL": base_url.rstrip("/"),
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
     )
+    env["ANTHROPIC_AUTH_TOKEN" if credential_kind == "auth_token" else "ANTHROPIC_API_KEY"] = api_key
     return env
 
 
@@ -420,7 +430,8 @@ def _run_direct_messages_diagnostic(
                 "POST",
                 endpoint,
                 headers={
-                    "x-api-key": api_key,
+                    ("Authorization" if provider.credential_kind == "auth_token" else "x-api-key"):
+                    f"Bearer {api_key}" if provider.credential_kind == "auth_token" else api_key,
                     "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },

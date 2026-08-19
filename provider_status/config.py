@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import math
 import socket
 from collections.abc import Callable, Iterable, Mapping
@@ -40,6 +41,7 @@ class ProviderConfig:
     probe_mode: str = PROBE_MODE_AUTOMATIC
     model_clients: tuple[tuple[str, str], ...] = ()
     claude_base_url: str | None = None
+    credential_kind: str = "api_key"
 
     def probe_client(self, model: str) -> str:
         return dict(self.model_clients).get(model, PROBE_CLIENT_CODEX)
@@ -89,6 +91,24 @@ def load_config(
     config_path = Path(path)
     with config_path.open("rb") as config_file:
         raw_config = tomllib.load(config_file)
+    fragments_directory = config_path.with_name("providers.d")
+    service_table = raw_config.get("service")
+    if isinstance(raw_config.get("providers"), list):
+        fragment_providers = raw_config["providers"]
+    elif isinstance(service_table, dict):
+        fragment_providers = service_table.setdefault("providers", [])
+    else:
+        fragment_providers = raw_config.setdefault("providers", [])
+    if not isinstance(fragment_providers, list):
+        raise ValueError("providers must be a non-empty array of tables")
+    if fragments_directory.is_dir():
+        for fragment_path in sorted(fragments_directory.glob("*.toml")):
+            with fragment_path.open("rb") as fragment_file:
+                fragment = tomllib.load(fragment_file)
+            values = fragment.get("providers")
+            if not isinstance(values, list):
+                raise ValueError(f"{fragment_path.name}: providers must be an array")
+            fragment_providers.extend(values)
 
     service = raw_config.get("service", raw_config)
     if not isinstance(service, dict):
@@ -194,6 +214,7 @@ def load_config(
                 probe_mode=_probe_mode(raw_provider, provider_id),
                 model_clients=model_clients,
                 claude_base_url=claude_base_url,
+                credential_kind=_credential_kind(raw_provider, provider_id),
             )
         )
 
@@ -211,6 +232,16 @@ def load_config(
         for model in provider.models
     ):
         raise ValueError("service claude_bin is required for Claude models")
+
+    order_path = fragments_directory / ".order.json"
+    if order_path.is_file():
+        try:
+            order = json.loads(order_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            order = []
+        if isinstance(order, list):
+            positions = {value: index for index, value in enumerate(order) if isinstance(value, str)}
+            providers.sort(key=lambda item: positions.get(item.provider_id, len(positions)))
 
     return ServiceConfig(
         providers=tuple(providers),
@@ -243,6 +274,13 @@ def _required_string(
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{context} {key} must be a non-empty string")
     return value.strip()
+
+
+def _credential_kind(raw_provider: Mapping[str, Any], provider_id: str) -> str:
+    value = raw_provider.get("credential_kind", "api_key")
+    if value not in {"api_key", "auth_token"}:
+        raise ValueError(f"provider {provider_id!r} credential_kind is invalid")
+    return str(value)
 
 
 def _optional_string(values: Mapping[str, Any], key: str) -> str | None:

@@ -550,6 +550,7 @@ class CodexConfigTests(unittest.TestCase):
             settings_data=codex_settings,
             retry_policy_store=shared_store.retry_policy_store,
             health_status_url_store=shared_store.health_status_url_store,
+            status_upload_manager=mock.ANY,
         )
         claude_profile_builder.assert_called_once_with(
             database=Path("cc-switch.db"),
@@ -557,6 +558,11 @@ class CodexConfigTests(unittest.TestCase):
             settings_data=claude_settings,
             retry_policy_store=shared_store.retry_policy_store,
             health_status_url_store=shared_store.health_status_url_store,
+            status_upload_manager=mock.ANY,
+        )
+        self.assertIs(
+            codex_profile_builder.call_args.kwargs["status_upload_manager"],
+            claude_profile_builder.call_args.kwargs["status_upload_manager"],
         )
         coordinator.assert_called_once_with(
             shared_store,
