@@ -11,6 +11,7 @@ import httpx
 from provider_status.claude_probe import (
     ClaudeHealthProbe,
     ClaudeProcessResult,
+    _build_claude_env,
     _run_claude_cli,
     _run_direct_messages_diagnostic,
 )
@@ -25,7 +26,7 @@ API_KEY = "test-claude-secret-123456"
 VALID_OUTPUT = {"status": "ok", "check": "codex-provider-health"}
 
 
-def make_provider() -> ProviderConfig:
+def make_provider(credential_kind: str = "api_key") -> ProviderConfig:
     return ProviderConfig(
         provider_id="provider-alpha",
         name="Provider Alpha",
@@ -37,6 +38,7 @@ def make_provider() -> ProviderConfig:
         timeout_seconds=90,
         model_clients=(("claude-opus-5", "claude"),),
         claude_base_url="https://alpha.example.com",
+        credential_kind=credential_kind,
     )
 
 
@@ -84,6 +86,17 @@ class FakeProcess:
 
 
 class ClaudeHealthProbeTests(unittest.TestCase):
+    def test_auth_token_environment_does_not_set_api_key(self) -> None:
+        environment = _build_claude_env(
+            Path("/tmp/claude"),
+            "https://alpha.example.com/",
+            API_KEY,
+            "auth_token",
+        )
+
+        self.assertEqual(environment["ANTHROPIC_AUTH_TOKEN"], API_KEY)
+        self.assertNotIn("ANTHROPIC_API_KEY", environment)
+
     def run_probe(self, process_result: ClaudeProcessResult, **kwargs):
         captures: list[dict] = []
 
@@ -229,6 +242,25 @@ class ClaudeHealthProbeTests(unittest.TestCase):
         self.assertEqual(requests[0].headers["anthropic-version"], "2023-06-01")
         self.assertEqual(result.error_code, "auth_failed")
         self.assertEqual(result.http_status_code, 403)
+
+    def test_auth_token_diagnostic_uses_bearer_authorization(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(403)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with mock.patch("provider_status.claude_probe.httpx.Client", return_value=client):
+            _run_direct_messages_diagnostic(
+                provider=make_provider("auth_token"),
+                model="claude-opus-5",
+                api_key=API_KEY,
+                timeout_seconds=10.0,
+            )
+
+        self.assertEqual(requests[0].headers["Authorization"], f"Bearer {API_KEY}")
+        self.assertNotIn("x-api-key", requests[0].headers)
 
     def test_provider_router_selects_model_client(self) -> None:
         class FakeProbe:

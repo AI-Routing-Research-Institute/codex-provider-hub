@@ -61,6 +61,7 @@
         <button class="view-tab" type="button" data-view="requests" aria-selected="false">请求 <span id="request-tab-count" class="view-tab-count" hidden>0</span></button>
         <button class="view-tab" type="button" data-view="settings" aria-selected="false">重试设置</button>
         <button class="view-tab" type="button" data-view="runtime" aria-selected="false">运行设置</button>
+        <button class="view-tab" type="button" data-view="monitor" aria-selected="false">监控管理</button>
       </nav>
 
       <div id="providers-view" class="workspace view-panel">
@@ -315,6 +316,19 @@
         </div>
       </section>
 
+      <section id="monitor-view" class="settings-view view-panel" aria-labelledby="monitor-title" hidden>
+        <div class="settings-heading">
+          <div>
+            <h2 id="monitor-title">监控管理</h2>
+            <p id="monitor-meta">正在读取服务器上的全部监控供应商</p>
+          </div>
+          <div class="monitor-actions"><button id="monitor-refresh" class="icon-button" type="button" title="刷新监控列表" aria-label="刷新监控列表">↻</button></div>
+        </div>
+        <p id="monitor-error" class="status-upload-error" role="alert" hidden></p>
+        <div id="monitor-list" class="monitor-list" aria-live="polite"></div>
+        <div id="monitor-empty" class="empty-state" hidden>服务器上没有监控供应商</div>
+      </section>
+
       <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
       <footer class="footer">
@@ -381,6 +395,23 @@
       </div>
     </form>
   </dialog>
+  <div id="status-upload-modal" class="status-upload-modal" role="dialog" aria-modal="true" aria-labelledby="status-upload-title" hidden>
+    <div class="status-upload-dialog">
+      <div class="status-upload-heading"><div><strong id="status-upload-title">上传到服务器检测</strong><span id="status-upload-provider"></span></div><button id="status-upload-close" class="usage-history-close" type="button" title="关闭上传窗口" aria-label="关闭上传窗口">×</button></div>
+      <p id="status-upload-help" class="status-upload-help">选择要检测的模型。API Key 或 Auth Token 只会通过受限 SSH 命令发送到服务器，不会显示在页面。</p>
+      <div id="status-upload-models" class="status-upload-models"></div>
+      <button id="status-upload-add-model" class="secondary-button" type="button">添加模型</button>
+      <button id="status-upload-change-target" class="text-button" type="button" hidden>更换服务器</button>
+      <div id="status-upload-ssh" class="status-upload-ssh" hidden>
+        <strong>首次连接服务器</strong>
+        <label>服务器地址<input id="status-upload-host" type="text" value="118.195.178.173" autocomplete="off"></label>
+        <div class="status-upload-inline"><label>SSH 端口<input id="status-upload-port" type="number" min="1" max="65535" value="22"></label><label>用户名<input id="status-upload-user" type="text" value="ubuntu" autocomplete="username"></label></div>
+        <label>服务器密码<input id="status-upload-password" type="password" autocomplete="current-password"></label>
+      </div>
+      <p id="status-upload-error" class="status-upload-error" role="alert" hidden></p>
+      <div class="status-upload-actions"><button id="status-upload-cancel" class="secondary-button" type="button">取消</button><button id="status-upload-submit" class="primary-button" type="button">上传</button></div>
+    </div>
+  </div>
 
   <script src="./static/app.js?v=31" defer></script>
 </body>

@@ -40,6 +40,7 @@ from local_proxy.codex_profile import (
     load_settings as load_codex_settings,
 )
 from local_proxy.paths import display_path, resolve_user_path
+from local_proxy.status_upload import StatusUploadManager
 from local_proxy.shared_settings import (
     SharedRuntimeCoordinator,
     SharedSettingsStore,
@@ -267,6 +268,7 @@ def run_application(
 
     codex_settings = load_codex_settings()
     claude_settings = load_claude_settings()
+    status_upload_manager = StatusUploadManager()
     tray_holder: dict[str, Any] = {}
     server_holder: dict[str, LocalProxyServer] = {}
 
@@ -295,6 +297,7 @@ def run_application(
         settings_data=codex_settings,
         retry_policy_store=shared_store.retry_policy_store,
         health_status_url_store=shared_store.health_status_url_store,
+        status_upload_manager=status_upload_manager,
     )
     from local_proxy.claude_profile import build_claude_profile
 
@@ -304,6 +307,7 @@ def run_application(
         settings_data=claude_settings,
         retry_policy_store=shared_store.retry_policy_store,
         health_status_url_store=shared_store.health_status_url_store,
+        status_upload_manager=status_upload_manager,
     )
     SharedRuntimeCoordinator(
         shared_store,
