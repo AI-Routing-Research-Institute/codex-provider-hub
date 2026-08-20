@@ -5,6 +5,7 @@ import httpx
 from curl_cffi.requests.exceptions import RequestException
 
 from local_proxy.transports.claude import ClaudeCurlClient
+from local_proxy.transports.curl import CurlClient
 
 
 class FakeCurlResponse:
@@ -137,6 +138,34 @@ class ClaudeCurlClientTests(unittest.IsolatedAsyncioTestCase):
         await client.aclose()
 
         self.assertTrue(session.closed)
+
+
+class CurlClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generic_client_forwards_and_streams_codex_requests(self) -> None:
+        session = FakeSession()
+        client = CurlClient(session=session)
+        response = await client.send(
+            client.build_request(
+                "POST",
+                "https://provider.example/v1/responses",
+                headers={"Authorization": "Bearer secret"},
+                content=b'{"stream":true}',
+            ),
+            stream=True,
+        )
+
+        body = b"".join([chunk async for chunk in response.aiter_raw()])
+        self.assertEqual(body, b'event: message_start\ndata: {"type":"message_start"}\n\n')
+        self.assertEqual(session.calls[0]["url"], "https://provider.example/v1/responses")
+        self.assertEqual(session.calls[0]["headers"]["Authorization"], "Bearer secret")
+        self.assertEqual(session.calls[0]["accept_encoding"], "identity")
+
+    async def test_generic_client_translates_curl_failures(self) -> None:
+        client = CurlClient(session=FakeSession(error=RequestException("curl failed")))
+        with self.assertRaises(httpx.TransportError):
+            await client.send(
+                client.build_request("POST", "https://provider.example/v1/responses")
+            )
 
 
 if __name__ == "__main__":

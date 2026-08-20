@@ -6,8 +6,6 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-import httpx
-
 from local_proxy.codex import (
     codex_cli_launch_command,
     load_local_proxy_providers,
@@ -26,6 +24,7 @@ from local_proxy.core import (
 )
 from local_proxy.paths import display_path
 from local_proxy.server import ProxyProfile
+from local_proxy.transports.curl import CurlClient
 from local_proxy.provider_catalog import ProviderCatalog
 from local_proxy.status_upload import (
     StatusUploadManager,
@@ -258,9 +257,9 @@ def build_codex_profile(
         service_id="codex",
         service_name="codex-local-proxy",
         router=router,
-        upstream_client=httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=30.0, read=None, write=120.0, pool=30.0),
-            follow_redirects=False,
+        upstream_client=CurlClient(
+            connect_timeout_seconds=30.0,
+            idle_timeout_seconds=300.0,
         ),
         reload_providers=prepared_providers,
         on_provider_selected=lambda provider_id: persist(selected_provider_id=provider_id),
