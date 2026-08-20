@@ -24,6 +24,7 @@ from local_proxy.core import (
     REQUEST_HISTORY_WINDOWS,
     USAGE_WINDOWS,
     HealthStatusUrlStore,
+    InputItemIdCompatibilityStore,
     ProviderConfigurationError,
     ProviderRouter,
     ProxyProvider,
@@ -117,6 +118,7 @@ class ProxyProfile:
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None
     session_catalog: Callable[[float], Iterable[Mapping[str, Any]]] | None = None
     session_key_resolver: Callable[[str], str | None] | None = None
+    input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None
     config_endpoint_name: str = "config"
     owns_client: bool = True
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -125,6 +127,8 @@ class ProxyProfile:
     def __post_init__(self) -> None:
         self.retry_policy_store = self.retry_policy_store or RetryPolicyStore(self.retry_policy)
         self.health_status_url_store = self.health_status_url_store or HealthStatusUrlStore()
+        if self.service_id == "codex" and self.input_item_id_compatibility_store is None:
+            self.input_item_id_compatibility_store = InputItemIdCompatibilityStore()
         self.active_hidden_provider_ids = {
             provider_id
             for provider_id in self.hidden_provider_ids
@@ -243,6 +247,7 @@ def create_unified_proxy_app(
             recovery_history_store=profile.recovery_history_store,
             protocol_adapter=profile.protocol_adapter,
             session_name_resolver=profile.session_name_resolver,
+            input_item_id_compatibility_store=profile.input_item_id_compatibility_store,
         )
 
     return app

@@ -16,6 +16,7 @@ import httpx
 
 from local_proxy.core import (
     HealthStatusUrlStore,
+    InputItemIdCompatibilityStore,
     LocalProxyServer,
     ProviderRouter,
     ProxyProvider,
@@ -28,6 +29,8 @@ from local_proxy.core import (
     RETRY_ERROR_BODY_BYTES,
     _codex_thread_id,
     _inspect_http_400_before_output,
+    _input_item_id_error_index,
+    _strip_input_item_ids,
     _public_control_status,
     _public_requests,
     _request_reasoning_effort,
@@ -1063,7 +1066,301 @@ api-version = "2026-07-01"
         self.assertEqual(loaded.default_query, {"api-version": "2026-07-01"})
 
 
+class InputItemIdCompatibilityTests(unittest.TestCase):
+    def test_store_is_scoped_to_session_and_provider(self) -> None:
+        now = [100.0]
+        store = InputItemIdCompatibilityStore(
+            ttl_seconds=10,
+            clock=lambda: now[0],
+        )
+
+        store.remember("thread-a", "provider-a")
+
+        self.assertTrue(store.should_strip("thread-a", "provider-a"))
+        self.assertFalse(store.should_strip("thread-a", "provider-b"))
+        self.assertFalse(store.should_strip("thread-b", "provider-a"))
+        self.assertFalse(store.should_strip(None, "provider-a"))
+        now[0] = 111.0
+        self.assertFalse(store.should_strip("thread-a", "provider-a"))
+
+    def test_strip_input_item_ids_keeps_references_and_call_ids(self) -> None:
+        payload = json.dumps(
+            {
+                "previous_response_id": "resp_old",
+                "input": [
+                    {"type": "message", "id": "msg_old", "role": "user"},
+                    {"type": "function_call", "id": "fc_old", "call_id": "call_1"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                    {"type": "item_reference", "id": "msg_reference"},
+                ],
+            },
+            ensure_ascii=False,
+        ).encode()
+
+        stripped, changed = _strip_input_item_ids(payload)
+
+        self.assertIsNotNone(stripped)
+        self.assertEqual(changed, 2)
+        root = json.loads(stripped)
+        self.assertEqual(root["previous_response_id"], "resp_old")
+        self.assertNotIn("id", root["input"][0])
+        self.assertNotIn("id", root["input"][1])
+        self.assertEqual(root["input"][1]["call_id"], "call_1")
+        self.assertEqual(root["input"][2]["call_id"], "call_1")
+        self.assertEqual(root["input"][3]["id"], "msg_reference")
+
+    def test_error_index_requires_exact_invalid_input_id_shape(self) -> None:
+        self.assertEqual(
+            _input_item_id_error_index(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_value",
+                        "param": "input[147].id",
+                    }
+                }
+            ),
+            147,
+        )
+        self.assertIsNone(
+            _input_item_id_error_index(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_value",
+                        "param": "input[147].role",
+                    }
+                }
+            )
+        )
+
+
 class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_input_item_id_is_repaired_without_normal_retry_policy(self) -> None:
+        attempts: list[dict] = []
+        thread_id = "thread-item-id-repair"
+        body = {
+            "model": "test",
+            "previous_response_id": "resp_old",
+            "input": [
+                {"type": "message", "id": "bad_message_id", "role": "user", "content": "hi"},
+                {"type": "function_call", "id": "bad_call_id", "call_id": "call_1"},
+            ],
+        }
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            parsed = json.loads(request.content)
+            attempts.append(parsed)
+            if len(attempts) == 1:
+                return httpx.Response(
+                    400,
+                    headers={"content-type": "application/json"},
+                    json={
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_value",
+                            "param": "input[0].id",
+                        }
+                    },
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(enabled=False),
+            input_item_id_compatibility_store=InputItemIdCompatibilityStore(),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            headers={
+                "x-codex-turn-metadata": json.dumps({"thread_id": thread_id}),
+            },
+            json=body,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("id", attempts[0]["input"][0])
+        self.assertNotIn("id", attempts[1]["input"][0])
+        self.assertIn("id", attempts[1]["input"][1])
+        self.assertEqual(attempts[1]["previous_response_id"], "resp_old")
+        self.assertEqual(attempts[1]["input"][1]["call_id"], "call_1")
+
+    async def test_input_item_id_compatibility_applies_to_following_request(self) -> None:
+        seen: list[dict] = []
+        thread_id = "thread-item-id-memory"
+        compatibility = InputItemIdCompatibilityStore()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, content=b"ok")
+
+        router = ProviderRouter((provider("selected", current=True),))
+        compatibility.remember(thread_id, "selected")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            input_item_id_compatibility_store=compatibility,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            headers={"x-codex-turn-metadata": json.dumps({"thread_id": thread_id})},
+            json={
+                "model": "test",
+                "input": [{"type": "message", "id": "old", "role": "user"}],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("id", seen[0]["input"][0])
+
+    async def test_item_id_repair_stays_on_the_rejecting_provider(self) -> None:
+        seen_hosts: list[str] = []
+        router = ProviderRouter(
+            (provider("first", current=True), provider("second")),
+        )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            seen_hosts.append(request.url.host)
+            if len(seen_hosts) == 1:
+                router.select("second")
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_value",
+                            "param": "input[0].id",
+                        }
+                    },
+                )
+            return httpx.Response(200, content=b"ok")
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            headers={"x-codex-turn-metadata": json.dumps({"thread_id": "thread-a"})},
+            json={
+                "model": "test",
+                "input": [{"type": "message", "id": "old", "role": "user"}],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            seen_hosts,
+            ["first.example.test", "first.example.test"],
+        )
+
+    async def test_item_id_repair_stops_at_strict_limit(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            root = json.loads(request.content)
+            bad_index = next(
+                index for index, item in enumerate(root["input"]) if "id" in item
+            )
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_value",
+                        "param": f"input[{bad_index}].id",
+                    }
+                },
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            headers={"x-codex-turn-metadata": json.dumps({"thread_id": "thread-limit"})},
+            json={
+                "model": "test",
+                "input": [
+                    {"type": "message", "id": f"old-{index}", "role": "user"}
+                    for index in range(9)
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["param"], "input[8].id")
+        self.assertEqual(attempts, 9)
+
+    async def test_item_id_error_is_not_repaired_outside_responses(self) -> None:
+        attempts = 0
+        error = {
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_value",
+                "param": "input[0].id",
+            }
+        }
+
+        async def upstream(_: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(400, json=error)
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=upstream_client,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test",
+                "input": [{"type": "message", "id": "old", "role": "user"}],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), error)
+        self.assertEqual(attempts, 1)
+
     async def test_persistence_lock_does_not_block_following_upstream_request(self) -> None:
         class LockingUsageStore(UsageStore):
             def __init__(self, path: Path) -> None:
@@ -2662,7 +2959,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         )
         stream = remaining_chunks()
 
-        buffered, resumed_stream, retry_kind, retry_summary = (
+        buffered, resumed_stream, retry_kind, retry_summary, repair_index = (
             await _inspect_http_400_before_output(
                 response,
                 first_chunk,
@@ -2676,6 +2973,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remainder, b"overflow" + trailing_chunk)
         self.assertIsNone(retry_kind)
         self.assertIsNone(retry_summary)
+        self.assertIsNone(repair_index)
 
     async def test_sniffed_nginx_404_exhausts_without_html_leak(self) -> None:
         attempts = 0

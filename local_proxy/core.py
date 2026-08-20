@@ -40,6 +40,9 @@ RETRY_ERROR_BODY_BYTES = 4 * 1024
 RETRY_ERROR_HISTORY_LIMIT = 5
 RETRY_ERROR_MESSAGE_CHARS = 220
 RETRY_ERROR_READ_TIMEOUT_SECONDS = 0.25
+INPUT_ITEM_ID_COMPATIBILITY_TTL_SECONDS = 24 * 3600
+INPUT_ITEM_ID_COMPATIBILITY_MAX_ENTRIES = 4096
+MAX_INPUT_ITEM_ID_REPAIRS_PER_REQUEST = 8
 HTML_ERROR_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 RECOVERY_HISTORY_HOURS = 24
 RECOVERY_HISTORY_API_LIMIT = 500
@@ -89,6 +92,7 @@ SSE_FAILURE_MARKER_RE = re.compile(
     rb'(?<!\\)"error"\s*:\s*(?:\{|"))',
     re.IGNORECASE,
 )
+INPUT_ITEM_ID_ERROR_PARAM_RE = re.compile(r"^input\[(0|[1-9][0-9]*)\]\.id$")
 
 
 class DisconnectAwareStreamingResponse(StreamingResponse):
@@ -1192,6 +1196,61 @@ def _decode_json(payload: bytes) -> Any | None:
         return None
 
 
+def _input_item_id_error_index(root: Any) -> int | None:
+    """Return the rejected input index only for the exact upstream error shape."""
+    if not isinstance(root, dict):
+        return None
+    response = root.get("response") if isinstance(root.get("response"), dict) else {}
+    candidates = (root, root.get("error"), response, response.get("error"))
+    for node in candidates:
+        if not isinstance(node, dict):
+            continue
+        if (
+            node.get("type") != "invalid_request_error"
+            or node.get("code") != "invalid_value"
+        ):
+            continue
+        match = INPUT_ITEM_ID_ERROR_PARAM_RE.fullmatch(str(node.get("param", "")))
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def _input_item_id_error_index_from_body(body: bytes) -> int | None:
+    return _input_item_id_error_index(_decode_json(body))
+
+
+def _strip_input_item_ids(
+    payload: bytes,
+    *,
+    only_indexes: Iterable[int] | None = None,
+) -> tuple[bytes | None, int]:
+    """Remove safe top-level Responses input item IDs from a fresh JSON copy."""
+    root = _decode_json(payload)
+    if not isinstance(root, dict) or not isinstance(root.get("input"), list):
+        return None, 0
+    items = root["input"]
+    changed = 0
+    indexes = range(len(items)) if only_indexes is None else tuple(only_indexes)
+    for index in indexes:
+        if not isinstance(index, int) or index < 0 or index >= len(items):
+            continue
+        item = items[index]
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "item_reference":
+            continue
+        if isinstance(item.get("id"), str):
+            item.pop("id", None)
+            changed += 1
+    if not changed:
+        return None, 0
+    try:
+        return json.dumps(root, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed
+    except (TypeError, ValueError):
+        return None, 0
+
+
 def _normalize_reasoning_effort(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1520,6 +1579,61 @@ class HealthStatusUrlStore:
         normalized = normalize_health_status_url(url)
         with self._lock:
             self._url = normalized
+
+
+class InputItemIdCompatibilityStore:
+    """Remember providers that reject replayed Responses input item IDs."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = INPUT_ITEM_ID_COMPATIBILITY_TTL_SECONDS,
+        max_entries: int = INPUT_ITEM_ID_COMPATIBILITY_MAX_ENTRIES,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._ttl_seconds = max(1.0, float(ttl_seconds))
+        self._max_entries = max(1, int(max_entries))
+        self._clock = clock
+        self._expires_at: dict[tuple[str, str], float] = {}
+
+    def should_strip(self, thread_id: str | None, provider_id: str) -> bool:
+        key = self._key(thread_id, provider_id)
+        if key is None:
+            return False
+        now = self._clock()
+        with self._lock:
+            expires_at = self._expires_at.get(key)
+            if expires_at is None:
+                return False
+            if expires_at <= now:
+                self._expires_at.pop(key, None)
+                return False
+            return True
+
+    def remember(self, thread_id: str | None, provider_id: str) -> None:
+        key = self._key(thread_id, provider_id)
+        if key is None:
+            return
+        now = self._clock()
+        with self._lock:
+            self._remove_expired(now)
+            if key not in self._expires_at and len(self._expires_at) >= self._max_entries:
+                oldest = min(self._expires_at, key=self._expires_at.__getitem__)
+                self._expires_at.pop(oldest, None)
+            self._expires_at[key] = now + self._ttl_seconds
+
+    def _remove_expired(self, now: float) -> None:
+        for key, expires_at in tuple(self._expires_at.items()):
+            if expires_at <= now:
+                self._expires_at.pop(key, None)
+
+    @staticmethod
+    def _key(thread_id: str | None, provider_id: str) -> tuple[str, str] | None:
+        session_key = _session_key(thread_id)
+        if session_key is None or not provider_id:
+            return None
+        return session_key, provider_id
 
 
 def retry_policy_from_mapping(payload: Any) -> RetryPolicy:
@@ -2006,6 +2120,7 @@ def create_proxy_app(
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     session_catalog: Callable[[float], Iterable[Mapping[str, Any]]] | None = None,
     session_key_resolver: Callable[[str], str | None] | None = None,
+    input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
     config_endpoint_name: str = "codex-config",
     codex_profile: Any | None = None,
     claude_profile: Any | None = None,
@@ -2052,6 +2167,13 @@ def create_proxy_app(
     active_health_status_url_store = health_status_url_store or HealthStatusUrlStore(
         health_status_url
     )
+    active_input_item_id_compatibility_store = input_item_id_compatibility_store
+    if (
+        active_input_item_id_compatibility_store is None
+        and service_name == "codex-local-proxy"
+        and protocol_adapter is None
+    ):
+        active_input_item_id_compatibility_store = InputItemIdCompatibilityStore()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -2531,6 +2653,7 @@ def create_proxy_app(
             recovery_history_store=recovery_history_store,
             protocol_adapter=protocol_adapter,
             session_name_resolver=session_name_resolver,
+            input_item_id_compatibility_store=active_input_item_id_compatibility_store,
         )
 
     return app
@@ -3103,6 +3226,7 @@ async def _forward_request(
     recovery_history_store: RecoveryHistoryStore | None = None,
     protocol_adapter: Any | None = None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
+    input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
 ):
     thread_id = _codex_thread_id(request.headers)
     try:
@@ -3189,10 +3313,15 @@ async def _forward_request(
     final_summary: str | None = None
     response_body_decoded = False
     attempt = 1
+    item_id_repairs = 0
+    repaired_item_indexes_by_provider: dict[str, set[int]] = {}
+    responses_request = upstream_path.strip("/").casefold() == "responses"
+    reroute_before_attempt = True
     while True:
         response_body_decoded = False
-        if attempt > 1:
+        if attempt > 1 and reroute_before_attempt:
             snapshot, _ = router.route_retry_to_current(snapshot)
+        reroute_before_attempt = True
         provider = snapshot.provider
         if not provider.has_credentials:
             final_error = "credential_missing"
@@ -3219,6 +3348,24 @@ async def _forward_request(
             for key, value in provider.default_query.items()
             if key not in existing_keys
         )
+        request_body_for_attempt = request_body
+        repaired_indexes = repaired_item_indexes_by_provider.get(provider.provider_id, set())
+        strip_all_input_item_ids = (
+            responses_request
+            and not repaired_indexes
+            and input_item_id_compatibility_store is not None
+            and input_item_id_compatibility_store.should_strip(
+                thread_id,
+                provider.provider_id,
+            )
+        )
+        if strip_all_input_item_ids or repaired_indexes:
+            transformed_body, _ = _strip_input_item_ids(
+                request_body,
+                only_indexes=None if strip_all_input_item_ids else repaired_indexes,
+            )
+            if transformed_body is not None:
+                request_body_for_attempt = transformed_body
         retry_kind: str | None = None
         retry_summary: str | None = None
         retry_delay = retry_policy.backoff(attempt - 1)
@@ -3228,7 +3375,7 @@ async def _forward_request(
                 url,
                 params=query_items,
                 headers=headers,
-                content=request_body,
+                content=request_body_for_attempt,
             )
             upstream_response = await client.send(upstream_request, stream=True)
             retry_kind = None
@@ -3275,16 +3422,55 @@ async def _forward_request(
                     retry_kind is None
                     and first_chunk is not None
                     and upstream_response.status_code == 400
-                    and retry_policy.enabled
+                    and (
+                        retry_policy.enabled
+                        or (
+                            responses_request
+                            and input_item_id_compatibility_store is not None
+                        )
+                    )
                 ):
                     assert stream is not None
-                    first_chunk, stream, retry_kind, retry_summary = (
+                    first_chunk, stream, retry_kind, retry_summary, repair_index = (
                         await _inspect_http_400_before_output(
                             upstream_response,
                             first_chunk,
                             stream,
+                            detect_retryable=retry_policy.enabled,
                         )
                     )
+                    repair_applied = False
+                    if (
+                        responses_request
+                        and repair_index is not None
+                        and item_id_repairs < MAX_INPUT_ITEM_ID_REPAIRS_PER_REQUEST
+                        and repair_index not in repaired_indexes
+                    ):
+                        transformed_body, changed = _strip_input_item_ids(
+                            request_body,
+                            only_indexes=(repair_index,),
+                        )
+                        if transformed_body is not None and changed == 1:
+                            repaired_item_indexes_by_provider.setdefault(
+                                provider.provider_id,
+                                set(),
+                            ).add(repair_index)
+                            item_id_repairs += 1
+                            if input_item_id_compatibility_store is not None:
+                                input_item_id_compatibility_store.remember(
+                                    thread_id,
+                                    provider.provider_id,
+                                )
+                            retry_kind = "request_item_id_repair"
+                            retry_summary = (
+                                f"请求体兼容修复：已移除 input[{repair_index}].id"
+                            )
+                            final_error = retry_kind
+                            retry_delay = 0.0
+                            repair_applied = True
+                    if repair_index is not None and not repair_applied:
+                        retry_kind = None
+                        retry_summary = None
                     if retry_kind is not None:
                         final_error = retry_kind
                 if (
@@ -3344,7 +3530,10 @@ async def _forward_request(
         )
         can_retry = (
             retry_kind is not None
-            and retry_policy.allows_attempt(attempt + 1)
+            and (
+                retry_kind == "request_item_id_repair"
+                or retry_policy.allows_attempt(attempt + 1)
+            )
             and not request_disconnected
         )
         if retry_kind is not None and retry_summary is None and upstream_response is not None:
@@ -3374,32 +3563,41 @@ async def _forward_request(
                 )
             break
         failed_provider_id = snapshot.provider.provider_id
-        snapshot, rerouted = router.route_retry_to_current(snapshot)
-        if rerouted:
-            retry_delay = 0.0
-        router.record_retry(
-            snapshot,
-            attempt=attempt + 1,
-            max_attempts=retry_policy.max_attempts,
-            delay_seconds=retry_delay,
-            kind=retry_kind,
-            error_summary=retry_summary,
-            error_provider_id=failed_provider_id,
-        )
+        rerouted = False
+        if retry_kind != "request_item_id_repair":
+            snapshot, rerouted = router.route_retry_to_current(snapshot)
+            if rerouted:
+                retry_delay = 0.0
+            router.record_retry(
+                snapshot,
+                attempt=attempt + 1,
+                max_attempts=retry_policy.max_attempts,
+                delay_seconds=retry_delay,
+                kind=retry_kind,
+                error_summary=retry_summary,
+                error_provider_id=failed_provider_id,
+            )
         await _record_recovery_event_async(
             recovery_history_store,
             snapshot=snapshot,
             provider_id=failed_provider_id,
             attempt=attempt,
-            max_attempts=retry_policy.max_attempts,
+            max_attempts=(
+                MAX_INPUT_ITEM_ID_REPAIRS_PER_REQUEST + 1
+                if retry_kind == "request_item_id_repair"
+                else retry_policy.max_attempts
+            ),
             delay_seconds=retry_delay,
             kind=retry_kind,
             summary=retry_summary,
             stage="before_output",
             outcome="retrying",
         )
-        await retry_sleep(retry_delay)
-        attempt += 1
+        if retry_kind == "request_item_id_repair":
+            reroute_before_attempt = False
+        else:
+            await retry_sleep(retry_delay)
+            attempt += 1
 
     if upstream_response is None or stream is None:
         router.record_outcome(snapshot, transient_failure=True, policy=retry_policy)
@@ -3437,9 +3635,9 @@ async def _forward_request(
     usage_capture = None
     if usage_store is not None:
         usage_capture = (
-            protocol_adapter.usage_capture(request_body, upstream_path)
+            protocol_adapter.usage_capture(request_body_for_attempt, upstream_path)
             if protocol_adapter is not None
-            else UsageCapture(request_body, upstream_path)
+            else UsageCapture(request_body_for_attempt, upstream_path)
         )
     failure_capture = None
     if (
@@ -3575,18 +3773,31 @@ async def _inspect_http_400_before_output(
     response: httpx.Response,
     first_chunk: bytes,
     stream: AsyncIterator[bytes],
+    *,
+    detect_retryable: bool = True,
 ) -> tuple[
     bytes | None,
     AsyncIterator[bytes],
     str | None,
     str | None,
+    int | None,
 ]:
     buffered = bytearray(first_chunk[:RETRY_ERROR_BODY_BYTES])
     first_remainder = first_chunk[RETRY_ERROR_BODY_BYTES:]
     if first_remainder:
+        repair_index = _input_item_id_error_index_from_body(bytes(buffered))
+        if repair_index is not None:
+            return (
+                bytes(buffered),
+                _resume_async_iterator(stream, prefix=first_remainder),
+                "request_item_id_repair",
+                f"请求体兼容修复：上游拒绝 input[{repair_index}].id",
+                repair_index,
+            )
         return (
             bytes(buffered),
             _resume_async_iterator(stream, prefix=first_remainder),
+            None,
             None,
             None,
         )
@@ -3603,29 +3814,50 @@ async def _inspect_http_400_before_output(
                     _resume_async_iterator(stream, pending=next_chunk),
                     None,
                     None,
+                    None,
                 )
             chunk = next_chunk.result()
         except StopAsyncIteration:
-            retry_kind, retry_summary = _http_400_retry_failure(
-                response,
-                bytes(buffered),
-            )
-            if retry_kind is not None:
-                return None, stream, retry_kind, retry_summary
-            return bytes(buffered), stream, None, None
+            repair_index = _input_item_id_error_index_from_body(bytes(buffered))
+            if repair_index is not None:
+                return (
+                    bytes(buffered),
+                    stream,
+                    "request_item_id_repair",
+                    f"请求体兼容修复：上游拒绝 input[{repair_index}].id",
+                    repair_index,
+                )
+            if detect_retryable:
+                retry_kind, retry_summary = _http_400_retry_failure(
+                    response,
+                    bytes(buffered),
+                )
+                if retry_kind is not None:
+                    return None, stream, retry_kind, retry_summary, None
+            return bytes(buffered), stream, None, None, None
         except httpx.HTTPError as exc:
             return (
                 None,
                 stream,
                 "stream_start",
                 _exception_retry_summary("stream_start", exc),
+                None,
             )
         remaining = RETRY_ERROR_BODY_BYTES - len(buffered)
         buffered.extend(chunk[:remaining])
         chunk_remainder = chunk[remaining:]
         if chunk_remainder:
             stream = _resume_async_iterator(stream, prefix=chunk_remainder)
-    return bytes(buffered), stream, None, None
+    repair_index = _input_item_id_error_index_from_body(bytes(buffered))
+    if repair_index is not None:
+        return (
+            bytes(buffered),
+            stream,
+            "request_item_id_repair",
+            f"请求体兼容修复：上游拒绝 input[{repair_index}].id",
+            repair_index,
+        )
+    return bytes(buffered), stream, None, None, None
 
 
 async def _resume_async_iterator(
