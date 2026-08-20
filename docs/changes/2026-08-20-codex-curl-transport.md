@@ -1,6 +1,6 @@
 +++
 id = "2026-08-20-codex-curl-transport"
-type = "bugfix"
+type = "fix"
 release_bump = "patch"
 status = "verified"
 +++
