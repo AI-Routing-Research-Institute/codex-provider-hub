@@ -63,6 +63,57 @@ class ProjectDocumentationTests(unittest.TestCase):
         self.assertNotIn("当前仓库尚未附带开源许可证", readme)
         self.assertNotIn("所有商业使用都必须付费", readme)
 
+    def test_readmes_offer_language_switching(self) -> None:
+        language_switch = "[简体中文](README.md) | [English](README.en.md)"
+        english_path = ROOT / "README.en.md"
+        self.assertTrue(english_path.is_file(), "README.en.md must exist")
+        chinese_readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        english_readme = english_path.read_text(encoding="utf-8")
+
+        self.assertIn(language_switch, chinese_readme)
+        self.assertIn(language_switch, english_readme)
+
+    def test_english_readme_is_a_complete_user_guide(self) -> None:
+        english_path = ROOT / "README.en.md"
+        self.assertTrue(english_path.is_file(), "README.en.md must exist")
+        readme = english_path.read_text(encoding="utf-8")
+        required_sections = (
+            "## Who this is for",
+            "## Five-minute quick start",
+            "## Recommended with CC Switch",
+            "## Configure Codex",
+            "## Configure Claude Code",
+            "## Manage and switch providers",
+            "## Request transport",
+            "## Retry, usage, and monitoring",
+            "## Troubleshooting",
+            "## Other installation methods",
+            "## Development and deployment",
+            "## Security boundaries",
+            "## Open-source and commercial licensing",
+        )
+
+        for section in required_sections:
+            with self.subTest(section=section):
+                self.assertIn(section, readme)
+
+        shared_references = (
+            "https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest/download/CodexLocalProxy-win-x64.exe",
+            "https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest/download/CodexLocalProxy-macos-arm64.zip",
+            "http://127.0.0.1:17890/control/codex/",
+            "http://127.0.0.1:17890/control/claude/",
+            "CC Switch",
+            "curl_cffi",
+            "AGPL-3.0-or-later",
+            "COMMERCIAL-LICENSE.md",
+        )
+
+        for reference in shared_references:
+            with self.subTest(reference=reference):
+                self.assertIn(reference, readme)
+
+        self.assertNotIn("all commercial use requires payment", readme.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
