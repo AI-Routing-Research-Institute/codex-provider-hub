@@ -4476,7 +4476,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="runtime-data-directory"', page.text)
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=26", page.text)
+        self.assertIn("styles.css?v=27", page.text)
         self.assertIn("app.js?v=33", page.text)
         self.assertIn("<span>请求</span><span>服务器检测</span>", page.text)
         self.assertIn("供应商", page.text)
@@ -4524,6 +4524,17 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("formatRecoverySummary", script.text)
         self.assertIn("model_capacity", script.text)
         self.assertIn(':root[data-theme="dark"]', styles.text)
+        self.assertIn(
+            ".stage {\n  width: 100%;\n  min-height: 100vh;\n  min-height: 100dvh;",
+            styles.text,
+        )
+        self.assertIn(
+            ".app-window {\n  position: relative;\n  width: 100%;\n"
+            "  height: 100vh;\n  height: 100dvh;",
+            styles.text,
+        )
+        self.assertNotIn("width: min(1440px, 100%)", styles.text)
+        self.assertNotIn("height: min(860px, calc(100vh - 32px))", styles.text)
         self.assertIn(".provider-list::-webkit-scrollbar", styles.text)
         self.assertIn("flex-direction: column", styles.text)
         self.assertIn("flex: 0 0 auto", styles.text)
