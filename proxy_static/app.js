@@ -145,6 +145,7 @@ const providerEditorId = document.querySelector("#provider-editor-id");
 const providerEditorName = document.querySelector("#provider-editor-name");
 const providerEditorBaseUrl = document.querySelector("#provider-editor-base-url");
 const providerEditorWireApi = document.querySelector("#provider-editor-wire-api");
+const providerEditorTransport = document.querySelector("#provider-editor-transport");
 const providerEditorApiKey = document.querySelector("#provider-editor-api-key");
 const providerEditorClearKey = document.querySelector("#provider-editor-clear-key");
 const providerEditorHeaders = document.querySelector("#provider-editor-headers");
@@ -3084,6 +3085,7 @@ async function openProviderEditor(providerId = "") {
   providerEditorName.value = "";
   providerEditorBaseUrl.value = "";
   providerEditorWireApi.value = "responses";
+  providerEditorTransport.value = "httpx";
   providerEditorApiKey.value = "";
   providerEditorClearKey.checked = false;
   providerEditorClearKey.disabled = !providerId;
@@ -3104,6 +3106,7 @@ async function openProviderEditor(providerId = "") {
       providerEditorName.value = provider.name || "";
       providerEditorBaseUrl.value = provider.base_url || "";
       providerEditorWireApi.value = provider.wire_api || "responses";
+      providerEditorTransport.value = provider.transport || "httpx";
       providerEditorHeaders.value = JSON.stringify(provider.headers || {}, null, 2);
       providerEditorQuery.value = JSON.stringify(provider.query_params || {}, null, 2);
     } catch (error) {
@@ -3140,6 +3143,7 @@ async function saveProviderEditor(event) {
     name: providerEditorName.value.trim(),
     base_url: providerEditorBaseUrl.value.trim(),
     wire_api: providerEditorWireApi.value,
+    transport: providerEditorTransport.value,
     headers,
     query_params: queryParams,
     clear_api_key: providerEditorClearKey.checked,

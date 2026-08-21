@@ -129,6 +129,50 @@ class ProviderCatalogTests(unittest.TestCase):
         self.assertTrue(preserved.has_credentials)
         self.assertFalse(cleared.has_credentials)
 
+    def test_transport_defaults_to_httpx_and_persists_curl_compatibility(self) -> None:
+        self.catalog.initialize()
+        created = self.catalog.create_from_payload(
+            {
+                "name": "Transport Provider",
+                "base_url": "https://transport.example.test/v1",
+                "api_key": "fixture-transport-key",
+                "headers": {},
+                "query_params": {},
+            }
+        )
+
+        default_provider = load_local_proxy_providers(self.catalog)[0]
+        default_editable = self.catalog.editable_fields(created)
+        updated = self.catalog.update_from_payload(
+            created.provider_id,
+            {
+                **default_editable,
+                "transport": "curl_cffi",
+            },
+        )
+        compatible_provider = load_local_proxy_providers(self.catalog)[0]
+        compatible_editable = self.catalog.editable_fields(updated)
+
+        self.assertEqual(default_provider.transport, "httpx")
+        self.assertEqual(default_editable["transport"], "httpx")
+        self.assertEqual(compatible_provider.transport, "curl_cffi")
+        self.assertEqual(compatible_editable["transport"], "curl_cffi")
+        self.assertIn('transport = "curl_cffi"', updated.raw_config)
+
+    def test_transport_rejects_unknown_value(self) -> None:
+        self.catalog.initialize()
+
+        with self.assertRaisesRegex(ValueError, "transport"):
+            self.catalog.create_from_payload(
+                {
+                    "name": "Invalid Transport",
+                    "base_url": "https://invalid.example.test/v1",
+                    "transport": "unknown",
+                    "headers": {},
+                    "query_params": {},
+                }
+            )
+
     def test_editable_fields_redact_sensitive_headers_and_queries(self) -> None:
         self.catalog.initialize()
         created = self.catalog.create_from_payload(
