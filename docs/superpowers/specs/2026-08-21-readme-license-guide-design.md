@@ -34,10 +34,10 @@ README 按普通用户完成任务的顺序组织：
 README 将 CC Switch 标记为推荐搭配，而不是无法替代的运行依赖：
 
 - 推荐先在 CC Switch 中集中维护供应商和 Key。
-- 首次启动在本地目录为空时执行一次初始化导入。
-- 之后 Codex Provider Hub 使用自己的本地供应商目录，页面编辑不会反向修改 CC Switch。
-- CC Switch 更新后，用户可以在供应商管理模式选择“仅新增”或“覆盖已有”再次导入。
-- 用户也可以完全在本工具中新增供应商，但批量管理时仍推荐 CC Switch。
+- Codex 在本地目录为空时执行一次初始化导入，之后使用自己的本地供应商目录，页面编辑不会反向修改 CC Switch。
+- CC Switch 中的 Codex 配置更新后，用户可以在供应商管理模式选择“仅新增”或“覆盖已有”再次导入。
+- Claude Code 供应商继续直接读取 CC Switch 数据源，修改后在 Claude 控制台刷新。
+- 用户也可以完全在本工具中新增 Codex 供应商，但同时管理 Codex 和 Claude Code 时仍推荐 CC Switch。
 
 ## 使用教程准确性
 

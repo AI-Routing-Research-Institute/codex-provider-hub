@@ -2,7 +2,7 @@
 id = "2026-08-21-readme-license-guide"
 type = "docs"
 release_bump = "patch"
-status = "planned"
+status = "verified"
 +++
 
 # README 使用教程与双许可证说明
@@ -47,11 +47,21 @@ README 以功能列表和开发运行方式为主，安装、客户端配置、�
 
 ## 实际改动
 
-待实施。
+- 重写 README，按目标用户、五分钟启动、CC Switch、客户端配置、供应商管理、传输选择、故障处理和开发部署组织内容。
+- 新增 GNU AGPL v3 官方完整正文 `LICENSE`。
+- 新增 `NOTICE`，记录贡献者版权和原始 GitHub 仓库出处。
+- 新增 `COMMERCIAL-LICENSE.md`，说明闭源替代授权场景，并保留遵守 AGPL 的商业使用权利。
+- 新增文档契约测试，防止许可证、出处、CC Switch 教程和商业授权边界回退。
 
 ## 验证结果
 
-待实施。
+- `python -m unittest tests.test_project_documentation`：4 项文档契约测试通过，并在实现前确认因缺少许可证和教程章节失败。
+- `python -m unittest discover -s tests`：480 项通过。
+- `node --check proxy_static/app.js` 与 `node --check provider_status/static/app.js`：通过。
+- `tests/*.test.js`：全部通过。
+- `LICENSE` 与 GNU 官方 `agpl-3.0.txt` 归一化换行后逐字一致，共 34523 个字符。
+- README 共检查 25 个 Markdown 链接，本地文件链接无缺失。
+- `python scripts/team_policy.py pre-commit` 与 `git diff --check`：通过。
 
 ## PR
 
