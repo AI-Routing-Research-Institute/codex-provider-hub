@@ -1,0 +1,68 @@
++++
+id = "2026-08-21-readme-license-guide"
+type = "docs"
+release_bump = "patch"
+status = "verified"
++++
+
+# README 使用教程与双许可证说明
+
+## 目标
+
+将 README 重构为普通用户可以按步骤完成安装、CC Switch 导入、Codex/Claude Code 配置和供应商切换的中文教程，并为仓库增加 AGPL 开源许可证、出处声明和闭源商业授权入口。
+
+## 现状
+
+README 以功能列表和开发运行方式为主，安装、客户端配置、供应商管理和故障处理分散，且仍描述旧的 CC Switch 只读加载行为。仓库没有许可证文件，无法清晰说明开源使用、二次开发、出处保留和闭源商业授权边界。
+
+## 设计范围
+
+- README 明确目标用户、非目标用户和推荐搭配 CC Switch 的使用方式。
+- 按实际任务顺序说明 Windows/macOS 安装、首次导入、Codex/Claude Code 配置、日常切换、传输兼容模式、重试和远程监控。
+- 增加常见问题，覆盖登录提示、403、401/503、端口冲突和配置未生效。
+- 增加标准 `AGPL-3.0-or-later` 许可证、`NOTICE` 出处声明和闭源商业授权说明。
+- 增加文档结构与许可证完整性测试。
+
+## 非目标
+
+- 不修改应用功能、接口、配置格式、安装包名称或发布流程。
+- 不承诺 JetBrains 开源项目许可证一定获批。
+- 不在仓库内制定具体商业价格或直接授予商业许可证。
+- 本次不引入贡献者许可协议；合并新的外部贡献前需要另行落实 CLA 或等效授权。
+
+## 兼容性
+
+仅新增和重构公开文档，无运行时、数据库或客户端兼容性影响。许可证变更适用于获得现有贡献者授权后发布的仓库版本。
+
+## 风险
+
+主要风险是授权文案错误地禁止全部商业使用，从而与 AGPL 的开源属性冲突。README 和商业授权说明必须明确：遵守 AGPL 并公开对应源码的商业使用仍可进行；只有希望闭源或不履行 AGPL 源码义务时才需要另行取得商业授权。
+
+## 测试计划
+
+- 检查 README 标题层级、教程顺序、内部链接和下载链接。
+- 检查 README 包含 CC Switch 推荐流程、两套客户端配置、`httpx/curl_cffi` 选择和常见故障处理。
+- 检查 `LICENSE` 为完整的 GNU AGPL v3 正文，`NOTICE` 包含项目与仓库出处，商业说明没有修改 AGPL 权利。
+- 运行完整 Python 与 JavaScript 测试及仓库策略检查。
+
+## 实际改动
+
+- 重写 README，按目标用户、五分钟启动、CC Switch、客户端配置、供应商管理、传输选择、故障处理和开发部署组织内容。
+- 新增 GNU AGPL v3 官方完整正文 `LICENSE`。
+- 新增 `NOTICE`，记录贡献者版权和原始 GitHub 仓库出处。
+- 新增 `COMMERCIAL-LICENSE.md`，说明闭源替代授权场景，并保留遵守 AGPL 的商业使用权利。
+- 新增文档契约测试，防止许可证、出处、CC Switch 教程和商业授权边界回退。
+
+## 验证结果
+
+- `python -m unittest tests.test_project_documentation`：4 项文档契约测试通过，并在实现前确认因缺少许可证和教程章节失败。
+- `python -m unittest discover -s tests`：480 项通过。
+- `node --check proxy_static/app.js` 与 `node --check provider_status/static/app.js`：通过。
+- `tests/*.test.js`：全部通过。
+- `LICENSE` 与 GNU 官方 `agpl-3.0.txt` 归一化换行后逐字一致，共 34523 个字符。
+- README 共检查 25 个 Markdown 链接，本地文件链接无缺失。
+- `python scripts/team_policy.py pre-commit` 与 `git diff --check`：通过。
+
+## PR
+
+pending
