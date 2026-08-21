@@ -214,12 +214,16 @@ def _proxy_provider(
     wire_api = provider_config.get("wire_api", "responses")
     if not isinstance(wire_api, str):
         wire_api = "responses"
+    transport = provider_config.get("transport", "httpx")
+    if transport not in {"httpx", "curl_cffi"}:
+        transport = "httpx"
     return ProxyProvider(
         provider_id=record.provider_id,
         name=record.name,
         base_url=normalized_url,
         is_cc_switch_current=record.is_current,
         wire_api=wire_api,
+        transport=transport,
         api_key=api_key,
         configured_headers=resolved_headers,
         default_query=query,

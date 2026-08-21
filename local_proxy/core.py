@@ -145,6 +145,7 @@ class ProxyProvider:
     base_url: str
     is_cc_switch_current: bool
     wire_api: str = "responses"
+    transport: str = "httpx"
     api_key: str | None = field(default=None, repr=False)
     configured_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     default_query: Mapping[str, str] = field(default_factory=dict)
@@ -2090,6 +2091,7 @@ def create_proxy_app(
     *,
     client: Any | None = None,
     client_factory: Callable[[], Any] | None = None,
+    client_selector: Callable[[ProxyProvider], Any] | None = None,
     protocol_adapter: Any | None = None,
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None,
     on_provider_selected: Callable[[str], None] | None = None,
@@ -2647,6 +2649,7 @@ def create_proxy_app(
             upstream_client,
             request,
             upstream_path,
+            client_selector=client_selector,
             retry_policy=active_retry_policy_store.get(),
             retry_sleep=retry_sleep,
             usage_store=usage_store,
@@ -3216,10 +3219,11 @@ async def _record_stream_completion_async(
 
 async def _forward_request(
     router: ProviderRouter,
-    client: httpx.AsyncClient,
+    client: Any,
     request: Request,
     upstream_path: str,
     *,
+    client_selector: Callable[[ProxyProvider], Any] | None = None,
     retry_policy: RetryPolicy,
     retry_sleep: Callable[[float], Awaitable[None]],
     usage_store: UsageStore | None = None,
@@ -3323,6 +3327,9 @@ async def _forward_request(
             snapshot, _ = router.route_retry_to_current(snapshot)
         reroute_before_attempt = True
         provider = snapshot.provider
+        attempt_client = (
+            client_selector(provider) if client_selector is not None else client
+        )
         if not provider.has_credentials:
             final_error = "credential_missing"
             break
@@ -3370,14 +3377,14 @@ async def _forward_request(
         retry_summary: str | None = None
         retry_delay = retry_policy.backoff(attempt - 1)
         try:
-            upstream_request = client.build_request(
+            upstream_request = attempt_client.build_request(
                 request.method,
                 url,
                 params=query_items,
                 headers=headers,
                 content=request_body_for_attempt,
             )
-            upstream_response = await client.send(upstream_request, stream=True)
+            upstream_response = await attempt_client.send(upstream_request, stream=True)
             retry_kind = None
             if retry_policy.enabled:
                 retry_kind = (
