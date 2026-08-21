@@ -51,9 +51,11 @@ from local_proxy.shared_settings import (
     save_shared_settings as save_settings,
     shared_settings_path as settings_path,
 )
+from local_proxy.version import resolve_app_version
 
 
 APP_VERSION = "0.1.7"
+APP_VERSION = resolve_app_version(APP_VERSION)
 AUTO_START_VALUE_NAME = "CodexLocalProxy"
 AUTO_START_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
