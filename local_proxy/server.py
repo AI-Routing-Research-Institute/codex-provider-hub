@@ -82,6 +82,8 @@ class ProxyProfile:
     service_name: str
     router: ProviderRouter
     upstream_client: Any
+    client_selector: Callable[[ProxyProvider], Any] | None = None
+    additional_owned_clients: tuple[Any, ...] = ()
     protocol_adapter: Any | None = None
     allowed_proxy_paths: frozenset[str] | None = None
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None
@@ -156,10 +158,14 @@ def create_unified_proxy_app(
         finally:
             closed: set[int] = set()
             for profile in profiles.values():
-                if not profile.owns_client or id(profile.upstream_client) in closed:
-                    continue
-                closed.add(id(profile.upstream_client))
-                await profile.upstream_client.aclose()
+                owned_clients = profile.additional_owned_clients
+                if profile.owns_client:
+                    owned_clients = (profile.upstream_client, *owned_clients)
+                for owned_client in owned_clients:
+                    if id(owned_client) in closed:
+                        continue
+                    closed.add(id(owned_client))
+                    await owned_client.aclose()
 
     app = FastAPI(
         docs_url=None,
@@ -241,6 +247,7 @@ def create_unified_proxy_app(
             profile.upstream_client,
             request,
             normalized_path,
+            client_selector=profile.client_selector,
             retry_policy=profile.retry_policy_store.get(),
             retry_sleep=profile.retry_sleep,
             usage_store=profile.usage_store,

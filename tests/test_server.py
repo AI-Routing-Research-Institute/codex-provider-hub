@@ -110,6 +110,42 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         await self.codex_client.aclose()
         await self.claude_client.aclose()
 
+    async def test_codex_request_uses_profile_client_selector(self) -> None:
+        compatible_requests: list[httpx.Request] = []
+
+        async def compatible_upstream(request: httpx.Request) -> httpx.Response:
+            compatible_requests.append(request)
+            return httpx.Response(200, content=b"compatible")
+
+        compatible_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(compatible_upstream)
+        )
+        self.addAsyncCleanup(compatible_client.aclose)
+        selected = ProxyProvider(
+            provider_id="codex-compatible",
+            name="Codex Compatible",
+            base_url="https://compatible.example.test/v1",
+            is_cc_switch_current=True,
+            api_key="compatible-secret",
+            transport="curl_cffi",
+        )
+        self.codex_profile.router.replace_providers((selected,))
+        self.codex_profile.client_selector = lambda provider: (
+            compatible_client
+            if provider.transport == "curl_cffi"
+            else self.codex_client
+        )
+
+        response = await self.client.post(
+            "/v1/responses",
+            json={"model": "gpt-test"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"compatible")
+        self.assertEqual(len(compatible_requests), 1)
+        self.assertEqual(self.codex_requests, [])
+
     async def test_status_upload_routes_preview_and_send_backend_payload(self) -> None:
         class FakeManager:
             def __init__(self):

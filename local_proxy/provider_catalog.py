@@ -205,6 +205,11 @@ class ProviderCatalog:
             "name": provider.name,
             "base_url": str(config.get("base_url") or provider.endpoint_url or ""),
             "wire_api": str(config.get("wire_api") or "responses"),
+            "transport": (
+                str(config.get("transport"))
+                if config.get("transport") in {"httpx", "curl_cffi"}
+                else "httpx"
+            ),
             "headers": _redact_mapping(_string_mapping(config.get("http_headers"))),
             "query_params": _redact_mapping(_string_mapping(config.get("query_params"))),
             "has_api_key": bool(self._api_key(provider, str(config.get("env_key") or "OPENAI_API_KEY"))),
@@ -310,6 +315,7 @@ class ProviderCatalog:
             name=str(values["name"]),
             base_url=str(values["base_url"]),
             wire_api=str(values["wire_api"]),
+            transport=str(values["transport"]),
             headers=headers,
             query_params=query_params,
             env_key=env_key if auth else None,
@@ -340,6 +346,9 @@ class ProviderCatalog:
         wire_api = payload.get("wire_api", "responses")
         if wire_api != "responses":
             raise ValueError("wire_api must be responses")
+        transport = payload.get("transport", "httpx")
+        if transport not in {"httpx", "curl_cffi"}:
+            raise ValueError("transport must be httpx or curl_cffi")
         headers = _string_mapping(payload.get("headers", {}), strict=True)
         query_params = _string_mapping(payload.get("query_params", {}), strict=True)
         api_key = payload.get("api_key")
@@ -349,6 +358,7 @@ class ProviderCatalog:
             "name": name.strip()[:240],
             "base_url": normalized_url,
             "wire_api": wire_api,
+            "transport": transport,
             "headers": headers,
             "query_params": query_params,
             "api_key": api_key.strip() if isinstance(api_key, str) else None,
@@ -527,6 +537,7 @@ def _build_raw_config(
     name: str,
     base_url: str,
     wire_api: str,
+    transport: str,
     headers: Mapping[str, str],
     query_params: Mapping[str, str],
     env_key: str | None,
@@ -538,6 +549,7 @@ def _build_raw_config(
         f"name = {_toml_string(name)}",
         f"base_url = {_toml_string(base_url)}",
         f"wire_api = {_toml_string(wire_api)}",
+        f"transport = {_toml_string(transport)}",
     ]
     if env_key:
         lines.append(f"env_key = {_toml_string(env_key)}")

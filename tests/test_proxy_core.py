@@ -1136,6 +1136,69 @@ class InputItemIdCompatibilityTests(unittest.TestCase):
 
 
 class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_selects_client_for_the_current_provider_transport(self) -> None:
+        attempts: list[tuple[str, str]] = []
+        standard = ProxyProvider(
+            provider_id="standard",
+            name="Standard",
+            base_url="https://standard.example.test/v1",
+            is_cc_switch_current=True,
+            api_key="standard-key",
+        )
+        compatible = ProxyProvider(
+            provider_id="compatible",
+            name="Compatible",
+            base_url="https://compatible.example.test/v1",
+            is_cc_switch_current=False,
+            api_key="compatible-key",
+            transport="curl_cffi",
+        )
+        router = ProviderRouter((standard, compatible))
+
+        async def standard_upstream(request: httpx.Request) -> httpx.Response:
+            attempts.append(("httpx", request.url.host))
+            router.select("compatible")
+            return httpx.Response(503, content=b"retry")
+
+        async def compatible_upstream(request: httpx.Request) -> httpx.Response:
+            attempts.append(("curl_cffi", request.url.host))
+            return httpx.Response(200, content=b"ok")
+
+        standard_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(standard_upstream)
+        )
+        compatible_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(compatible_upstream)
+        )
+        app = create_proxy_app(
+            router,
+            client=standard_client,
+            client_selector=lambda selected: (
+                compatible_client
+                if selected.transport == "curl_cffi"
+                else standard_client
+            ),
+            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0),
+            retry_sleep=lambda _: _empty_wait(),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(standard_client.aclose)
+        self.addAsyncCleanup(compatible_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            attempts,
+            [
+                ("httpx", "standard.example.test"),
+                ("curl_cffi", "compatible.example.test"),
+            ],
+        )
+
     async def test_invalid_input_item_id_is_repaired_without_normal_retry_policy(self) -> None:
         attempts: list[dict] = []
         thread_id = "thread-item-id-repair"
@@ -4238,6 +4301,9 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="provider-import-mode"', page.text)
         self.assertIn('id="provider-editor"', page.text)
         self.assertIn('id="provider-editor-delete"', page.text)
+        self.assertIn('id="provider-editor-transport"', page.text)
+        self.assertIn('value="httpx">标准模式', page.text)
+        self.assertIn('value="curl_cffi">兼容模式', page.text)
         self.assertIn('id="runtime-view"', page.text)
         self.assertIn('id="runtime-port"', page.text)
         self.assertIn('id="runtime-database-path"', page.text)
@@ -4246,7 +4312,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
         self.assertIn("styles.css?v=26", page.text)
-        self.assertIn("app.js?v=31", page.text)
+        self.assertIn("app.js?v=32", page.text)
         self.assertIn("<span>请求</span><span>服务器检测</span>", page.text)
         self.assertIn("供应商", page.text)
         self.assertIn("设置会话路由", page.text)
@@ -4257,6 +4323,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("setProviderHidden", script.text)
         self.assertIn("saveProviderOrder", script.text)
         self.assertIn("openProviderEditor", script.text)
+        self.assertIn("transport: providerEditorTransport.value", script.text)
         self.assertIn("deleteProviderEditor", script.text)
         self.assertIn("importProvidersFromCcSwitch", script.text)
         self.assertIn("provider-row-actions", script.text)

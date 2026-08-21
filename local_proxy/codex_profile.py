@@ -26,6 +26,7 @@ from local_proxy.core import (
 )
 from local_proxy.paths import display_path
 from local_proxy.server import ProxyProfile
+from local_proxy.transports.curl import CurlClient
 from local_proxy.provider_catalog import ProviderCatalog
 from local_proxy.status_upload import (
     StatusUploadManager,
@@ -254,14 +255,31 @@ def build_codex_profile(
             raise ValueError("临时启动命令显示设置必须是布尔值")
         persist(show_provider_launch_command=show_launch_command)
 
+    standard_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=30.0,
+            read=None,
+            write=120.0,
+            pool=30.0,
+        ),
+        follow_redirects=False,
+    )
+    compatible_client = CurlClient(
+        connect_timeout_seconds=30.0,
+        idle_timeout_seconds=300.0,
+    )
+
     return ProxyProfile(
         service_id="codex",
         service_name="codex-local-proxy",
         router=router,
-        upstream_client=httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=30.0, read=None, write=120.0, pool=30.0),
-            follow_redirects=False,
+        upstream_client=standard_client,
+        client_selector=lambda provider: (
+            compatible_client
+            if provider.transport == "curl_cffi"
+            else standard_client
         ),
+        additional_owned_clients=(compatible_client,),
         reload_providers=prepared_providers,
         on_provider_selected=lambda provider_id: persist(selected_provider_id=provider_id),
         on_session_provider_override_changed=persist_session_provider_override,
