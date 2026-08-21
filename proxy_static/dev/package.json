@@ -1,0 +1,13 @@
+{
+  "name": "codex-provider-hub-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "UI development dependencies for Codex Provider Hub",
+  "scripts": {
+    "dev": "tailwindcss -i ./styles.src.css -o ../styles.css --watch",
+    "build": "tailwindcss -i ./styles.src.css -o ../styles.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}
