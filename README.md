@@ -1,5 +1,7 @@
 # Codex Provider Hub
 
+[简体中文](README.md) | [English](README.en.md)
+
 <div align="center">
 
 在一个本地程序中管理 Codex 与 Claude Code 的多个 API 供应商，支持网页切换、失败重试、请求记录、Token 统计和远程健康监控。
