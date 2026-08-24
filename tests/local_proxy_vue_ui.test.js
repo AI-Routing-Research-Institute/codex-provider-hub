@@ -12,13 +12,19 @@ const apiSource = fs.readFileSync(apiPath, "utf8");
 
 function loadApi(pathname, fetchImpl = async () => new Response("{}", {
   headers: { "Content-Type": "application/json" },
-})) {
+}), windowOverrides = {}) {
   const source = apiSource.replaceAll("export ", "");
   const context = vm.createContext({
+    AbortController,
     Headers,
     Response,
     fetch: fetchImpl,
-    window: { location: { pathname } },
+    window: {
+      location: { pathname },
+      setTimeout,
+      clearTimeout,
+      ...windowOverrides,
+    },
   });
   vm.runInContext(
     `${source}\nthis.api = { controlBase, controlUrl, controlFetch, jsonOptions };`,
@@ -64,6 +70,30 @@ test("surfaces backend error details", async () => {
   ));
 
   await assert.rejects(() => api.controlFetch("/api/providers/missing"), /供应商不存在/);
+});
+
+test("bounds control requests and reports stalled local proxy responses", async () => {
+  let observed;
+  const api = loadApi(
+    "/control/codex/",
+    async (url, options) => {
+      observed = { url, options };
+      if (options.signal.aborted) {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        throw error;
+      }
+      return new Response("{}", { headers: { "Content-Type": "application/json" } });
+    },
+    { setTimeout: callback => { callback(); return 1; }, clearTimeout: () => {} },
+  );
+
+  await assert.rejects(
+    () => api.controlFetch("/api/status"),
+    /本地中转响应超时，请检查服务是否卡住/,
+  );
+  assert.equal(observed.options.signal.aborted, true);
+  assert.match(apiSource, /const CONTROL_REQUEST_TIMEOUT_MS = 8_000/);
 });
 
 test("Vue views use the shared API helper and clean up polling timers", () => {
@@ -122,4 +152,15 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /--request-columns:/);
   assert.match(styles, /scrollbar-gutter:\s*stable/);
   assert.match(styles, /@media\s*\(max-width:\s*860px\)[\s\S]*\.workspace\s*\{\s*grid-template-columns:\s*1fr;/s);
+});
+
+test("Vue request view preserves upstream phase and timeout labels", () => {
+  const api = fs.readFileSync(apiPath, "utf8");
+  const requests = fs.readFileSync(path.join(root, "components", "RequestsView.vue"), "utf8");
+  assert.match(api, /本地中转响应超时，请检查服务是否卡住/);
+  assert.match(requests, /connecting: '连接上游'/);
+  assert.match(requests, /waiting_first_chunk: '等待首包'/);
+  assert.match(requests, /receiving: '接收中'/);
+  assert.match(requests, /connection_timeout: '等待上游响应超时'/);
+  assert.match(requests, /stream_idle_timeout: '上游长时间无数据'/);
 });
