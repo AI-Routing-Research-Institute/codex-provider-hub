@@ -1,144 +1,90 @@
 <template>
   <section id="requests-view" class="requests-view view-panel" aria-labelledby="requests-title">
-    <div class="view-heading">
-      <h2 id="requests-title">请求记录</h2>
+    <div class="requests-heading">
+      <div><h2 id="requests-title">请求记录</h2><p>{{ error || `${totalCount} 条记录 · 运行中 ${activeItems.length} 条 · 最多保留 7 天` }}</p></div>
+      <div class="requests-heading-actions"><button v-if="config.features?.session_routing" class="icon-button" type="button" title="设置会话路由" aria-label="设置会话路由" @click="openSessionRoutes"><UiIcon name="settings" /></button><button class="icon-button" type="button" title="刷新请求记录" aria-label="刷新请求记录" @click="loadRequests"><UiIcon name="refresh" /></button></div>
     </div>
-
-    <Toolbar
-      :timeWindow="timeWindow"
-      :searchQuery="searchQuery"
-      @update:timeWindow="timeWindow = $event"
-      @update:searchQuery="searchQuery = $event"
-      @refresh="loadRequests"
-    />
-
-    <div v-if="filteredRequests.length === 0" class="empty-state">
-      <p>暂无请求记录</p>
+    <div class="request-filters" aria-label="请求筛选">
+      <div class="time-window-control request-window-control"><UiSelect v-model="windowName" aria-label="时间范围" :options="requestWindowOptions" @change="loadRequests" /><button class="time-range-edit" type="button" title="设置自定义请求时间" aria-label="设置自定义请求时间"><UiIcon name="calendar" /></button></div>
+      <UiSelect v-model="statusFilter" aria-label="请求状态" :options="statusOptions" @change="loadRequests" />
+      <UiSelect v-model="providerFilter" aria-label="供应商" :options="providerOptions" @change="loadRequests" />
+      <label class="request-search"><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off" @input="scheduleSearch" /></label>
     </div>
-
-    <div v-else class="requests-table-container">
-      <table class="requests-table">
-        <thead>
-          <tr>
-            <th>时间</th>
-            <th>方法</th>
-            <th>路径</th>
-            <th>供应商</th>
-            <th>状态</th>
-            <th>耗时</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="request in filteredRequests" :key="request.id" class="request-row">
-            <td>{{ formatTime(request.timestamp) }}</td>
-            <td><span class="method-badge" :class="`method-${request.method.toLowerCase()}`">{{ request.method }}</span></td>
-            <td class="path-cell">{{ request.path }}</td>
-            <td>{{ request.provider || '-' }}</td>
-            <td><span class="status-badge" :class="getStatusClass(request.status)">{{ request.status }}</span></td>
-            <td>{{ request.duration ? `${request.duration}ms` : '-' }}</td>
-            <td>
-              <button class="icon-button small" @click="showDetails(request)" aria-label="查看详情">👁️</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Request Details Modal -->
-    <div v-if="selectedRequest" class="modal-overlay" @click.self="selectedRequest = null">
-      <div class="modal-content modal-large">
-        <div class="modal-header">
-          <h3>请求详情</h3>
-          <button class="icon-button" @click="selectedRequest = null">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="detail-section">
-            <h4>基本信息</h4>
-            <div class="detail-grid">
-              <div><strong>时间:</strong> {{ formatTime(selectedRequest.timestamp) }}</div>
-              <div><strong>方法:</strong> {{ selectedRequest.method }}</div>
-              <div><strong>路径:</strong> {{ selectedRequest.path }}</div>
-              <div><strong>供应商:</strong> {{ selectedRequest.provider || '-' }}</div>
-              <div><strong>状态:</strong> {{ selectedRequest.status }}</div>
-              <div><strong>耗时:</strong> {{ selectedRequest.duration }}ms</div>
-            </div>
-          </div>
-          <div class="detail-section" v-if="selectedRequest.request_headers">
-            <h4>请求头</h4>
-            <pre><code>{{ JSON.stringify(selectedRequest.request_headers, null, 2) }}</code></pre>
-          </div>
-          <div class="detail-section" v-if="selectedRequest.response_headers">
-            <h4>响应头</h4>
-            <pre><code>{{ JSON.stringify(selectedRequest.response_headers, null, 2) }}</code></pre>
-          </div>
+    <div class="request-table-shell">
+      <div class="request-table-header" aria-hidden="true"><span class="request-column-status">状态</span><span class="request-column-time">开始时间</span><span>会话</span><span>供应商</span><span>模型</span><span class="request-column-reasoning">推理强度</span><span class="request-column-duration">耗时</span><span class="request-column-token">Token</span><span class="request-column-result">结果</span></div>
+      <div class="request-list" aria-live="polite">
+        <div v-for="(item, index) in combinedItems" :key="requestKey(item, index)" class="request-row" :class="requestState(item)">
+          <span class="request-state"><span class="request-state-dot" aria-hidden="true" /><span>{{ stateLabel(item) }}</span></span>
+          <time class="request-time" :datetime="isoTime(item.started_at)">{{ formatTime(item.started_at) }}</time>
+          <strong class="request-session" :title="item.session_name || '未知会话'">{{ item.session_name || '未知会话' }}</strong>
+          <span class="request-provider-cell"><strong>{{ providerName(item.provider_id || item.actual_provider_id) }}</strong><small v-if="item.requested_provider_id && item.requested_provider_id !== item.provider_id">请求 {{ providerName(item.requested_provider_id) }}</small></span>
+          <span class="request-model" :title="item.model || 'unknown'">{{ item.model || 'unknown' }}</span>
+          <span class="request-reasoning">{{ reasoningLabel(item.reasoning_effort) }}</span>
+          <span class="request-duration">{{ durationLabel(item) }}</span>
+          <span class="request-token">{{ item.usage_source == null && !item.total_tokens ? '—' : formatNumber(item.total_tokens) }}</span>
+          <span class="request-result" :title="item.error_summary || ''">{{ resultLabel(item) }}</span>
         </div>
       </div>
+      <div v-if="!combinedItems.length" class="requests-empty">{{ loading ? '正在读取请求记录…' : (error || '当前筛选范围内没有请求记录') }}</div>
+      <button v-if="nextCursor" class="usage-history-more" type="button" @click="loadMore">加载更早记录</button>
+    </div>
+
+    <div v-if="routePopover" class="session-route-popover" style="top: 120px; left: max(12px, calc(50vw - 190px));">
+      <div class="session-route-heading"><strong>设置会话路由</strong><button class="usage-history-close" type="button" aria-label="关闭会话路由设置" @click="routePopover = false"><UiIcon name="close" /></button></div>
+      <label class="session-route-field"><span>会话</span><UiSelect v-model="selectedSession" aria-label="会话" :options="sessionOptions" /></label>
+      <label class="session-route-field"><span>后续供应商</span><UiSelect v-model="selectedRoute" aria-label="后续供应商" :disabled="!selectedSession" :options="providerOptionsWithDefault" @change="saveSessionRoute" /></label>
+      <p class="session-route-meta">只显示最近 7 天的 Codex 会话，活跃会话优先。</p>
     </div>
   </section>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import Toolbar from './Toolbar.vue'
-
-const requests = ref([])
-const timeWindow = ref('1h')
-const searchQuery = ref('')
-const selectedRequest = ref(null)
-
-const filteredRequests = computed(() => {
-  let filtered = requests.value
-
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase()
-    filtered = filtered.filter(r =>
-      r.path?.toLowerCase().includes(query) ||
-      r.provider?.toLowerCase().includes(query) ||
-      r.method?.toLowerCase().includes(query)
-    )
-  }
-
-  return filtered
-})
-
-function formatTime(timestamp) {
-  if (!timestamp) return '-'
-  const date = new Date(timestamp)
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  })
-}
-
-function getStatusClass(status) {
-  if (!status) return 'status-unknown'
-  if (status >= 200 && status < 300) return 'status-success'
-  if (status >= 400 && status < 500) return 'status-client-error'
-  if (status >= 500) return 'status-server-error'
-  return 'status-unknown'
-}
-
-function showDetails(request) {
-  selectedRequest.value = request
-}
-
-async function loadRequests() {
-  try {
-    const response = await fetch(`/control/requests?window=${timeWindow.value}`)
-    if (response.ok) {
-      requests.value = await response.json()
-    }
-  } catch (error) {
-    console.error('Failed to load requests:', error)
-  }
-}
-
-onMounted(() => {
-  loadRequests()
-  setInterval(loadRequests, 10000) // Auto-refresh every 10s
-})
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { controlFetch, jsonOptions } from '../api.js'
+import UiSelect from './ui/UiSelect.vue'
+import UiIcon from './ui/UiIcon.vue'
+defineProps({ config: { type: Object, required: true } })
+const emit = defineEmits(['count'])
+const activeItems = ref([])
+const historyItems = ref([])
+const providers = ref([])
+const totalCount = ref(0)
+const nextCursor = ref(null)
+const windowName = ref(localStorage.getItem('local-proxy-request-window') || '24h')
+const statusFilter = ref('all')
+const providerFilter = ref('')
+const query = ref('')
+const loading = ref(false)
+const error = ref('')
+const routePopover = ref(false)
+const sessions = ref([])
+const selectedSession = ref('')
+const selectedRoute = ref('')
+let timer
+let searchTimer
+const requestWindowOptions = [{ value: '1h', label: '近 1 小时' }, { value: '6h', label: '近 6 小时' }, { value: '24h', label: '近 24 小时' }, { value: '7d', label: '近 7 天' }]
+const statusOptions = [{ value: 'all', label: '全部状态' }, { value: 'running', label: '运行中' }, { value: 'succeeded', label: '成功' }, { value: 'failed', label: '失败' }]
+const combinedItems = computed(() => [...activeItems.value, ...historyItems.value])
+const providerNames = computed(() => new Map(providers.value.map(provider => [provider.provider_id, provider.name])))
+const providerOptions = computed(() => [{ value: '', label: '全部供应商' }, ...providers.value.map(provider => ({ value: provider.provider_id, label: provider.name }))])
+const providerOptionsWithDefault = computed(() => [{ value: '', label: '跟随全局路由' }, ...providers.value.map(provider => ({ value: provider.provider_id, label: provider.name }))])
+const sessionOptions = computed(() => [{ value: '', label: '请选择会话' }, ...sessions.value.map(session => ({ value: session.session_key, label: session.session_name || session.thread_name || session.session_key }))])
+function providerName(id) { return providerNames.value.get(id) || id || '—' }
+function requestKey(item, index) { return `${item.request_id || item.started_at || 0}-${item.provider_id || 'unknown'}-${index}` }
+function requestState(item) { return item.state === 'running' ? 'running' : item.error_kind === 'client_disconnected' ? 'cancelled' : item.succeeded === true ? 'succeeded' : 'failed' }
+function stateLabel(item) { return ({ running: '运行中', succeeded: '成功', cancelled: '取消', failed: '失败' })[requestState(item)] }
+function formatNumber(value) { return Number(value || 0).toLocaleString('zh-CN') }
+function timestamp(value) { const number = Number(value || 0); return number < 10_000_000_000 ? number * 1000 : number }
+function isoTime(value) { try { return new Date(timestamp(value)).toISOString() } catch { return '' } }
+function formatTime(value) { return value ? new Date(timestamp(value)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—' }
+function reasoningLabel(value) { return ({ low: '低', medium: '中', high: '高', xhigh: '超高' })[value] || '—' }
+function durationLabel(item) { const value = requestState(item) === 'running' ? Date.now() - timestamp(item.started_at) : item.duration_ms; if (value == null) return '—'; return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms` }
+function resultLabel(item) { if (requestState(item) === 'running') return '等待响应'; if (item.succeeded) return item.status_code ? `HTTP ${item.status_code}` : '已完成'; if (item.error_kind === 'client_disconnected') return '客户端断开'; return item.error_summary || item.error_kind || (item.status_code ? `HTTP ${item.status_code}` : '失败') }
+function scheduleSearch() { window.clearTimeout(searchTimer); searchTimer = window.setTimeout(loadRequests, 250) }
+async function loadRequests() { if (loading.value) return; loading.value = true; error.value = ''; localStorage.setItem('local-proxy-request-window', windowName.value); try { const params = new URLSearchParams({ window: windowName.value, status: statusFilter.value }); if (providerFilter.value) params.set('provider_id', providerFilter.value); if (query.value.trim()) params.set('query', query.value.trim()); const [payload, status] = await Promise.all([controlFetch(`/api/requests?${params}`), controlFetch('/api/status')]); activeItems.value = payload.active || []; historyItems.value = payload.items || []; totalCount.value = Number(payload.total_count || 0); nextCursor.value = payload.next_cursor || null; providers.value = status.providers || []; emit('count', Number(status.active_requests || 0)) } catch (requestError) { error.value = requestError.message } finally { loading.value = false } }
+async function loadMore() { if (!nextCursor.value) return; const params = new URLSearchParams({ window: windowName.value, status: statusFilter.value, cursor: nextCursor.value }); if (providerFilter.value) params.set('provider_id', providerFilter.value); if (query.value.trim()) params.set('query', query.value.trim()); const payload = await controlFetch(`/api/requests?${params}`); historyItems.value.push(...(payload.items || [])); nextCursor.value = payload.next_cursor || null }
+async function openSessionRoutes() { routePopover.value = true; try { const payload = await controlFetch('/api/sessions'); sessions.value = Array.isArray(payload) ? payload : (payload.items || payload.sessions || []) } catch (requestError) { error.value = requestError.message } }
+async function saveSessionRoute() { if (!selectedSession.value) return; await controlFetch(`/api/session-routes/${encodeURIComponent(selectedSession.value)}`, jsonOptions('POST', { provider_id: selectedRoute.value || null })) }
+onMounted(() => { loadRequests(); timer = window.setInterval(loadRequests, 5000) })
+onBeforeUnmount(() => { window.clearInterval(timer); window.clearTimeout(searchTimer) })
 </script>

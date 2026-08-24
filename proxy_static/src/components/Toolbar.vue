@@ -1,41 +1,35 @@
 <template>
   <div class="toolbar">
-    <div class="toolbar-left">
-      <label class="toolbar-item">
-        <span class="toolbar-label">时间范围</span>
-        <select :value="timeWindow" @change="$emit('update:timeWindow', $event.target.value)" class="toolbar-select">
-          <option value="5m">最近 5 分钟</option>
-          <option value="15m">最近 15 分钟</option>
-          <option value="1h">最近 1 小时</option>
-          <option value="6h">最近 6 小时</option>
-          <option value="24h">最近 24 小时</option>
-        </select>
+    <label class="toolbar-item">
+      <span class="toolbar-label">时间范围</span>
+      <UiSelect :model-value="timeWindow" class="toolbar-select" aria-label="时间范围" :options="timeWindowOptions" @update:model-value="$emit('update:timeWindow', $event)" />
+    </label>
+    <div class="toolbar-actions">
+      <label class="search-field">
+        <span class="visually-hidden">搜索请求</span>
+        <UiIcon class="search-icon" name="search" />
+        <input
+          type="search"
+          :value="searchQuery"
+          placeholder="搜索会话、模型或供应商"
+          @input="$emit('update:searchQuery', $event.target.value)"
+        />
       </label>
-    </div>
-    <div class="toolbar-right">
-      <input
-        type="search"
-        :value="searchQuery"
-        @input="$emit('update:searchQuery', $event.target.value)"
-        placeholder="搜索..."
-        class="toolbar-search"
-      />
-      <button class="secondary-button" @click="$emit('refresh')">刷新</button>
+      <button class="secondary-button" type="button" :disabled="loading" @click="$emit('refresh')">
+        {{ loading ? '刷新中...' : '刷新' }}
+      </button>
     </div>
   </div>
 </template>
 
 <script setup>
+import UiSelect from './ui/UiSelect.vue'
+import UiIcon from './ui/UiIcon.vue'
 defineProps({
-  timeWindow: {
-    type: String,
-    required: true
-  },
-  searchQuery: {
-    type: String,
-    required: true
-  }
+  timeWindow: { type: String, required: true },
+  searchQuery: { type: String, required: true },
+  loading: { type: Boolean, default: false }
 })
-
 defineEmits(['update:timeWindow', 'update:searchQuery', 'refresh'])
+const timeWindowOptions = [{ value: '1h', label: '近 1 小时' }, { value: '6h', label: '近 6 小时' }, { value: '24h', label: '近 24 小时' }, { value: '7d', label: '近 7 天' }]
 </script>
