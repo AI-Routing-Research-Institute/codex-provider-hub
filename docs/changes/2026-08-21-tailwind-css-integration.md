@@ -164,6 +164,12 @@ node --check proxy_static/app.js
 # ✅ 打包流程不受影响
 ```
 
+## 后续微调
+
+**2026-08-24**: 搜索图标尺寸调整
+- font-size: 16px → 18px
+- 提升视觉清晰度，与其他图标保持一致
+
 ## PR
 
 本次提交包含在当前分支 `feat/local-proxy-full-bleed-responsive`
