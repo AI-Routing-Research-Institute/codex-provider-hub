@@ -55,6 +55,14 @@ test("uses nine aligned request columns without positional header rules", () => 
 
 test("labels running, successful, and failed request results", () => {
   assert.equal(
+    context.api.requestResultLabel({ state: "running", phase: "connecting" }),
+    "连接上游",
+  );
+  assert.equal(
+    context.api.requestResultLabel({ state: "running", phase: "waiting_first_chunk" }),
+    "等待首包",
+  );
+  assert.equal(
     context.api.requestResultLabel({ state: "running", outcome: "receiving" }),
     "接收中",
   );
@@ -78,6 +86,10 @@ test("labels running, successful, and failed request results", () => {
     }),
     "客户端取消",
   );
+  assert.match(source, /const CONTROL_REQUEST_TIMEOUT_MS = 8_000/);
+  assert.match(source, /async function fetchControl\(/);
+  assert.match(source, /本地中转响应超时，请检查服务是否卡住/);
+  assert.match(source, /stream_idle_timeout: "上游长时间无数据"/);
 });
 test("keeps the actual provider visible in each request row", () => {
   assert.equal(

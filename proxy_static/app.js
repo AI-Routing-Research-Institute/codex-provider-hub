@@ -2,6 +2,7 @@
 
 const CONTROL_HEADER = { "X-Local-Proxy-Control": "1" };
 const SESSION_ROUTE_CACHE_MS = 60_000;
+const CONTROL_REQUEST_TIMEOUT_MS = 8_000;
 const CONTROL_BASE = (() => {
   const pathname = window.location?.pathname || "/control/codex/";
   const match = pathname.match(/^\/control\/(codex|claude)(?:\/|$)/);
@@ -10,6 +11,21 @@ const CONTROL_BASE = (() => {
 
 function controlUrl(path) {
   return `${CONTROL_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+async function fetchControl(path, options = {}) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), CONTROL_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(path, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("本地中转响应超时，请检查服务是否卡住");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 let latestStatus = null;
@@ -630,7 +646,7 @@ function applyCustomTimeRange() {
 
 async function readUiConfig() {
   try {
-    const response = await fetch(controlUrl("/api/ui-config"), { cache: "no-store" });
+    const response = await fetchControl(controlUrl("/api/ui-config"), { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     applyUiConfig(await response.json());
   } catch {
@@ -975,7 +991,7 @@ async function readRecoveryHistory({ loadMore = false, refresh = false } = {}) {
   try {
     const params = new URLSearchParams({ limit: String(RECOVERY_HISTORY_PAGE_SIZE) });
     if (loadMore) params.set("cursor", latestRecoveryHistory.next_cursor);
-    const response = await fetch(`${controlUrl("/api/recovery-history")}?${params}`, { cache: "no-store" });
+    const response = await fetchControl(`${controlUrl("/api/recovery-history")}?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json();
     latestRecoveryHistory = loadMore
@@ -1087,7 +1103,9 @@ function formatRetryKind(kind) {
     rate_limited: "HTTP 429",
     model_capacity: "模型容量已满",
     connection: "连接上游失败",
+    connection_timeout: "等待上游响应超时",
     stream_start: "响应开始前断流",
+    stream_idle_timeout: "上游长时间无数据",
     stream_interrupted: "输出后响应流中断",
     upstream_error: "上游请求失败",
   }[value] || "上游临时错误";
@@ -1164,7 +1182,7 @@ async function responseDetail(response, fallback) {
 
 async function readRuntimeSettings({ quiet = false } = {}) {
   try {
-    const response = await fetch(controlUrl("/api/runtime-settings"), { cache: "no-store" });
+    const response = await fetchControl(controlUrl("/api/runtime-settings"), { cache: "no-store" });
     if (!response.ok) throw new Error(await responseDetail(response, `HTTP ${response.status}`));
     renderRuntimeSettings(await response.json());
   } catch (error) {
@@ -1212,7 +1230,11 @@ function requestResultLabel(item) {
   if (item?.state === "running") {
     return item.outcome === "retrying"
       ? `第 ${Number(item.retry_count || 0) + 1} 次尝试`
-      : "接收中";
+      : ({
+        connecting: "连接上游",
+        waiting_first_chunk: "等待首包",
+        receiving: "接收中",
+      }[item.phase] || (item.outcome === "receiving" ? "接收中" : "处理中"));
   }
   if (item?.succeeded === true) {
     return String(Number(item.status_code || 200));
@@ -1349,7 +1371,7 @@ async function readSessionRoutes({ quiet = false, force = false } = {}) {
   if (!hadItems) sessionRouteError = null;
   renderSessionRouteSettings();
   try {
-    const response = await fetch(controlUrl("/api/sessions"), { cache: "no-store" });
+    const response = await fetchControl(controlUrl("/api/sessions"), { cache: "no-store" });
     if (!response.ok) throw new Error(await responseDetail(response, `HTTP ${response.status}`));
     const payload = await response.json();
     if (sequence !== sessionRouteSequence) return;
@@ -1562,7 +1584,7 @@ async function readRequests({ reset = false, loadMore = false, refresh = false, 
   if (requestQuery.value.trim()) params.set("query", requestQuery.value.trim());
   if (loadMore && requestNextCursor) params.set("cursor", requestNextCursor);
   try {
-    const response = await fetch(`${controlUrl("/api/requests")}?${params}`, { cache: "no-store" });
+    const response = await fetchControl(`${controlUrl("/api/requests")}?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(await responseDetail(response, `HTTP ${response.status}`));
     const payload = await response.json();
     if (sequence !== requestSequence) return;
@@ -1686,7 +1708,7 @@ function renderMonitorManagement(statusPayload = null) {
 }
 
 async function monitorManagementRequest(payload) {
-  const response = await fetch(controlUrl("/api/status-management"), {
+  const response = await fetchControl(controlUrl("/api/status-management"), {
     method: "POST", headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
     body: JSON.stringify(payload), cache: "no-store",
   });
@@ -1947,7 +1969,7 @@ async function readUsageHistory({ reset = false } = {}) {
     const params = timeRangeParams("usage");
     params.set("provider_id", providerId);
     if (cursor) params.set("cursor", cursor);
-    const response = await fetch(`${controlUrl("/api/usage-history")}?${params}`, { cache: "no-store" });
+    const response = await fetchControl(`${controlUrl("/api/usage-history")}?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(await responseDetail(response, "无法读取请求记录"));
     const result = await response.json();
     if (
@@ -2925,7 +2947,7 @@ async function readStatus({ quiet = false, force = false } = {}) {
   const requestSequence = ++statusRequestSequence;
   try {
     const params = timeRangeParams("usage");
-    const response = await fetch(
+    const response = await fetchControl(
       `${controlUrl("/api/status")}?${params}`,
       { cache: "no-store" },
     );
@@ -2959,7 +2981,7 @@ async function readHealthStatus({ quiet = false } = {}) {
   const requestSequence = ++healthRequestSequence;
   renderHealthSourceStatus();
   try {
-    const response = await fetch(configuredUrl, {
+    const response = await fetchControl(configuredUrl, {
       cache: "no-store",
       mode: "cors",
     });

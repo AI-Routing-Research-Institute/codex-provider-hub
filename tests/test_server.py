@@ -384,6 +384,7 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["service"], "codex-provider-hub")
         self.assertEqual(set(response.json()["services"]), {"codex", "claude"})
+        self.assertIn("event_loop_lag_ms", response.json()["diagnostics"])
 
     async def test_slow_request_history_does_not_block_health_endpoint(self) -> None:
         started = threading.Event()
