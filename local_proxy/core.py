@@ -52,6 +52,8 @@ REQUEST_HISTORY_HOURS = 7 * 24
 REQUEST_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 REQUEST_HISTORY_PAGE_LIMIT = 50
 REQUEST_HISTORY_WINDOWS = {"1h", "6h", "24h", "7d", "custom"}
+UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS = 120.0
 SSE_RETRY_EVENT_PARSE_BYTES = 256 * 1024
 SSE_RETRY_PREFLIGHT_BYTES = 8 * 1024 * 1024
 SSE_RETRY_MARKER_TAIL_BYTES = 512
@@ -93,6 +95,133 @@ SSE_FAILURE_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 INPUT_ITEM_ID_ERROR_PARAM_RE = re.compile(r"^input\[(0|[1-9][0-9]*)\]\.id$")
+class UpstreamStreamIdleTimeout(TimeoutError):
+    """Raised when an upstream response produces no bytes for too long."""
+
+
+class UpstreamResponseHeadersTimeout(TimeoutError):
+    """Raised when an upstream response does not arrive in time."""
+
+
+class RuntimeDiagnostics:
+    """Small thread-safe snapshot of event-loop and request pressure."""
+
+    def __init__(self, *, heartbeat_interval_seconds: float = 0.5) -> None:
+        self._lock = threading.Lock()
+        self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
+        self._last_heartbeat_at = 0.0
+        self._last_lag_ms = 0.0
+        self._max_lag_ms = 0.0
+
+    def observe_heartbeat(self, lag_ms: float) -> None:
+        with self._lock:
+            self._last_heartbeat_at = time.time()
+            self._last_lag_ms = max(0.0, float(lag_ms))
+            self._max_lag_ms = max(self._max_lag_ms, self._last_lag_ms)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "heartbeat_interval_ms": round(self.heartbeat_interval_seconds * 1000),
+                "last_heartbeat_at": (
+                    round(self._last_heartbeat_at * 1000)
+                    if self._last_heartbeat_at
+                    else None
+                ),
+                "event_loop_lag_ms": round(self._last_lag_ms),
+                "event_loop_max_lag_ms": round(self._max_lag_ms),
+            }
+
+
+async def _event_loop_heartbeat(diagnostics: RuntimeDiagnostics) -> None:
+    loop = asyncio.get_running_loop()
+    interval = max(0.1, diagnostics.heartbeat_interval_seconds)
+    expected = loop.time() + interval
+    while True:
+        await asyncio.sleep(max(0.0, expected - loop.time()))
+        now = loop.time()
+        diagnostics.observe_heartbeat(max(0.0, now - expected) * 1000)
+        expected += interval
+
+
+async def _next_stream_chunk(
+    stream: AsyncIterator[bytes],
+    *,
+    timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+) -> bytes:
+    try:
+        return await asyncio.wait_for(anext(stream), timeout=timeout_seconds)
+    except TimeoutError as exc:
+        raise UpstreamStreamIdleTimeout(
+            f"上游响应连续 {timeout_seconds:g} 秒没有返回数据"
+        ) from exc
+
+
+async def _stream_with_idle_timeout(
+    stream: AsyncIterator[bytes],
+    *,
+    timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+) -> AsyncIterator[bytes]:
+    while True:
+        try:
+            chunk = await _next_stream_chunk(
+                stream,
+                timeout_seconds=timeout_seconds,
+            )
+        except StopAsyncIteration:
+            return
+        yield chunk
+
+
+def _stream_idle_retry_summary(exc: UpstreamStreamIdleTimeout) -> str:
+    return _sanitize_retry_summary(str(exc)) or _retry_kind_summary("stream_idle_timeout")
+
+
+async def _send_upstream_response(
+    client: Any,
+    request: Any,
+    *,
+    timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+) -> Any:
+    try:
+        return await asyncio.wait_for(
+            client.send(request, stream=True),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise UpstreamResponseHeadersTimeout(
+            f"上游响应头连续 {timeout_seconds:g} 秒没有返回"
+        ) from exc
+
+
+def _finalize_stream_captures(
+    usage_capture: Any | None,
+    failure_capture: Any | None,
+    status_code: int,
+) -> tuple[TokenUsage | None, tuple[str, str] | None]:
+    """Finalize CPU-heavy response parsing away from the ASGI event loop."""
+    embedded_failure = (
+        failure_capture.finalize()
+        if failure_capture is not None
+        else None
+    )
+    usage = (
+        usage_capture.finalize(status_code)
+        if usage_capture is not None
+        else None
+    )
+    return usage, embedded_failure
+
+
+def _feed_stream_captures(
+    usage_capture: Any | None,
+    failure_capture: Any | None,
+    chunk: bytes,
+) -> None:
+    if usage_capture is not None:
+        usage_capture.feed(chunk)
+    if failure_capture is not None:
+        failure_capture.feed(chunk)
 
 
 class DisconnectAwareStreamingResponse(StreamingResponse):
@@ -1484,6 +1613,8 @@ class ActiveRequest:
     started_wall_at: float
     model: str = "unknown"
     reasoning_effort: str | None = None
+    phase: str = "requesting"
+    last_activity_wall_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1798,6 +1929,7 @@ class ProviderRouter:
                 provider_id=provider.provider_id,
                 thread_id=thread_id,
                 started_wall_at=snapshot.started_wall_at,
+                last_activity_wall_at=snapshot.started_wall_at,
             )
             return snapshot
 
@@ -1818,6 +1950,32 @@ class ProviderRouter:
                 started_wall_at=detail.started_wall_at,
                 model=str(model or "unknown")[:240],
                 reasoning_effort=_normalize_reasoning_effort(reasoning_effort),
+                phase=detail.phase,
+                last_activity_wall_at=detail.last_activity_wall_at,
+            )
+
+    def update_request_phase(
+        self,
+        snapshot: RouteSnapshot,
+        phase: str,
+        *,
+        activity: bool = False,
+    ) -> None:
+        with self._lock:
+            detail = self._active_request_details.get(snapshot.request_id)
+            if detail is None:
+                return
+            self._active_request_details[snapshot.request_id] = ActiveRequest(
+                request_id=detail.request_id,
+                provider_id=detail.provider_id,
+                thread_id=detail.thread_id,
+                started_wall_at=detail.started_wall_at,
+                model=detail.model,
+                reasoning_effort=detail.reasoning_effort,
+                phase=str(phase or "requesting")[:40],
+                last_activity_wall_at=(
+                    time.time() if activity else detail.last_activity_wall_at
+                ),
             )
 
     def session_provider_override(self, thread_id: str | None) -> str | None:
@@ -1897,6 +2055,8 @@ class ProviderRouter:
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
                     reasoning_effort=detail.reasoning_effort,
+                    phase=detail.phase,
+                    last_activity_wall_at=detail.last_activity_wall_at,
                 )
 
             progress = self._retrying.get(snapshot.request_id)
@@ -1964,6 +2124,18 @@ class ProviderRouter:
                 kind=kind,
                 summary=summary,
             )
+            detail = self._active_request_details.get(snapshot.request_id)
+            if detail is not None:
+                self._active_request_details[snapshot.request_id] = ActiveRequest(
+                    request_id=detail.request_id,
+                    provider_id=detail.provider_id,
+                    thread_id=detail.thread_id,
+                    started_wall_at=detail.started_wall_at,
+                    model=detail.model,
+                    reasoning_effort=detail.reasoning_effort,
+                    phase="retrying",
+                    last_activity_wall_at=detail.last_activity_wall_at,
+                )
             self._recent_retry_errors.appendleft(
                 RetryErrorRecord(
                     request_id=snapshot.request_id,
@@ -2114,6 +2286,8 @@ def create_proxy_app(
     validate_runtime_database: Callable[[str], dict[str, Any]] | None = None,
     ui_config: Callable[[], Mapping[str, Any]] | None = None,
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
     service_name: str = "codex-local-proxy",
     control_asset_dir: Path = CONTROL_ASSET_DIR,
     allowed_proxy_paths: frozenset[str] | None = None,
@@ -2139,6 +2313,8 @@ def create_proxy_app(
             control_asset_dir=control_asset_dir,
             on_shutdown_requested=on_shutdown_requested,
             update_controller=update_controller,
+            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
         )
     if router is None:
         raise ValueError("必须提供供应商路由器")
@@ -2170,6 +2346,7 @@ def create_proxy_app(
         health_status_url
     )
     active_input_item_id_compatibility_store = input_item_id_compatibility_store
+    runtime_diagnostics = RuntimeDiagnostics()
     if (
         active_input_item_id_compatibility_store is None
         and service_name == "codex-local-proxy"
@@ -2179,9 +2356,12 @@ def create_proxy_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        heartbeat_task = asyncio.create_task(_event_loop_heartbeat(runtime_diagnostics))
         try:
             yield
         finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
             if owns_client:
                 await upstream_client.aclose()
 
@@ -2205,6 +2385,7 @@ def create_proxy_app(
             "status": "ok" if current is not None else "not_configured",
             "current_provider": current.name if current else None,
             "active_requests": sum(status.active_by_provider.values()),
+            "diagnostics": runtime_diagnostics.snapshot(),
         }
 
     @app.get("/control", include_in_schema=False)
@@ -2256,6 +2437,7 @@ def create_proxy_app(
             service_name=service_name,
             provider_public_fields=provider_public_fields,
             session_name_resolver=session_name_resolver,
+            runtime_diagnostics=runtime_diagnostics,
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
@@ -2657,6 +2839,8 @@ def create_proxy_app(
             protocol_adapter=protocol_adapter,
             session_name_resolver=session_name_resolver,
             input_item_id_compatibility_store=active_input_item_id_compatibility_store,
+            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
         )
 
     return app
@@ -2701,6 +2885,7 @@ def _public_control_status(
     service_name: str = "codex-local-proxy",
     provider_public_fields: Callable[[ProxyProvider], Mapping[str, Any]] | None = None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
+    runtime_diagnostics: RuntimeDiagnostics | None = None,
 ) -> dict[str, Any]:
     status = router.status()
     policy = retry_policy or RetryPolicy()
@@ -2760,6 +2945,24 @@ def _public_control_status(
             if detail.provider_id == provider_id
         ]
 
+    now = time.time()
+    active_details = [
+        {
+            "request_id": detail.request_id,
+            "provider_id": detail.provider_id,
+            "model": detail.model,
+            "phase": detail.phase,
+            "started_at": round(detail.started_wall_at * 1000),
+            "age_ms": max(0, round((now - detail.started_wall_at) * 1000)),
+            "last_activity_at": (
+                round(detail.last_activity_wall_at * 1000)
+                if detail.last_activity_wall_at is not None
+                else None
+            ),
+        }
+        for detail in status.active_request_details
+    ]
+
     return {
         "service": service_name,
         "current_provider_id": current_id,
@@ -2769,6 +2972,12 @@ def _public_control_status(
         "last_provider_id": status.last_provider_id,
         "last_status_code": status.last_status_code,
         "last_error": status.last_error,
+        "active_request_details": active_details,
+        "diagnostics": (
+            runtime_diagnostics.snapshot()
+            if runtime_diagnostics is not None
+            else None
+        ),
         "health_status_url": health_status_url,
         "usage": usage_summary or _empty_usage_summary("today"),
         "retry": {
@@ -2880,6 +3089,12 @@ def _public_requests(
                     "route_provider_id": route_provider_id,
                     "model": detail.model,
                     "reasoning_effort": detail.reasoning_effort,
+                    "phase": detail.phase,
+                    "last_activity_at": (
+                        round(detail.last_activity_wall_at * 1000)
+                        if detail.last_activity_wall_at is not None
+                        else None
+                    ),
                     "status_code": None,
                     "succeeded": None,
                     "outcome": "retrying" if retry is not None else "receiving",
@@ -3231,6 +3446,8 @@ async def _forward_request(
     protocol_adapter: Any | None = None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
+    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
 ):
     thread_id = _codex_thread_id(request.headers)
     try:
@@ -3308,7 +3525,7 @@ async def _forward_request(
             status_code=413,
             content={"error": {"message": "请求体超过本地中转允许的大小"}},
         )
-    model, reasoning_effort = _request_metadata(request_body)
+    model, reasoning_effort = await asyncio.to_thread(_request_metadata, request_body)
     router.update_request_model(snapshot, model, reasoning_effort)
     upstream_response: httpx.Response | None = None
     first_chunk: bytes | None = None
@@ -3327,6 +3544,7 @@ async def _forward_request(
             snapshot, _ = router.route_retry_to_current(snapshot)
         reroute_before_attempt = True
         provider = snapshot.provider
+        router.update_request_phase(snapshot, "connecting")
         attempt_client = (
             client_selector(provider) if client_selector is not None else client
         )
@@ -3367,7 +3585,8 @@ async def _forward_request(
             )
         )
         if strip_all_input_item_ids or repaired_indexes:
-            transformed_body, _ = _strip_input_item_ids(
+            transformed_body, _ = await asyncio.to_thread(
+                _strip_input_item_ids,
                 request_body,
                 only_indexes=None if strip_all_input_item_ids else repaired_indexes,
             )
@@ -3384,7 +3603,12 @@ async def _forward_request(
                 headers=headers,
                 content=request_body_for_attempt,
             )
-            upstream_response = await attempt_client.send(upstream_request, stream=True)
+            upstream_response = await _send_upstream_response(
+                attempt_client,
+                upstream_request,
+                timeout_seconds=upstream_response_headers_timeout_seconds,
+            )
+            router.update_request_phase(snapshot, "waiting_first_chunk")
             retry_kind = None
             if retry_policy.enabled:
                 retry_kind = (
@@ -3403,6 +3627,10 @@ async def _forward_request(
                         stream = upstream_response.aiter_bytes()
                     else:
                         stream = upstream_response.aiter_raw()
+                    stream = _stream_with_idle_timeout(
+                        stream,
+                        timeout_seconds=stream_idle_timeout_seconds,
+                    )
                     try:
                         first_chunk = await anext(stream)
                     except StopAsyncIteration:
@@ -3453,7 +3681,8 @@ async def _forward_request(
                         and item_id_repairs < MAX_INPUT_ITEM_ID_REPAIRS_PER_REQUEST
                         and repair_index not in repaired_indexes
                     ):
-                        transformed_body, changed = _strip_input_item_ids(
+                        transformed_body, changed = await asyncio.to_thread(
+                            _strip_input_item_ids,
                             request_body,
                             only_indexes=(repair_index,),
                         )
@@ -3527,6 +3756,14 @@ async def _forward_request(
                             parsed_delay,
                             retry_policy.max_delay_seconds,
                         )
+        except UpstreamResponseHeadersTimeout as exc:
+            retry_kind = "connection_timeout"
+            final_error = "upstream_unavailable"
+            retry_summary = _sanitize_retry_summary(str(exc)) or _retry_kind_summary(retry_kind)
+        except UpstreamStreamIdleTimeout as exc:
+            retry_kind = "stream_idle_timeout"
+            final_error = retry_kind
+            retry_summary = _stream_idle_retry_summary(exc)
         except httpx.HTTPError as exc:
             retry_kind = "connection"
             final_error = "upstream_unavailable"
@@ -3641,10 +3878,12 @@ async def _forward_request(
 
     usage_capture = None
     if usage_store is not None:
-        usage_capture = (
-            protocol_adapter.usage_capture(request_body_for_attempt, upstream_path)
+        usage_capture = await asyncio.to_thread(
+            protocol_adapter.usage_capture
             if protocol_adapter is not None
-            else UsageCapture(request_body_for_attempt, upstream_path)
+            else UsageCapture,
+            request_body_for_attempt,
+            upstream_path,
         )
     failure_capture = None
     if (
@@ -3666,19 +3905,31 @@ async def _forward_request(
         persistence_ready = False
         try:
             if first_chunk is not None:
-                if usage_capture is not None:
-                    usage_capture.feed(first_chunk)
-                if failure_capture is not None:
-                    failure_capture.feed(first_chunk)
+                await asyncio.to_thread(
+                    _feed_stream_captures,
+                    usage_capture,
+                    failure_capture,
+                    first_chunk,
+                )
+                router.update_request_phase(snapshot, "receiving", activity=True)
                 yield first_chunk
             assert stream is not None
             async for chunk in stream:
-                if usage_capture is not None:
-                    usage_capture.feed(chunk)
-                if failure_capture is not None:
-                    failure_capture.feed(chunk)
+                await asyncio.to_thread(
+                    _feed_stream_captures,
+                    usage_capture,
+                    failure_capture,
+                    chunk,
+                )
+                router.update_request_phase(snapshot, "receiving", activity=True)
                 yield chunk
             stream_completed = True
+        except UpstreamStreamIdleTimeout as exc:
+            stream_failure = (
+                "stream_idle_timeout",
+                _stream_idle_retry_summary(exc),
+            )
+            raise
         except httpx.HTTPError as exc:
             stream_failure = (
                 "stream_interrupted",
@@ -3688,12 +3939,15 @@ async def _forward_request(
         finally:
             usage: TokenUsage | None = None
             try:
-                if failure_capture is not None:
-                    embedded_failure = failure_capture.finalize()
+                if usage_capture is not None or failure_capture is not None:
+                    usage, embedded_failure = await asyncio.to_thread(
+                        _finalize_stream_captures,
+                        usage_capture,
+                        failure_capture,
+                        upstream_response.status_code,
+                    )
                     if embedded_failure is not None:
                         stream_failure = embedded_failure
-                if usage_capture is not None and usage_store is not None:
-                    usage = usage_capture.finalize(upstream_response.status_code)
                 successful = (
                     (
                         stream_completed
@@ -4413,7 +4667,9 @@ def _retry_kind_summary(kind: str) -> str:
         "rate_limited": "HTTP 429 请求频率受限",
         "model_capacity": "模型容量已满",
         "connection": "连接上游失败",
+        "connection_timeout": "等待上游响应超时",
         "stream_start": "响应开始前连接中断",
+        "stream_idle_timeout": "上游响应长时间没有新数据",
         "stream_interrupted": "输出后响应流中断",
         "upstream_error": "上游请求失败",
         "malformed_response": "HTTP 200 上游响应为空或格式错误",

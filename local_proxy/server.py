@@ -29,10 +29,14 @@ from local_proxy.core import (
     ProviderRouter,
     ProxyProvider,
     RecoveryHistoryStore,
+    RuntimeDiagnostics,
     RetryPolicy,
     RetryPolicyStore,
+    UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
     UsageStore,
     _empty_usage_summary,
+    _event_loop_heartbeat,
     _forward_request,
     _public_control_status,
     _public_requests,
@@ -148,14 +152,20 @@ def create_unified_proxy_app(
     control_asset_dir: Path = CONTROL_ASSET_DIR,
     on_shutdown_requested: Callable[[], None] | None = None,
     update_controller: Any | None = None,
+    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
 ) -> FastAPI:
     profiles = {"codex": codex, "claude": claude}
+    runtime_diagnostics = RuntimeDiagnostics()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        heartbeat_task = asyncio.create_task(_event_loop_heartbeat(runtime_diagnostics))
         try:
             yield
         finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
             closed: set[int] = set()
             for profile in profiles.values():
                 owned_clients = profile.additional_owned_clients
@@ -198,6 +208,7 @@ def create_unified_proxy_app(
             "service": "codex-provider-hub",
             "status": "ok" if configured else "not_configured",
             "active_requests": active_requests,
+            "diagnostics": runtime_diagnostics.snapshot(),
             "services": services,
         }
 
@@ -217,6 +228,7 @@ def create_unified_proxy_app(
             control_asset_dir=control_asset_dir,
             on_shutdown_requested=on_shutdown_requested,
             update_controller=update_controller,
+            runtime_diagnostics=runtime_diagnostics,
         )
 
     @app.api_route(
@@ -255,6 +267,8 @@ def create_unified_proxy_app(
             protocol_adapter=profile.protocol_adapter,
             session_name_resolver=profile.session_name_resolver,
             input_item_id_compatibility_store=profile.input_item_id_compatibility_store,
+            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
         )
 
     return app
@@ -268,6 +282,7 @@ def _register_control_routes(
     control_asset_dir: Path,
     on_shutdown_requested: Callable[[], None] | None,
     update_controller: Any | None = None,
+    runtime_diagnostics: RuntimeDiagnostics | None = None,
 ) -> None:
     def public_status(
         window: str = "today",
@@ -297,6 +312,7 @@ def _register_control_routes(
             service_name=profile.service_name,
             provider_public_fields=profile.provider_public_fields,
             session_name_resolver=profile.session_name_resolver,
+            runtime_diagnostics=runtime_diagnostics,
         )
 
     def public_status_for_request(request: Request) -> dict[str, Any]:
