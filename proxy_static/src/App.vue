@@ -1,21 +1,37 @@
 <template>
-  <div id="app" class="app-container">
-    <Titlebar />
-    <ConnectionStrip />
-    <ViewTabs :activeView="activeView" @changeView="activeView = $event" />
+  <main class="stage">
+    <section class="app-window" aria-label="本地中转控制台">
+      <Titlebar :config="config" />
+      <ConnectionStrip :config="config" />
+      <ViewTabs :active-view="activeView" :request-count="requestCount" :requests-enabled="config.features?.usage_history !== false" @change-view="changeView" />
 
-    <main class="main-content">
-      <ProvidersView v-if="activeView === 'providers'" />
-      <RequestsView v-else-if="activeView === 'requests'" />
-      <SettingsView v-else-if="activeView === 'settings'" />
-      <RuntimeView v-else-if="activeView === 'runtime'" />
-      <MonitorView v-else-if="activeView === 'monitor'" />
-    </main>
-  </div>
+      <ProvidersView v-show="activeView === 'providers'" />
+      <RequestsView v-if="config.features?.usage_history !== false" v-show="activeView === 'requests'" :config="config" @count="requestCount = $event" />
+      <SettingsView v-show="activeView === 'settings'" />
+      <RuntimeView v-show="activeView === 'runtime'" :config="config" />
+      <MonitorView v-show="activeView === 'monitor'" />
+
+      <footer class="footer">
+        <span>{{ footerMessage }}</span>
+        <div class="footer-actions">
+          <button class="text-button" type="button" @click="copyConfig">{{ config.config_button_label || '复制客户端配置' }}</button>
+          <button class="power-button" type="button" title="退出本地中转" @click="shutdownProxy">退出中转</button>
+        </div>
+      </footer>
+      <div class="toast-region" aria-live="polite" aria-atomic="true">
+        <div v-if="toast" class="toast show" :class="{ error: toast.tone === 'error' }">
+          <span class="toast-icon" aria-hidden="true">{{ toast.tone === 'error' ? '!' : '✓' }}</span>
+          <div><strong>{{ toast.title }}</strong><span>{{ toast.detail }}</span></div>
+          <button class="toast-close" type="button" aria-label="关闭通知" @click="toast = null"><UiIcon name="close" /></button>
+        </div>
+      </div>
+    </section>
+  </main>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
+import { controlFetch } from './api.js'
 import Titlebar from './components/Titlebar.vue'
 import ConnectionStrip from './components/ConnectionStrip.vue'
 import ViewTabs from './components/ViewTabs.vue'
@@ -24,14 +40,67 @@ import RequestsView from './components/RequestsView.vue'
 import SettingsView from './components/SettingsView.vue'
 import RuntimeView from './components/RuntimeView.vue'
 import MonitorView from './components/MonitorView.vue'
+import UiIcon from './components/ui/UiIcon.vue'
 
 const activeView = ref('providers')
+const requestCount = ref(0)
+const footerMessage = ref('Key 仅在复制临时启动命令时写入剪贴板，不会显示或写入日志')
+const toast = ref(null)
+const config = ref({ display_name: '本地中转', brand_mark: 'CX', protocol_label: '从 CC Switch 读取供应商，切换后无需重启客户端', features: {} })
 
-onMounted(() => {
-  // Initialize theme from localStorage
-  const savedTheme = localStorage.getItem('local-proxy-theme') || 'system'
-  const dark = savedTheme === 'dark' || (savedTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
-  document.documentElement.dataset.themePreference = savedTheme
+function viewStorageKey() {
+  return `local-proxy-active-view-${config.value.service_id || 'local'}`
+}
+
+function changeView(view) {
+  activeView.value = view
+  localStorage.setItem(viewStorageKey(), view)
+}
+
+function applyTheme(preference) {
+  const dark = preference === 'dark' || (preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+  document.documentElement.dataset.themePreference = preference
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+}
+
+function showToast(title, detail, tone = 'success') {
+  toast.value = { title, detail, tone }
+  window.setTimeout(() => { toast.value = null }, 4200)
+}
+
+async function copyConfig() {
+  try {
+    const payload = await controlFetch(config.value.config_endpoint || '/api/codex-config')
+    const content = typeof payload === 'string' ? payload : (payload.config || payload.content || '')
+    await navigator.clipboard.writeText(content)
+    footerMessage.value = config.value.copy_config_success_detail || '客户端配置已复制'
+    showToast(config.value.copy_config_success_title || '配置已复制', footerMessage.value)
+  } catch (error) {
+    showToast('复制失败', error.message, 'error')
+  }
+}
+
+async function shutdownProxy() {
+  try {
+    await controlFetch('/api/shutdown', { method: 'POST' })
+    footerMessage.value = '本地中转正在退出'
+  } catch (error) {
+    showToast('退出失败', error.message, 'error')
+  }
+}
+
+onMounted(async () => {
+  applyTheme(localStorage.getItem('local-proxy-theme') || 'system')
+  try {
+    config.value = { ...config.value, ...(await controlFetch('/api/ui-config')) }
+    footerMessage.value = config.value.features?.provider_launch_command
+      ? 'Key 仅在复制临时启动命令时写入剪贴板，不会显示或写入日志'
+      : 'Key 不会显示，也不会写入页面或日志'
+    const storedView = localStorage.getItem(viewStorageKey()) || 'providers'
+    activeView.value = storedView === 'requests' && config.value.features?.usage_history === false ? 'providers' : storedView
+    document.title = config.value.display_name || '本地中转'
+  } catch (error) {
+    showToast('界面配置读取失败', error.message, 'error')
+  }
 })
 </script>

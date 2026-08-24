@@ -1,10 +1,11 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import tailwindcss from '@tailwindcss/vite'
 import { resolve } from 'path'
 
-export default defineConfig({
-  base: '/control/codex/static/',
-  plugins: [vue()],
+export default defineConfig(({ command }) => ({
+  base: command === 'serve' ? '/' : '',
+  plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src')
@@ -12,7 +13,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    assetsDir: 'assets',
+    assetsDir: 'static/assets',
     sourcemap: false,
     minify: 'esbuild',
     rollupOptions: {
@@ -31,4 +32,4 @@ export default defineConfig({
       }
     }
   }
-})
+}))

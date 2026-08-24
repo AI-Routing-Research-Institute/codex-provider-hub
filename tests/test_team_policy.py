@@ -283,7 +283,8 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
             self.assertIn("push:", workflow)
             self.assertIn("tags:", workflow)
             self.assertIn("python -m unittest discover", workflow)
-            self.assertIn("node --check proxy_static/app.js", workflow)
+            self.assertIn("node --check proxy_static/src/api.js", workflow)
+            self.assertIn("node --check proxy_static/vite.config.js", workflow)
             self.assertIn("node --check provider_status/static/app.js", workflow)
 
     def test_ruleset_payload_protects_main_without_approvals(self) -> None:

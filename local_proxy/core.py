@@ -38,6 +38,16 @@ CONTROL_ASSET_DIR = Path(__file__).resolve().parents[1] / "proxy_static" / "dist
 MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 RETRY_ERROR_BODY_BYTES = 4 * 1024
 RETRY_ERROR_HISTORY_LIMIT = 5
+
+
+def _resolve_control_asset(asset_dir: Path, asset_name: str) -> Path | None:
+    root = asset_dir.resolve()
+    candidate = (root / asset_name).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 RETRY_ERROR_MESSAGE_CHARS = 220
 RETRY_ERROR_READ_TIMEOUT_SECONDS = 0.25
 INPUT_ITEM_ID_COMPATIBILITY_TTL_SECONDS = 24 * 3600
@@ -2401,11 +2411,14 @@ def create_proxy_app(
         payload = dict(ui_config() if ui_config is not None else _default_ui_config(service_name))
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
-    @app.get("/control/static/{asset_name}", include_in_schema=False)
+    @app.get("/control/static/{asset_name:path}", include_in_schema=False)
     async def control_asset(asset_name: str):
-        if asset_name not in {"app.js", "styles.css"}:
+        asset_path = _resolve_control_asset(control_asset_dir / "static", asset_name)
+        if asset_path is None:
+            asset_path = _resolve_control_asset(control_asset_dir, asset_name)
+        if asset_path is None:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        response = FileResponse(control_asset_dir / asset_name)
+        response = FileResponse(asset_path)
         response.headers["Cache-Control"] = "no-store"
         return response
 

@@ -1,7 +1,0 @@
-/* Tailwind 指令 */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-/* 导入编译后的原始样式 */
-@import '../styles.css';

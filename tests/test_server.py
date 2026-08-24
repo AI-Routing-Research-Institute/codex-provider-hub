@@ -1,4 +1,5 @@
 import asyncio
+import re
 import tempfile
 import threading
 import time
@@ -231,8 +232,22 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         root = await self.client.get("/control/", follow_redirects=False)
         codex_page = await self.client.get("/control/codex/")
         claude_page = await self.client.get("/control/claude/")
-        codex_script = await self.client.get("/control/codex/static/app.js")
-        claude_script = await self.client.get("/control/claude/static/app.js")
+        script_match = re.search(r'src="\./static/(assets/[^"]+\.js)"', codex_page.text)
+        style_match = re.search(r'href="\./static/(assets/[^"]+\.css)"', codex_page.text)
+        self.assertIsNotNone(script_match)
+        self.assertIsNotNone(style_match)
+        codex_script = await self.client.get(
+            f"/control/codex/static/{script_match.group(1)}"
+        )
+        claude_script = await self.client.get(
+            f"/control/claude/static/{script_match.group(1)}"
+        )
+        codex_styles = await self.client.get(
+            f"/control/codex/static/{style_match.group(1)}"
+        )
+        claude_styles = await self.client.get(
+            f"/control/claude/static/{style_match.group(1)}"
+        )
         codex_config = await self.client.get("/control/codex/api/ui-config")
         claude_config = await self.client.get("/control/claude/api/ui-config")
         codex_fragment = await self.client.get("/control/codex/api/codex-config")
@@ -254,7 +269,12 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(root.status_code, 307)
         self.assertEqual(root.headers["location"], "/control/codex/")
         self.assertEqual(codex_page.content, claude_page.content)
+        self.assertEqual(codex_script.status_code, 200)
         self.assertEqual(codex_script.content, claude_script.content)
+        self.assertEqual(codex_styles.status_code, 200)
+        self.assertEqual(codex_styles.content, claude_styles.content)
+        traversal = await self.client.get("/control/codex/static/../index.html")
+        self.assertEqual(traversal.status_code, 404)
         self.assertEqual(codex_config.json()["service_id"], "codex")
         self.assertEqual(claude_config.json()["service_id"], "claude")
         self.assertEqual(codex_config.headers["cache-control"], "no-store")
