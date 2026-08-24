@@ -33,14 +33,18 @@ status = "verified"
 ### 构建与打包
 
 - 添加 `proxy_static/package.json` 和 `vite.config.js` 配置
+- 配置 `base: '/control/codex/static/'` 匹配后端静态资源路由
 - 更新 PyInstaller spec 文件，打包 `proxy_static/dist/` 目录
 - 修改 GitHub Actions 工作流，在打包前执行 `npm ci && npm run build`
+- 添加 `proxy_static/node_modules/` 和 `proxy_static/dist/` 到 .gitignore
 
 ## 验证
 
 - ✅ 开发模式：`cd proxy_static && npm run dev` 可正常访问
 - ✅ 生产构建：`npm run build` 生成 dist/ 目录
 - ✅ 所有原有功能正常：供应商切换、请求历史、主题切换、设置保存
+- ✅ 修复 base 路径配置：设置 `base: '/control/codex/static/'` 匹配后端路由
+- ✅ 添加 node_modules/ 和 dist/ 到 .gitignore
 
 ## 影响范围
 
