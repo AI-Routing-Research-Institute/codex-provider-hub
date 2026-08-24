@@ -26,6 +26,7 @@ from local_proxy.core import (
     TokenUsage,
     UsageCapture,
     UsageStore,
+    UpstreamStreamIdleTimeout,
     RETRY_ERROR_BODY_BYTES,
     _codex_thread_id,
     _inspect_http_400_before_output,
@@ -4110,6 +4111,170 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
         self.assertEqual(history["items"][0]["error_summary"], "客户端取消")
 
+    async def test_idle_timeout_before_first_chunk_retries_and_closes_stream(self) -> None:
+        attempts = 0
+        closed = asyncio.Event()
+
+        class StalledStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    await asyncio.Event().wait()
+                    yield b"unreachable"
+                finally:
+                    closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=StalledStream(),
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0),
+            retry_sleep=no_wait,
+            stream_idle_timeout_seconds=0.01,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await asyncio.wait_for(
+            client.post("/v1/responses", json={"model": "test"}),
+            timeout=1,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertTrue(closed.is_set())
+        self.assertEqual(router.status().active_request_details, ())
+
+    async def test_response_headers_timeout_retries_without_leaving_active_request(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                await asyncio.Event().wait()
+            return httpx.Response(200, content=b"recovered")
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0),
+            retry_sleep=no_wait,
+            upstream_response_headers_timeout_seconds=0.01,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await asyncio.wait_for(
+            client.post("/v1/responses", json={"model": "test"}),
+            timeout=1,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(router.status().active_request_details, ())
+
+    async def test_idle_timeout_after_output_is_recorded_without_replay(self) -> None:
+        attempts = 0
+        closed = asyncio.Event()
+
+        class PartialStalledStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=PartialStalledStream(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            usage_store=usage_store,
+            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0),
+            stream_idle_timeout_seconds=0.01,
+        )
+        route = next(
+            route for route in app.routes
+            if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, receive))
+        iterator = response.body_iterator
+
+        self.assertIn(b"partial", await anext(iterator))
+        with self.assertRaises(UpstreamStreamIdleTimeout):
+            await anext(iterator)
+        await iterator.aclose()
+        await upstream_client.aclose()
+
+        self.assertEqual(attempts, 1)
+        self.assertTrue(closed.is_set())
+        self.assertEqual(router.status().active_request_details, ())
+        history = usage_store.request_history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["error_kind"], "stream_idle_timeout")
+
     async def test_forwards_request_stream_headers_query_and_response(self) -> None:
         observed: dict[str, object] = {}
 
@@ -4312,7 +4477,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="usage-total"', page.text)
         self.assertIn("Token 用量", page.text)
         self.assertIn("styles.css?v=26", page.text)
-        self.assertIn("app.js?v=32", page.text)
+        self.assertIn("app.js?v=33", page.text)
         self.assertIn("<span>请求</span><span>服务器检测</span>", page.text)
         self.assertIn("供应商", page.text)
         self.assertIn("设置会话路由", page.text)
