@@ -349,7 +349,7 @@ def _register_control_routes(
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     async def control_page() -> FileResponse:
-        return FileResponse(control_asset_dir / "index.html")
+        return FileResponse(control_asset_dir / "dist" / "index.html")
 
     async def control_ui_config():
         configured = dict(profile.ui_config() if profile.ui_config is not None else {})
@@ -367,9 +367,17 @@ def _register_control_routes(
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     async def control_asset(asset_name: str):
-        if asset_name not in {"app.js", "styles.css"}:
+        # Serve Vue 3 built assets from dist/assets/
+        if asset_name.startswith("assets/"):
+            asset_path = control_asset_dir / "dist" / asset_name
+        else:
+            # Legacy fallback for backwards compatibility
+            asset_path = control_asset_dir / asset_name
+
+        if not asset_path.exists():
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        response = FileResponse(control_asset_dir / asset_name)
+
+        response = FileResponse(asset_path)
         response.headers["Cache-Control"] = "no-store"
         return response
 

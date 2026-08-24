@@ -34,7 +34,7 @@ except ImportError:  # The desktop installer installs it; keep diagnostics impor
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 17890
 DEFAULT_DATABASE = Path.home() / ".cc-switch" / "cc-switch.db"
-CONTROL_ASSET_DIR = Path(__file__).resolve().parents[1] / "proxy_static"
+CONTROL_ASSET_DIR = Path(__file__).resolve().parents[1] / "proxy_static" / "dist"
 MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 RETRY_ERROR_BODY_BYTES = 4 * 1024
 RETRY_ERROR_HISTORY_LIMIT = 5
