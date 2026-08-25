@@ -180,10 +180,14 @@ def existing_proxy_url(
 
 
 def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
-    asset_names = ("index.html", "app.js", "styles.css")
-    missing_assets = [
-        name for name in asset_names if not (CONTROL_ASSET_DIR / name).is_file()
-    ]
+    missing_assets = []
+    if not (CONTROL_ASSET_DIR / "index.html").is_file():
+        missing_assets.append("index.html")
+    assets_dir = CONTROL_ASSET_DIR / "static" / "assets"
+    if not any(assets_dir.glob("*.js")):
+        missing_assets.append("assets/*.js")
+    if not any(assets_dir.glob("*.css")):
+        missing_assets.append("assets/*.css")
     if missing_assets:
         raise FileNotFoundError(
             "本地中转页面资源缺失：" + "、".join(missing_assets)
@@ -219,7 +223,7 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
             "codex": "/v1/*",
             "claude": ["/v1/messages", "/v1/messages/count_tokens"],
         },
-        "control_asset_count": len(asset_names),
+        "control_asset_count": 3,
         "claude_provider_count": len(claude_providers),
         "claude_compatible_provider_count": sum(
             provider.compatible and provider.has_credentials

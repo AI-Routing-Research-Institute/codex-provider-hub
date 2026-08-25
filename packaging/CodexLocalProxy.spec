@@ -18,7 +18,7 @@ hidden_imports = [
     *collect_submodules("tiktoken_ext"),
 ]
 data_files = [
-    (str(ROOT / "proxy_static"), "proxy_static"),
+    (str(ROOT / "proxy_static" / "dist"), "proxy_static/dist"),
     (str(ROOT / "scripts" / "status_provider_import.py"), "scripts"),
     (str(ROOT / "provider_status" / "config.py"), "status_bootstrap"),
     (str(ROOT / "provider_status" / "claude_probe.py"), "status_bootstrap"),

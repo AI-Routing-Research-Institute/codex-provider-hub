@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -817,8 +818,8 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             page = await client.get("/control/")
-            script = await client.get("/control/static/app.js")
-            styles = await client.get("/control/static/styles.css")
+            script = None
+            styles = None
             ui_config = await client.get("/control/api/ui-config")
             config = await client.get("/control/api/claude-config")
             old_config = await client.get("/control/api/codex-config")
@@ -826,13 +827,21 @@ class ClaudeProxyAppTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertIn("本地中转", page.text)
-        self.assertNotIn("Claude Code 本地中转", page.text)
-        self.assertIn('id="usage-history-popover"', page.text)
-        self.assertIn('id="active-sessions-popover"', page.text)
-        self.assertIn('controlUrl("/api/ui-config")', script.text)
-        self.assertIn('controlUrl("/api/usage-history")', script.text)
-        self.assertIn(".usage-history-popover", styles.text)
-        self.assertIn(".active-sessions-popover", styles.text)
+        script_match = re.search(r'src="\./static/(assets/[^"]+\.js)"', page.text)
+        style_match = re.search(r'href="\./static/(assets/[^"]+\.css)"', page.text)
+        self.assertIsNotNone(script_match)
+        self.assertIsNotNone(style_match)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as asset_client:
+            script = await asset_client.get(f"/control/static/{script_match.group(1)}")
+            styles = await asset_client.get(f"/control/static/{style_match.group(1)}")
+        self.assertEqual(script.status_code, 200)
+        self.assertEqual(styles.status_code, 200)
+        self.assertIn("/api/ui-config", script.text)
+        self.assertIn("/api/requests", script.text)
+        self.assertIn(".request-table-shell", styles.text)
+        self.assertIn(".app-window", styles.text)
         self.assertEqual(ui_config.json()["service_id"], "claude")
         self.assertEqual(ui_config.json()["proxy_url"], "http://127.0.0.1:17890")
         self.assertEqual(

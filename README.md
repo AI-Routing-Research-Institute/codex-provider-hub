@@ -90,7 +90,7 @@ xattr -dr com.apple.quarantine /路径/到/CodexLocalProxy-macos-arm64.app
 
 ### 5. 配置客户端
 
-在两个控制台中分别点击“复制 Codex 配置”和“复制 Claude 配置”，按照下面两节完成一次客户端接入。之后切换供应商不需要重复修改客户端配置。
+在两个控制台中分别点击“导入到 CCS”，按照下面两节将本地中转注册为 Codex 和 Claude Code 供应商。之后切换供应商不需要重复修改客户端配置。
 
 ## 推荐搭配 CC Switch
 
@@ -106,14 +106,14 @@ CC Switch 负责集中维护供应商，本工具负责本地转发、切换、�
 
 ## 配置 Codex
 
-### 通过控制台复制
+### 通过控制台导入 CC Switch
 
 1. 打开 `http://127.0.0.1:17890/control/codex/`。
-2. 点击页面底部“复制 Codex 配置”。
-3. 将片段合并到 `~/.codex/config.toml`。
-4. 第一次配置后重启一次 Codex。
+2. 点击页面底部“导入到 CCS”。
+3. 在 CC Switch 中确认导入名称为“Codex 本地中转”、默认模型为 `gpt-5.6-sol` 的 Codex 供应商。
+4. 在 CC Switch 中切换到该供应商；CC Switch 会更新 Codex 配置。
 
-默认配置片段如下：
+导入后的核心配置等价于：
 
 ```toml
 model_provider = "local_cc_switch"
@@ -127,20 +127,22 @@ requires_openai_auth = true
 
 此后 Codex 始终连接本地地址，网页中选择的新供应商会立即用于新请求，不需要再次修改 `config.toml`。
 
+“导入到 CCS”依赖 CC Switch 的自定义协议处理程序。若浏览器提示 CC Switch 未安装，请先安装或重新注册 CC Switch。指向当前本地中转端口的供应商会被本工具自动排除，不会作为上游再次导入。
+
 ### 临时绕过本地中转
 
 Codex 供应商行中的“复制临时启动命令”会生成一条直接使用该供应商启动 Codex CLI 的单次命令，不修改 `config.toml`。该命令包含供应商认证信息，应按密钥处理，不要放入公共脚本、Issue 或共享终端历史。
 
 ## 配置 Claude Code
 
-### 通过控制台复制
+### 通过控制台导入 CC Switch
 
 1. 打开 `http://127.0.0.1:17890/control/claude/`。
-2. 点击页面底部“复制 Claude 配置”。
-3. 在准备启动 Claude Code 的终端中执行复制出的命令。
-4. 从同一个终端启动 `claude`。
+2. 点击页面底部“导入到 CCS”。
+3. 在 CC Switch 中确认导入的 Claude Code 供应商，地址为 `http://127.0.0.1:17890`。
+4. 在 CC Switch 中切换到该供应商；CC Switch 会更新 Claude Code 配置。
 
-Windows PowerShell 示例：
+等价的 Windows PowerShell 配置为：
 
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17890"
@@ -148,7 +150,7 @@ $env:ANTHROPIC_API_KEY = "local-claude-proxy"
 claude
 ```
 
-macOS/Linux 示例：
+等价的 macOS/Linux 配置为：
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:17890"

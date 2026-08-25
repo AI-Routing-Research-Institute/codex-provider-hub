@@ -34,10 +34,20 @@ except ImportError:  # The desktop installer installs it; keep diagnostics impor
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 17890
 DEFAULT_DATABASE = Path.home() / ".cc-switch" / "cc-switch.db"
-CONTROL_ASSET_DIR = Path(__file__).resolve().parents[1] / "proxy_static"
+CONTROL_ASSET_DIR = Path(__file__).resolve().parents[1] / "proxy_static" / "dist"
 MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 RETRY_ERROR_BODY_BYTES = 4 * 1024
 RETRY_ERROR_HISTORY_LIMIT = 5
+
+
+def _resolve_control_asset(asset_dir: Path, asset_name: str) -> Path | None:
+    root = asset_dir.resolve()
+    candidate = (root / asset_name).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 RETRY_ERROR_MESSAGE_CHARS = 220
 RETRY_ERROR_READ_TIMEOUT_SECONDS = 0.25
 INPUT_ITEM_ID_COMPATIBILITY_TTL_SECONDS = 24 * 3600
@@ -2239,12 +2249,16 @@ def _default_ui_config(service_name: str) -> dict[str, Any]:
         "peer_console_label": "Codex 控制台" if claude else "Claude Code 控制台",
         "peer_console_url": f"http://127.0.0.1:{DEFAULT_PORT}/control/{'codex' if claude else 'claude'}/",
         "config_endpoint": f"/control/api/{'claude' if claude else 'codex'}-config",
-        "config_button_label": f"复制 {client_name} 配置",
+        "config_button_label": "导入到 CCS",
         "config_location_label": "Claude Code 配置位置" if claude else "Codex 配置文件",
-        "config_location_hint": "配置片段用于启动 Claude Code" if claude else "配置片段需要合并到 Codex 配置文件",
+        "config_location_hint": (
+            "“导入到 CCS”会将本地中转注册为 Claude Code 供应商"
+            if claude else
+            "“导入到 CCS”会将本地中转注册为 Codex 供应商"
+        ),
         "data_directory": "~/.codex-local-proxy",
         "config_location": "~/.claude/settings.json" if claude else "~/.codex/config.toml",
-        "restart_config_text": f"端口将在退出并重新启动本地中转后生效；届时需要重新复制 {client_name} 配置。",
+        "restart_config_text": "端口将在退出并重新启动本地中转后生效；届时需要重新导入到 CCS。",
         "copy_config_success_title": f"{client_name} 配置已复制",
         "copy_config_success_detail": "在当前终端运行配置后启动 Claude Code。" if claude else "首次配置后重启一次 Codex，后续切换不再需要重启。",
         "shutdown_client_name": client_name,
@@ -2401,11 +2415,14 @@ def create_proxy_app(
         payload = dict(ui_config() if ui_config is not None else _default_ui_config(service_name))
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
-    @app.get("/control/static/{asset_name}", include_in_schema=False)
+    @app.get("/control/static/{asset_name:path}", include_in_schema=False)
     async def control_asset(asset_name: str):
-        if asset_name not in {"app.js", "styles.css"}:
+        asset_path = _resolve_control_asset(control_asset_dir / "static", asset_name)
+        if asset_path is None:
+            asset_path = _resolve_control_asset(control_asset_dir, asset_name)
+        if asset_path is None:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        response = FileResponse(control_asset_dir / asset_name)
+        response = FileResponse(asset_path)
         response.headers["Cache-Control"] = "no-store"
         return response
 

@@ -1,0 +1,316 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const test = require("node:test");
+const { pathToFileURL } = require("node:url");
+const vm = require("node:vm");
+
+const root = path.join(__dirname, "..", "proxy_static", "src");
+const apiPath = path.join(root, "api.js");
+const apiSource = fs.readFileSync(apiPath, "utf8");
+const ccSwitchPath = path.join(root, "ccswitch.js");
+const ccSwitchSource = fs.readFileSync(ccSwitchPath, "utf8");
+
+function loadApi(pathname, fetchImpl = async () => new Response("{}", {
+  headers: { "Content-Type": "application/json" },
+}), windowOverrides = {}) {
+  const source = apiSource.replaceAll("export ", "");
+  const context = vm.createContext({
+    AbortController,
+    Headers,
+    Response,
+    fetch: fetchImpl,
+    window: {
+      location: { pathname },
+      setTimeout,
+      clearTimeout,
+      ...windowOverrides,
+    },
+  });
+  vm.runInContext(
+    `${source}\nthis.api = { controlBase, controlUrl, controlFetch, jsonOptions };`,
+    context,
+    { filename: apiPath },
+  );
+  return context.api;
+}
+
+function loadCcSwitch() {
+  const source = ccSwitchSource.replaceAll("export ", "");
+  const context = vm.createContext({ URLSearchParams });
+  vm.runInContext(
+    `${source}\nthis.ccSwitch = { DEFAULT_CC_SWITCH_CODEX_MODEL, LOCAL_PROXY_PLACEHOLDER_KEYS, buildCcSwitchImportDeeplink };`,
+    context,
+    { filename: ccSwitchPath },
+  );
+  return context.ccSwitch;
+}
+
+test("builds a CC Switch Codex import deeplink for the local proxy", () => {
+  const ccSwitch = loadCcSwitch();
+  const deeplink = ccSwitch.buildCcSwitchImportDeeplink({
+    serviceId: "codex",
+    endpoint: "http://127.0.0.1:17890/v1/",
+    homepage: "http://127.0.0.1:17890",
+    providerName: "Codex 本地中转",
+  });
+  const params = new URLSearchParams(deeplink.split("?")[1]);
+
+  assert.equal(deeplink.split("?")[0], "ccswitch://v1/import");
+  assert.equal(params.get("resource"), "provider");
+  assert.equal(params.get("app"), "codex");
+  assert.equal(params.get("model"), "gpt-5.6-sol");
+  assert.equal(params.get("name"), "Codex 本地中转");
+  assert.equal(params.get("homepage"), "http://127.0.0.1:17890");
+  assert.equal(params.get("endpoint"), "http://127.0.0.1:17890/v1");
+  assert.equal(params.get("apiKey"), "local-codex-proxy");
+  assert.equal(params.get("configFormat"), "json");
+  assert.equal(params.has("usageScript"), false);
+});
+
+test("builds a CC Switch Claude import deeplink without forcing a model", () => {
+  const ccSwitch = loadCcSwitch();
+  const deeplink = ccSwitch.buildCcSwitchImportDeeplink({
+    serviceId: "claude",
+    endpoint: "http://127.0.0.1:17890/",
+    homepage: "http://127.0.0.1:17890",
+    providerName: "Claude Code 本地中转",
+  });
+  const params = new URLSearchParams(deeplink.split("?")[1]);
+
+  assert.equal(params.get("app"), "claude");
+  assert.equal(params.get("endpoint"), "http://127.0.0.1:17890");
+  assert.equal(params.get("apiKey"), "local-claude-proxy");
+  assert.equal(params.has("model"), false);
+});
+
+test("derives service-specific API bases and supports the Vite root", () => {
+  assert.equal(loadApi("/control/codex/").controlBase, "/control/codex");
+  assert.equal(loadApi("/control/claude/").controlBase, "/control/claude");
+  assert.equal(loadApi("/").controlBase, "/control/codex");
+  assert.equal(loadApi("/control/claude/").controlUrl("api/status"), "/control/claude/api/status");
+  assert.equal(
+    loadApi("/control/codex/").controlUrl("/control/codex/api/codex-config"),
+    "/control/codex/api/codex-config",
+  );
+});
+
+test("sends the local control header and returns JSON", async () => {
+  let observed;
+  const api = loadApi("/control/codex/", async (url, options) => {
+    observed = { url, options };
+    return new Response('{"status":"ok"}', {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  const payload = await api.controlFetch("/api/status", { method: "POST" });
+
+  assert.equal(payload.status, "ok");
+  assert.equal(observed.url, "/control/codex/api/status");
+  assert.equal(observed.options.cache, "no-store");
+  assert.equal(observed.options.headers.get("X-Local-Proxy-Control"), "1");
+});
+
+test("surfaces backend error details", async () => {
+  const api = loadApi("/control/codex/", async () => new Response(
+    '{"detail":"供应商不存在"}',
+    { status: 404, headers: { "Content-Type": "application/json" } },
+  ));
+
+  await assert.rejects(() => api.controlFetch("/api/providers/missing"), /供应商不存在/);
+});
+
+test("bounds control requests and reports stalled local proxy responses", async () => {
+  let observed;
+  const api = loadApi(
+    "/control/codex/",
+    async (url, options) => {
+      observed = { url, options };
+      if (options.signal.aborted) {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        throw error;
+      }
+      return new Response("{}", { headers: { "Content-Type": "application/json" } });
+    },
+    { setTimeout: callback => { callback(); return 1; }, clearTimeout: () => {} },
+  );
+
+  await assert.rejects(
+    () => api.controlFetch("/api/status"),
+    /本地中转响应超时，请检查服务是否卡住/,
+  );
+  assert.equal(observed.options.signal.aborted, true);
+  assert.match(apiSource, /const CONTROL_REQUEST_TIMEOUT_MS = 8_000/);
+});
+
+test("Vue views use the shared API helper and clean up polling timers", () => {
+  const files = [
+    "App.vue",
+    "components/ConnectionStrip.vue",
+    "components/ProvidersView.vue",
+    "components/RequestsView.vue",
+    "components/SettingsView.vue",
+    "components/RuntimeView.vue",
+    "components/MonitorView.vue",
+  ];
+  const sources = files.map(file => fs.readFileSync(path.join(root, file), "utf8"));
+
+  for (const source of sources) {
+    assert.match(source, /controlFetch/);
+    assert.doesNotMatch(source, /fetch\(['"]\/control\//);
+  }
+  for (const index of [1, 2, 3]) {
+    assert.match(sources[index], /onBeforeUnmount/);
+    assert.match(sources[index], /window\.clearInterval\(timer\)/);
+  }
+});
+
+test("provider launch command visibility follows the saved runtime setting", () => {
+  const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  const runtime = fs.readFileSync(path.join(root, "components", "RuntimeView.vue"), "utf8");
+
+  assert.match(app, /<ProvidersView[^>]*:show-launch-command="showProviderLaunchCommand"/);
+  assert.match(app, /<RuntimeView[^>]*@launch-command-visibility-change="showProviderLaunchCommand = \$event"/);
+  assert.match(runtime, /defineEmits\(\['launch-command-visibility-change'\]\)/);
+  assert.match(runtime, /emit\('launch-command-visibility-change', settings\.value\.show_provider_launch_command !== false\)/);
+  assert.match(providers, /provider_launch_command !== false && props\.showLaunchCommand/);
+});
+
+test("shared time range selector uses day precision and stays anchored", async () => {
+  const selector = fs.readFileSync(path.join(root, "components", "TimeRangeSelect.vue"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  const range = await import(pathToFileURL(path.join(root, "timeRange.js")));
+  const start = new Date(2026, 7, 24).getTime();
+  const end = new Date(2026, 7, 25).getTime();
+  assert.deepEqual(range.preciseRange("2026-08-24", "00:00:00", "2026-08-25", "00:00:00"), { startAt: start, endAt: end });
+  assert.deepEqual(range.preciseRange("2026-08-24", "12:30:00", "2026-08-24", "13:45:15"), { startAt: new Date(2026, 7, 24, 12, 30).getTime(), endAt: new Date(2026, 7, 24, 13, 45, 15).getTime() });
+  assert.match(selector, /type="date" aria-label="开始日期"/);
+  assert.match(selector, /type="date" aria-label="结束日期"/);
+  assert.match(selector, /type="time" step="1" aria-label="开始时间"/);
+  assert.match(selector, /type="time" step="1" aria-label="结束时间"/);
+  assert.match(selector, /pendingValue/);
+  assert.match(selector, /dateEdited/);
+  assert.match(selector, /startTime\.value = dates\.startTime/);
+  assert.match(selector, /endTime\.value = dates\.endTime/);
+  assert.match(selector, /if \(usesPreset\) \{[\s\S]*emit\('change', pendingValue\.value\)/);
+  assert.match(selector, /preciseRange\(startDate\.value, startTime\.value, endDate\.value, endTime\.value\)/);
+  assert.match(styles, /\.time-range-select\s*\{[^}]*position:\s*relative/s);
+  assert.match(styles, /\.time-range-select-menu\s*\{[^}]*position:\s*absolute[^}]*top:\s*calc\(100% \+ 6px\)[^}]*left:\s*0/s);
+  assert.match(styles, /\.request-filters \.time-range-custom-fields input\s*\{[^}]*min-width:\s*0[^}]*box-sizing:\s*border-box/s);
+  assert.match(selector, /closest\('\.request-filters, \.toolbar-actions'\)/);
+});
+
+test("Vue templates preserve the original desktop console structure", () => {
+  const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  const requests = fs.readFileSync(path.join(root, "components", "RequestsView.vue"), "utf8");
+  const settings = fs.readFileSync(path.join(root, "components", "SettingsView.vue"), "utf8");
+  const select = fs.readFileSync(path.join(root, "components", "ui", "UiSelect.vue"), "utf8");
+  const icon = fs.readFileSync(path.join(root, "components", "ui", "UiIcon.vue"), "utf8");
+  const brandIcon = fs.readFileSync(path.join(root, "components", "ui", "BrandIcon.vue"), "utf8");
+  const titlebar = fs.readFileSync(path.join(root, "components", "Titlebar.vue"), "utf8");
+  const connectionStrip = fs.readFileSync(path.join(root, "components", "ConnectionStrip.vue"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+
+  assert.match(app, /class="stage"/);
+  assert.match(app, /class="app-window"/);
+  assert.match(app, /<footer class="footer">\s*<ConnectionStrip :config="config" \/>/);
+  assert.match(app, /class="primary-button ccs-import-button"[^>]*@click="importToCcSwitch"><UiIcon name="upload"/);
+  assert.match(app, /serviceId: config\.value\.service_id/);
+  assert.match(app, /buildCcSwitchImportDeeplink/);
+  assert.doesNotMatch(app, /footerMessage|Key 仅在复制临时启动命令时写入剪贴板/);
+  assert.match(connectionStrip, /固定连接/);
+  assert.match(connectionStrip, /本机可用/);
+  assert.match(connectionStrip, /数据来源/);
+  assert.match(providers, /class="workspace view-panel"/);
+  assert.match(providers, /class="provider-pane"/);
+  assert.match(providers, /class="routing-panel"/);
+  assert.match(providers, /class="usage-summary"/);
+  assert.match(providers, /class="provider-list-shell"/);
+  assert.match(requests, /class="request-table-header"/);
+  assert.match(requests, /class="request-row"/);
+  assert.ok(providers.indexOf('class="search"') < providers.indexOf('class="time-window-control usage-window-wrap"'));
+  assert.ok(requests.indexOf('class="request-search"') < requests.indexOf('request-window-control'));
+  assert.match(settings, /UiSelect/);
+  assert.match(select, /role="listbox"/);
+  assert.match(select, /@keydown="onTriggerKeydown"/);
+  assert.match(icon, /viewBox="0 0 24 24"/);
+  assert.match(icon, /upload:/);
+  assert.match(titlebar, /<BrandIcon :service-id="config\.service_id" :brand-mark="config\.brand_mark"/);
+  assert.doesNotMatch(titlebar, /\{\{ config\.brand_mark/);
+  assert.doesNotMatch(titlebar, /中转运行中|仅监听本机|class="live-switch"/);
+  assert.match(brandIcon, /brand === 'claude'/);
+  assert.match(brandIcon, /serviceId\.toLowerCase\(\) === 'claude'/);
+  assert.match(brandIcon, /brandMark\.toUpperCase\(\) === 'CC'/);
+  assert.match(brandIcon, /viewBox="0 0 16 16"/);
+  assert.match(brandIcon, /viewBox="0 0 24 24"/);
+  assert.doesNotMatch(providers, /<select\b/);
+  assert.doesNotMatch(requests, /<select\b/);
+  assert.doesNotMatch(settings, /<select\b/);
+  assert.match(providers, /TimeRangeSelect/);
+  assert.match(requests, /TimeRangeSelect/);
+  assert.doesNotMatch(providers, /TimeRangePopover|time-range-edit/);
+  assert.doesNotMatch(requests, /TimeRangePopover|time-range-edit/);
+  assert.doesNotMatch(providers, /value: 'custom', label:/);
+  assert.doesNotMatch(requests, /value: 'custom', label:/);
+  assert.match(requests, /params\.set\('start_at'/);
+  assert.match(requests, /params\.set\('end_at'/);
+  assert.match(styles, /\.stage\s*\{[^}]*width:\s*100%[^}]*min-height:\s*100vh[^}]*min-height:\s*100dvh/s);
+  assert.match(styles, /\.app-window\s*\{[^}]*width:\s*100%[^}]*height:\s*100vh[^}]*height:\s*100dvh/s);
+  assert.match(styles, /\.app-window\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto/s);
+  assert.doesNotMatch(styles, /\.app-window\s*\{[^}]*width:\s*min\(1440px, 100%\)/s);
+  assert.match(styles, /\.workspace\s*\{[^}]*grid-template-columns:\s*minmax\(520px, 1fr\) 340px/s);
+  assert.match(styles, /--provider-grid-columns:/);
+  assert.match(styles, /--request-columns:/);
+  assert.match(styles, /\.request-filters\s*\{[^}]*grid-template-columns:\s*minmax\(220px, 1fr\) 176px 130px minmax\(170px, 220px\)/s);
+  assert.match(styles, /scrollbar-gutter:\s*stable/);
+  assert.match(styles, /@media\s*\(max-width:\s*860px\)[\s\S]*\.workspace\s*\{\s*grid-template-columns:\s*1fr;/s);
+  assert.match(styles, /--control-radius:\s*12px/);
+  assert.match(styles, /--control-surface:\s*#ffffff/);
+  assert.match(styles, /:root\[data-theme="dark"\][\s\S]*--control-surface:\s*#1b3047/);
+  assert.match(styles, /\.ui-select-trigger\s*\{[^}]*background:\s*var\(--control-surface\)[^}]*box-shadow:\s*var\(--control-shadow\)/s);
+  assert.match(styles, /\.ui-select-menu\s*\{[^}]*border:\s*1px solid var\(--line-strong\)[^}]*background:\s*var\(--control-surface\)/s);
+  assert.match(styles, /\.secondary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.secondary-button\s*\{[^}]*background:\s*var\(--control-surface\)/s);
+  assert.match(styles, /\.primary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.ccs-import-button\s*\{[^}]*display:\s*inline-flex[^}]*gap:\s*7px/s);
+  assert.match(styles, /\.power-button\s*\{[^}]*min-height:\s*34px[^}]*padding:\s*5px 13px[^}]*font-size:\s*13px/s);
+  assert.match(styles, /\.icon-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)[^}]*background:\s*var\(--control-surface\)/s);
+  assert.match(styles, /\.search input\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.time-range-edit\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.provider-row\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
+  assert.match(styles, /\.settings-form\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
+  assert.match(styles, /\.settings-form\.update-panel\s*\{[^}]*margin-top:\s*10px/s);
+  assert.match(styles, /\.brand-icon\s*\{[^}]*width:\s*24px[^}]*height:\s*24px/s);
+  assert.match(styles, /--font-body:\s*13px/);
+  assert.match(styles, /--font-meta:\s*12px/);
+  assert.match(styles, /\.time-range-heading strong\s*\{[^}]*font-size:\s*16px/s);
+  assert.match(styles, /\.time-range-heading span\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
+  assert.match(styles, /\.time-range-fields legend\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
+  assert.match(styles, /\.time-range-fields input\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
+  assert.match(styles, /\.auth-label\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
+  assert.match(styles, /\.request-table-header\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
+  assert.match(styles, /\.request-row\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
+
+  const smallFontSizes = styles.match(/font-size:\s*(?:9|10|11)px/g) ?? [];
+  assert.equal(smallFontSizes.length, 2);
+  assert.match(styles, /\.view-tab-count\s*\{[^}]*font-size:\s*9px/s);
+  assert.match(styles, /\.provider-token-detail-icon\s*\{[^}]*font-size:\s*9px/s);
+});
+
+test("Vue request view preserves upstream phase and timeout labels", () => {
+  const api = fs.readFileSync(apiPath, "utf8");
+  const requests = fs.readFileSync(path.join(root, "components", "RequestsView.vue"), "utf8");
+  assert.match(api, /本地中转响应超时，请检查服务是否卡住/);
+  assert.match(requests, /connecting: '连接上游'/);
+  assert.match(requests, /waiting_first_chunk: '等待首包'/);
+  assert.match(requests, /receiving: '接收中'/);
+  assert.match(requests, /connection_timeout: '等待上游响应超时'/);
+  assert.match(requests, /stream_idle_timeout: '上游长时间无数据'/);
+});

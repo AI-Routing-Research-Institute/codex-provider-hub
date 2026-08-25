@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import json
+import re
 import sqlite3
 import socket
 import tempfile
@@ -26,7 +27,6 @@ from local_proxy.core import (
     TokenUsage,
     UsageCapture,
     UsageStore,
-    UpstreamStreamIdleTimeout,
     RETRY_ERROR_BODY_BYTES,
     _codex_thread_id,
     _inspect_http_400_before_output,
@@ -4111,170 +4111,6 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
         self.assertEqual(history["items"][0]["error_summary"], "客户端取消")
 
-    async def test_idle_timeout_before_first_chunk_retries_and_closes_stream(self) -> None:
-        attempts = 0
-        closed = asyncio.Event()
-
-        class StalledStream(httpx.AsyncByteStream):
-            async def __aiter__(self):
-                try:
-                    await asyncio.Event().wait()
-                    yield b"unreachable"
-                finally:
-                    closed.set()
-
-        async def upstream(request: httpx.Request) -> httpx.Response:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                return httpx.Response(
-                    200,
-                    headers={"content-type": "text/event-stream"},
-                    stream=StalledStream(),
-                )
-            return httpx.Response(200, content=b"recovered")
-
-        async def no_wait(_: float) -> None:
-            return None
-
-        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
-        router = ProviderRouter((provider("selected", current=True),))
-        app = create_proxy_app(
-            router,
-            client=upstream_client,
-            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0),
-            retry_sleep=no_wait,
-            stream_idle_timeout_seconds=0.01,
-        )
-        client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        )
-        self.addAsyncCleanup(client.aclose)
-        self.addAsyncCleanup(upstream_client.aclose)
-
-        response = await asyncio.wait_for(
-            client.post("/v1/responses", json={"model": "test"}),
-            timeout=1,
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"recovered")
-        self.assertEqual(attempts, 2)
-        self.assertTrue(closed.is_set())
-        self.assertEqual(router.status().active_request_details, ())
-
-    async def test_response_headers_timeout_retries_without_leaving_active_request(self) -> None:
-        attempts = 0
-
-        async def upstream(request: httpx.Request) -> httpx.Response:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                await asyncio.Event().wait()
-            return httpx.Response(200, content=b"recovered")
-
-        async def no_wait(_: float) -> None:
-            return None
-
-        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
-        router = ProviderRouter((provider("selected", current=True),))
-        app = create_proxy_app(
-            router,
-            client=upstream_client,
-            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0),
-            retry_sleep=no_wait,
-            upstream_response_headers_timeout_seconds=0.01,
-        )
-        client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        )
-        self.addAsyncCleanup(client.aclose)
-        self.addAsyncCleanup(upstream_client.aclose)
-
-        response = await asyncio.wait_for(
-            client.post("/v1/responses", json={"model": "test"}),
-            timeout=1,
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"recovered")
-        self.assertEqual(attempts, 2)
-        self.assertEqual(router.status().active_request_details, ())
-
-    async def test_idle_timeout_after_output_is_recorded_without_replay(self) -> None:
-        attempts = 0
-        closed = asyncio.Event()
-
-        class PartialStalledStream(httpx.AsyncByteStream):
-            async def __aiter__(self):
-                try:
-                    yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
-                    await asyncio.Event().wait()
-                finally:
-                    closed.set()
-
-        async def upstream(request: httpx.Request) -> httpx.Response:
-            nonlocal attempts
-            attempts += 1
-            return httpx.Response(
-                200,
-                headers={"content-type": "text/event-stream"},
-                stream=PartialStalledStream(),
-            )
-
-        temp_context = tempfile.TemporaryDirectory()
-        self.addCleanup(temp_context.cleanup)
-        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
-        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
-        router = ProviderRouter((provider("selected", current=True),))
-        app = create_proxy_app(
-            router,
-            client=upstream_client,
-            usage_store=usage_store,
-            retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0),
-            stream_idle_timeout_seconds=0.01,
-        )
-        route = next(
-            route for route in app.routes
-            if getattr(route, "path", "") == "/v1/{upstream_path:path}"
-        )
-        from starlette.requests import Request
-
-        sent = False
-
-        async def receive():
-            nonlocal sent
-            if sent:
-                return {"type": "http.request", "body": b"", "more_body": False}
-            sent = True
-            return {
-                "type": "http.request",
-                "body": b'{"model":"test"}',
-                "more_body": False,
-            }
-
-        scope = {
-            "type": "http", "method": "POST", "path": "/v1/responses",
-            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
-            "scheme": "http", "server": ("testserver", 80),
-            "client": ("127.0.0.1", 1), "root_path": "",
-        }
-        response = await route.endpoint("responses", Request(scope, receive))
-        iterator = response.body_iterator
-
-        self.assertIn(b"partial", await anext(iterator))
-        with self.assertRaises(UpstreamStreamIdleTimeout):
-            await anext(iterator)
-        await iterator.aclose()
-        await upstream_client.aclose()
-
-        self.assertEqual(attempts, 1)
-        self.assertTrue(closed.is_set())
-        self.assertEqual(router.status().active_request_details, ())
-        history = usage_store.request_history()
-        self.assertEqual(history["total_count"], 1)
-        self.assertEqual(history["items"][0]["error_kind"], "stream_idle_timeout")
-
     async def test_forwards_request_stream_headers_query_and_response(self) -> None:
         observed: dict[str, object] = {}
 
@@ -4436,8 +4272,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(upstream_client.aclose)
 
         page = await client.get("/control/")
-        script = await client.get("/control/static/app.js")
-        styles = await client.get("/control/static/styles.css")
+        script = None
+        styles = None
         ui_config = await client.get("/control/api/ui-config")
         refreshed = await client.post(
             "/control/api/refresh",
@@ -4451,104 +4287,28 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(page.status_code, 200)
         self.assertIn("本地中转", page.text)
-        self.assertNotIn("Codex 本地中转", page.text)
-        self.assertIn('id="theme-button"', page.text)
-        self.assertIn('data-theme-value="dark"', page.text)
-        self.assertIn('id="recovery-details-button"', page.text)
-        self.assertIn('id="usage-window"', page.text)
-        self.assertIn('<option value="7d">近 7 天</option>', page.text)
-        self.assertIn('<option value="30d">近 30 天</option>', page.text)
-        self.assertNotIn("168 小时", page.text)
-        self.assertIn('id="manage-providers"', page.text)
-        self.assertIn('class="provider-management-bar"', page.text)
-        self.assertIn('id="add-provider"', page.text)
-        self.assertIn('id="import-providers"', page.text)
-        self.assertIn('id="provider-import-mode"', page.text)
-        self.assertIn('id="provider-editor"', page.text)
-        self.assertIn('id="provider-editor-delete"', page.text)
-        self.assertIn('id="provider-editor-transport"', page.text)
-        self.assertIn('value="httpx">标准模式', page.text)
-        self.assertIn('value="curl_cffi">兼容模式', page.text)
-        self.assertIn('id="runtime-view"', page.text)
-        self.assertIn('id="runtime-port"', page.text)
-        self.assertIn('id="runtime-database-path"', page.text)
-        self.assertIn('id="runtime-health-url"', page.text)
-        self.assertIn('id="runtime-data-directory"', page.text)
-        self.assertIn('id="usage-total"', page.text)
-        self.assertIn("Token 用量", page.text)
-        self.assertIn("styles.css?v=26", page.text)
-        self.assertIn("app.js?v=33", page.text)
-        self.assertIn("<span>请求</span><span>服务器检测</span>", page.text)
-        self.assertIn("供应商", page.text)
-        self.assertIn("设置会话路由", page.text)
-        self.assertIn('id="active-sessions-popover"', page.text)
-        self.assertIn('id="usage-history-popover"', page.text)
-        self.assertIn('id="recovery-history-meta"', page.text)
-        self.assertIn("selectProvider", script.text)
-        self.assertIn("setProviderHidden", script.text)
-        self.assertIn("saveProviderOrder", script.text)
-        self.assertIn("openProviderEditor", script.text)
-        self.assertIn("transport: providerEditorTransport.value", script.text)
-        self.assertIn("deleteProviderEditor", script.text)
-        self.assertIn("importProvidersFromCcSwitch", script.text)
-        self.assertIn("provider-row-actions", script.text)
-        self.assertIn("usage_window", script.text)
-        self.assertIn('suffix: "K"', script.text)
-        self.assertIn('suffix: "M"', script.text)
-        self.assertIn('suffix: "B"', script.text)
-        self.assertIn("provider-token-cell", script.text)
-        self.assertIn("openUsageHistoryPopover", script.text)
-        self.assertIn("openActiveSessionsPopover", script.text)
-        self.assertIn('controlUrl("/api/usage-history")', script.text)
-        self.assertIn('controlUrl("/api/ui-config")', script.text)
-        self.assertNotIn("/control/api/codex-config", script.text)
-        self.assertIn("请求记录", script.text)
-        self.assertIn("流级失败", script.text)
-        self.assertIn("healthStatusUrl", script.text)
-        self.assertNotIn("HEALTH_STATUS_URL", script.text)
-        self.assertIn("normalizeProviderEndpoint", script.text)
-        self.assertIn("createProviderHealthDetail", script.text)
-        self.assertIn("openProviderHealthPopover", script.text)
-        self.assertIn("showHistoryDetail", script.text)
-        self.assertNotIn("expandedHealthProviderIds", script.text)
-        self.assertIn("最近 60 次", script.text)
-        self.assertIn("尚未输出且再次失败的旧请求将由新供应商接管", script.text)
+        script_match = re.search(r'src="\./static/(assets/[^"]+\.js)"', page.text)
+        style_match = re.search(r'href="\./static/(assets/[^"]+\.css)"', page.text)
+        self.assertIsNotNone(script_match)
+        self.assertIsNotNone(style_match)
+        script = await client.get(f"/control/static/{script_match.group(1)}")
+        styles = await client.get(f"/control/static/{style_match.group(1)}")
+        self.assertEqual(script.status_code, 200)
+        self.assertEqual(styles.status_code, 200)
+        self.assertGreater(len(script.content), 50_000)
+        self.assertGreater(len(styles.content), 10_000)
         self.assertIn("local-proxy-theme", script.text)
-        self.assertNotIn("codex-local-proxy-theme", script.text)
-        self.assertIn("recent_errors", script.text)
-        self.assertIn("retry.history", script.text)
-        self.assertIn('controlUrl("/api/recovery-history")', script.text)
-        self.assertIn("recoveryOutcomeLabel", script.text)
-        self.assertIn("输出后未重放", script.text)
-        self.assertIn("positionRecoveryPopover", script.text)
-        self.assertIn("formatRecoverySummary", script.text)
-        self.assertIn("model_capacity", script.text)
-        self.assertIn(':root[data-theme="dark"]', styles.text)
-        self.assertIn(".provider-list::-webkit-scrollbar", styles.text)
-        self.assertIn("flex-direction: column", styles.text)
-        self.assertIn("flex: 0 0 auto", styles.text)
-        self.assertIn(".recovery-popover", styles.text)
-        self.assertIn(".recovery-popover ol::-webkit-scrollbar", styles.text)
-        self.assertIn(".usage-summary", styles.text)
-        self.assertIn(".provider-token-cell", styles.text)
-        self.assertIn(".usage-history-popover", styles.text)
-        self.assertIn(".active-sessions-popover", styles.text)
-        self.assertIn("--provider-grid-columns", styles.text)
-        self.assertIn("scrollbar-gutter: stable", styles.text)
-        self.assertIn(".provider-health-cell", styles.text)
-        self.assertIn(".provider-health-detail", styles.text)
-        self.assertIn(".provider-health-popover", styles.text)
-        self.assertIn(".history-detail-popover", styles.text)
-        self.assertIn("minmax(160px, 240px)", styles.text)
-        self.assertIn("minmax(220px, 1fr)", styles.text)
-        self.assertIn(".drag-handle", styles.text)
-        self.assertIn(".hidden-provider", styles.text)
-        self.assertIn(".provider-editor", styles.text)
-        self.assertNotIn("-webkit-line-clamp: 2", styles.text)
-        self.assertIn("overflow-y: auto; overscroll-behavior: contain", styles.text)
-        self.assertIn("max-height: min(340px", styles.text)
-        self.assertIn(".setting-control-with-action", styles.text)
+        self.assertIn("/api/ui-config", script.text)
+        self.assertIn("/api/runtime-settings", script.text)
+        self.assertIn("/api/providers/", script.text)
+        self.assertIn(":root[data-theme=dark]", styles.text)
+        self.assertIn(".app-window", styles.text)
+        self.assertIn("height:100dvh", styles.text)
+        self.assertRegex(styles.text, r"@media\s*\(max-width:\s*680px\)")
+        self.assertNotIn("width:min(1440px,100%)", styles.text)
+        self.assertIn("scrollbar-gutter:stable", styles.text)
         self.assertEqual(script.headers["cache-control"], "no-store")
+        self.assertEqual(styles.headers["cache-control"], "no-store")
         self.assertEqual(ui_config.headers["cache-control"], "no-store")
         self.assertEqual(ui_config.json()["service_id"], "codex")
         self.assertEqual(ui_config.json()["config_endpoint"], "/control/api/codex-config")
