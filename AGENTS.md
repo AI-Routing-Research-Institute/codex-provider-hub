@@ -34,7 +34,7 @@ python scripts/team_policy.py install-hooks
 - Agent 必须创建或更新 PR、填写功能说明和验证证据，并尝试启用 auto-merge（当前规则集未开放 `allow_auto_merge`，启用失败属预期）。
 - PR 阶段不运行 CI，PR 不要求人工审批、无 required status checks；合并仅要求 PR 存在且无冲突。
 - 完整测试（Python 单测、JS 语法检查、JS 测试）在 release tag 时由 `windows-release.yml` / `macos-release.yml` 全量执行并阻塞发布。
-- 合并一律使用 `gh pr merge --squash` 以 PR 的最新准确 head SHA 执行，合并后验证目标提交；禁止使用分支名、旧 SHA、模糊 ref 或无 SHA 合并，禁止绕过门禁直接改动远端。
+- 合并使用 squash 方式（`gh pr merge --squash` 或网页 Squash and merge 均可，不强制 gh CLI），以 PR 的最新准确 head SHA 执行，合并后验证目标提交；禁止使用分支名、旧 SHA、模糊 ref 或无 SHA 合并，禁止绕过门禁直接改动远端。
 
 ## 自动版本与自动发版
 
