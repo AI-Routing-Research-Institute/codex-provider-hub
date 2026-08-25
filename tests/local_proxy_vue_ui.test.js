@@ -9,6 +9,8 @@ const vm = require("node:vm");
 const root = path.join(__dirname, "..", "proxy_static", "src");
 const apiPath = path.join(root, "api.js");
 const apiSource = fs.readFileSync(apiPath, "utf8");
+const ccSwitchPath = path.join(root, "ccswitch.js");
+const ccSwitchSource = fs.readFileSync(ccSwitchPath, "utf8");
 
 function loadApi(pathname, fetchImpl = async () => new Response("{}", {
   headers: { "Content-Type": "application/json" },
@@ -33,6 +35,55 @@ function loadApi(pathname, fetchImpl = async () => new Response("{}", {
   );
   return context.api;
 }
+
+function loadCcSwitch() {
+  const source = ccSwitchSource.replaceAll("export ", "");
+  const context = vm.createContext({ URLSearchParams });
+  vm.runInContext(
+    `${source}\nthis.ccSwitch = { DEFAULT_CC_SWITCH_CODEX_MODEL, LOCAL_PROXY_PLACEHOLDER_KEYS, buildCcSwitchImportDeeplink };`,
+    context,
+    { filename: ccSwitchPath },
+  );
+  return context.ccSwitch;
+}
+
+test("builds a CC Switch Codex import deeplink for the local proxy", () => {
+  const ccSwitch = loadCcSwitch();
+  const deeplink = ccSwitch.buildCcSwitchImportDeeplink({
+    serviceId: "codex",
+    endpoint: "http://127.0.0.1:17890/v1/",
+    homepage: "http://127.0.0.1:17890",
+    providerName: "Codex 本地中转",
+  });
+  const params = new URLSearchParams(deeplink.split("?")[1]);
+
+  assert.equal(deeplink.split("?")[0], "ccswitch://v1/import");
+  assert.equal(params.get("resource"), "provider");
+  assert.equal(params.get("app"), "codex");
+  assert.equal(params.get("model"), "gpt-5.6-sol");
+  assert.equal(params.get("name"), "Codex 本地中转");
+  assert.equal(params.get("homepage"), "http://127.0.0.1:17890");
+  assert.equal(params.get("endpoint"), "http://127.0.0.1:17890/v1");
+  assert.equal(params.get("apiKey"), "local-codex-proxy");
+  assert.equal(params.get("configFormat"), "json");
+  assert.equal(params.has("usageScript"), false);
+});
+
+test("builds a CC Switch Claude import deeplink without forcing a model", () => {
+  const ccSwitch = loadCcSwitch();
+  const deeplink = ccSwitch.buildCcSwitchImportDeeplink({
+    serviceId: "claude",
+    endpoint: "http://127.0.0.1:17890/",
+    homepage: "http://127.0.0.1:17890",
+    providerName: "Claude Code 本地中转",
+  });
+  const params = new URLSearchParams(deeplink.split("?")[1]);
+
+  assert.equal(params.get("app"), "claude");
+  assert.equal(params.get("endpoint"), "http://127.0.0.1:17890");
+  assert.equal(params.get("apiKey"), "local-claude-proxy");
+  assert.equal(params.has("model"), false);
+});
 
 test("derives service-specific API bases and supports the Vite root", () => {
   assert.equal(loadApi("/control/codex/").controlBase, "/control/codex");
@@ -133,6 +184,9 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(app, /class="stage"/);
   assert.match(app, /class="app-window"/);
   assert.match(app, /<footer class="footer">\s*<ConnectionStrip :config="config" \/>/);
+  assert.match(app, /class="primary-button ccs-import-button"[^>]*@click="importToCcSwitch"><UiIcon name="upload"/);
+  assert.match(app, /serviceId: config\.value\.service_id/);
+  assert.match(app, /buildCcSwitchImportDeeplink/);
   assert.doesNotMatch(app, /footerMessage|Key 仅在复制临时启动命令时写入剪贴板/);
   assert.match(connectionStrip, /固定连接/);
   assert.match(connectionStrip, /本机可用/);
@@ -150,6 +204,7 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(select, /role="listbox"/);
   assert.match(select, /@keydown="onTriggerKeydown"/);
   assert.match(icon, /viewBox="0 0 24 24"/);
+  assert.match(icon, /upload:/);
   assert.match(titlebar, /<BrandIcon :service-id="config\.service_id" :brand-mark="config\.brand_mark"/);
   assert.doesNotMatch(titlebar, /\{\{ config\.brand_mark/);
   assert.doesNotMatch(titlebar, /中转运行中|仅监听本机|class="live-switch"/);
@@ -184,6 +239,8 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /\.secondary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
   assert.match(styles, /\.secondary-button\s*\{[^}]*background:\s*var\(--control-surface\)/s);
   assert.match(styles, /\.primary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.ccs-import-button\s*\{[^}]*display:\s*inline-flex[^}]*gap:\s*7px/s);
+  assert.match(styles, /\.power-button\s*\{[^}]*min-height:\s*34px[^}]*padding:\s*5px 13px[^}]*font-size:\s*13px/s);
   assert.match(styles, /\.icon-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)[^}]*background:\s*var\(--control-surface\)/s);
   assert.match(styles, /\.search input\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
   assert.match(styles, /\.time-range-edit\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);

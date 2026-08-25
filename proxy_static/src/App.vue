@@ -13,7 +13,7 @@
       <footer class="footer">
         <ConnectionStrip :config="config" />
         <div class="footer-actions">
-          <button class="text-button" type="button" @click="copyConfig">{{ config.config_button_label || '复制客户端配置' }}</button>
+          <button class="primary-button ccs-import-button" type="button" @click="importToCcSwitch"><UiIcon name="upload" />{{ config.config_button_label || '导入到 CCS' }}</button>
           <button class="power-button" type="button" title="退出本地中转" @click="shutdownProxy">退出中转</button>
         </div>
       </footer>
@@ -31,6 +31,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { controlFetch } from './api.js'
+import { buildCcSwitchImportDeeplink } from './ccswitch.js'
 import Titlebar from './components/Titlebar.vue'
 import ConnectionStrip from './components/ConnectionStrip.vue'
 import ViewTabs from './components/ViewTabs.vue'
@@ -66,15 +67,20 @@ function showToast(title, detail, tone = 'success') {
   window.setTimeout(() => { toast.value = null }, 4200)
 }
 
-async function copyConfig() {
+function importToCcSwitch() {
   try {
-    const payload = await controlFetch(config.value.config_endpoint || '/api/codex-config')
-    const content = typeof payload === 'string' ? payload : (payload.config || payload.content || '')
-    await navigator.clipboard.writeText(content)
-    const detail = config.value.copy_config_success_detail || '客户端配置已复制'
-    showToast(config.value.copy_config_success_title || '配置已复制', detail)
+    const deeplink = buildCcSwitchImportDeeplink({
+      serviceId: config.value.service_id,
+      endpoint: config.value.proxy_url,
+      homepage: window.location.origin,
+      providerName: config.value.display_name || 'Codex Provider Hub'
+    })
+    window.open(deeplink, '_self')
+    window.setTimeout(() => {
+      if (document.hasFocus()) showToast('导入失败', 'CC Switch 未安装或协议处理程序未注册。', 'error')
+    }, 100)
   } catch (error) {
-    showToast('复制失败', error.message, 'error')
+    showToast('导入失败', error.message, 'error')
   }
 }
 

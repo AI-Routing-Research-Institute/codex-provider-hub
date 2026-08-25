@@ -90,7 +90,7 @@ Then open the Claude Code control panel. Claude Code providers continue to come 
 
 ### 5. Configure clients
 
-In the two control panels, use **Copy Codex config** and **Copy Claude config**, then follow the next two sections to connect each client once. Future provider switches do not require client configuration changes.
+Use **Import to CCS** in both control panels, then follow the next two sections to register the local proxy as Codex and Claude Code providers. Future provider switches do not require client configuration changes.
 
 ## Recommended with CC Switch
 
@@ -106,14 +106,14 @@ You can add a small number of Codex providers directly in management mode. CC Sw
 
 ## Configure Codex
 
-### Copy from the control panel
+### Import through CC Switch
 
 1. Open `http://127.0.0.1:17890/control/codex/`.
-2. Select **Copy Codex config** at the bottom of the page.
-3. Merge the copied snippet into `~/.codex/config.toml`.
-4. Restart Codex once after the first configuration.
+2. Select **Import to CCS** at the bottom of the page.
+3. In CC Switch, confirm the imported Codex provider named **Codex 本地中转** with `gpt-5.6-sol` as its default model.
+4. Switch to that provider in CC Switch. CC Switch updates the Codex configuration.
 
-The default snippet is:
+The imported provider is equivalent to this core configuration:
 
 ```toml
 model_provider = "local_cc_switch"
@@ -127,20 +127,22 @@ requires_openai_auth = true
 
 Codex now always connects to the local address. A provider selected in the browser is used immediately for new requests, without another `config.toml` change.
 
+**Import to CCS** requires the CC Switch custom-protocol handler. If the browser reports that CC Switch is unavailable, install or re-register CC Switch first. Providers that point back to the current local proxy port are automatically excluded from this tool's upstream catalog.
+
 ### Temporarily bypass the local proxy
 
 **Copy temporary launch command** on a Codex provider row produces a one-time command that starts the Codex CLI with that provider directly, without changing `config.toml`. The command contains provider credentials. Treat it as a secret and do not place it in public scripts, issues, or shared terminal history.
 
 ## Configure Claude Code
 
-### Copy from the control panel
+### Import through CC Switch
 
 1. Open `http://127.0.0.1:17890/control/claude/`.
-2. Select **Copy Claude config** at the bottom of the page.
-3. Run the copied command in the terminal where you will start Claude Code.
-4. Start `claude` from the same terminal.
+2. Select **Import to CCS** at the bottom of the page.
+3. In CC Switch, confirm the imported Claude Code provider with `http://127.0.0.1:17890` as its endpoint.
+4. Switch to that provider in CC Switch. CC Switch updates the Claude Code configuration.
 
-Windows PowerShell example:
+Equivalent Windows PowerShell configuration:
 
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:17890"
@@ -148,7 +150,7 @@ $env:ANTHROPIC_API_KEY = "local-claude-proxy"
 claude
 ```
 
-macOS/Linux example:
+Equivalent macOS/Linux configuration:
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:17890"

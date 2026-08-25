@@ -1125,8 +1125,9 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .footer .connection-value:first-child { flex: 0 1 auto; }
 .footer .connection-value.database { flex: 1 1 auto; }
 .footer-actions { flex: 0 0 auto; gap: 14px; }
+.ccs-import-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; }
 .text-button { padding: 5px 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; }
-.power-button { min-height: 30px; padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--muted); font-size: 12px; box-shadow: var(--control-shadow); }
+.power-button { min-height: 34px; padding: 5px 13px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--muted); font-size: 13px; box-shadow: var(--control-shadow); }
 .power-button:hover { border-color: var(--red); color: var(--red); }
 
 .toast-region {
