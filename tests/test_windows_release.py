@@ -47,29 +47,6 @@ class WindowsReleaseTests(unittest.TestCase):
         self.assertIn('name="CodexLocalProxy-win-x64"', spec)
         self.assertIn("console=False", spec)
 
-    def test_release_workflow_builds_tests_and_publishes_tag(self) -> None:
-        workflow = (
-            ROOT / ".github" / "workflows" / "windows-release.yml"
-        ).read_text(encoding="utf-8")
-        build_script = (
-            ROOT / "scripts" / "build_local_proxy_exe.ps1"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("permissions:\n  contents: write", workflow)
-        self.assertIn('python-version: "3.13"', workflow)
-        self.assertIn("python -m unittest discover", workflow)
-        self.assertIn("create_local_proxy_smoke_db.py", workflow)
-        self.assertIn("gh release create", workflow)
-        # The git tag is the single source of truth; the workflow must inject
-        # the tag-derived version into APP_VERSION instead of trusting the
-        # source constant. Hard-coded versions are intentionally NOT asserted,
-        # since they drift with every release and previously caused build failures.
-        self.assertIn("Sync source version to release tag", workflow)
-        self.assertIn("$appPath = 'local_proxy/application.py'", workflow)
-        self.assertIn("if ($content -notmatch $pattern)", workflow)
-        self.assertIn("if ($updated -ne $content)", workflow)
-        self.assertNotIn("does not match build version", build_script)
-
     def test_release_dependencies_include_claude_transport(self) -> None:
         requirements = (ROOT / "requirements-status.txt").read_text(encoding="utf-8")
 

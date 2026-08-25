@@ -6,7 +6,7 @@
     </div>
     <div class="request-filters" aria-label="请求筛选">
       <label class="request-search"><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off" @input="scheduleSearch" /></label>
-      <div class="time-window-control request-window-control"><UiSelect v-model="windowName" aria-label="时间范围" :options="requestWindowOptions" @change="loadRequests" /><button class="time-range-edit" type="button" title="设置自定义请求时间" aria-label="设置自定义请求时间" @click="openCustomRange"><UiIcon name="calendar" /></button></div>
+      <TimeRangeSelect v-model="windowName" class="request-window-control" aria-label="时间范围" title="时间范围" :options="requestWindowOptions" :initial-range="customRange" @change="loadRequests" @apply="applyCustomRange" />
       <UiSelect v-model="statusFilter" aria-label="请求状态" :options="statusOptions" @change="loadRequests" />
       <UiSelect v-model="providerFilter" aria-label="供应商" :options="providerOptions" @change="loadRequests" />
     </div>
@@ -29,7 +29,6 @@
       <button v-if="nextCursor" class="usage-history-more" type="button" @click="loadMore">加载更早记录</button>
     </div>
 
-    <TimeRangePopover :open="customRangeOpen" title="自定义请求时间" :initial-range="customRange" @close="closeCustomRange" @apply="applyCustomRange" />
 
     <div v-if="routePopover" class="session-route-popover" style="top: 120px; left: max(12px, calc(50vw - 190px));">
       <div class="session-route-heading"><strong>设置会话路由</strong><button class="usage-history-close" type="button" aria-label="关闭会话路由设置" @click="routePopover = false"><UiIcon name="close" /></button></div>
@@ -43,7 +42,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { controlFetch, jsonOptions } from '../api.js'
-import TimeRangePopover from './TimeRangePopover.vue'
+import TimeRangeSelect from './TimeRangeSelect.vue'
 import UiSelect from './ui/UiSelect.vue'
 import UiIcon from './ui/UiIcon.vue'
 defineProps({ config: { type: Object, required: true } })
@@ -54,7 +53,6 @@ const providers = ref([])
 const totalCount = ref(0)
 const nextCursor = ref(null)
 const windowName = ref(localStorage.getItem('local-proxy-request-window') || '24h')
-const customRangeOpen = ref(false)
 const customRange = ref(null)
 const statusFilter = ref('all')
 const providerFilter = ref('')
@@ -67,7 +65,7 @@ const selectedSession = ref('')
 const selectedRoute = ref('')
 let timer
 let searchTimer
-const requestWindowOptions = [{ value: '1h', label: '近 1 小时' }, { value: '6h', label: '近 6 小时' }, { value: '24h', label: '近 24 小时' }, { value: '7d', label: '近 7 天' }, { value: 'custom', label: '自定义时间…' }]
+const requestWindowOptions = [{ value: '1h', label: '近 1 小时' }, { value: '6h', label: '近 6 小时' }, { value: '24h', label: '近 24 小时' }, { value: '7d', label: '近 7 天' }]
 const statusOptions = [{ value: 'all', label: '全部状态' }, { value: 'running', label: '运行中' }, { value: 'succeeded', label: '成功' }, { value: 'failed', label: '失败' }]
 const combinedItems = computed(() => [...activeItems.value, ...historyItems.value])
 const providerNames = computed(() => new Map(providers.value.map(provider => [provider.provider_id, provider.name])))
@@ -101,7 +99,7 @@ function requestParams(includeCursor = false) {
 }
 async function loadRequests() {
   if (loading.value) return
-  if (windowName.value === 'custom' && !customRange.value) { customRangeOpen.value = true; return }
+  if (windowName.value === 'custom' && !customRange.value) return
   loading.value = true; error.value = ''; localStorage.setItem('local-proxy-request-window', windowName.value)
   try {
     const params = requestParams()
@@ -110,9 +108,7 @@ async function loadRequests() {
   } catch (requestError) { error.value = requestError.message } finally { loading.value = false }
 }
 async function loadMore() { if (!nextCursor.value) return; const payload = await controlFetch(`/api/requests?${requestParams(true)}`); historyItems.value.push(...(payload.items || [])); nextCursor.value = payload.next_cursor || null }
-function openCustomRange() { customRangeOpen.value = true }
-function closeCustomRange() { customRangeOpen.value = false; if (!customRange.value && windowName.value === 'custom') windowName.value = '24h' }
-function applyCustomRange(range) { customRange.value = range; windowName.value = 'custom'; customRangeOpen.value = false; loadRequests() }
+function applyCustomRange(range) { customRange.value = range; windowName.value = 'custom'; loadRequests() }
 async function openSessionRoutes() { routePopover.value = true; try { const payload = await controlFetch('/api/sessions'); sessions.value = Array.isArray(payload) ? payload : (payload.items || payload.sessions || []) } catch (requestError) { error.value = requestError.message } }
 async function saveSessionRoute() { if (!selectedSession.value) return; await controlFetch(`/api/session-routes/${encodeURIComponent(selectedSession.value)}`, jsonOptions('POST', { provider_id: selectedRoute.value || null })) }
 onMounted(() => { loadRequests(); timer = window.setInterval(loadRequests, 5000) })

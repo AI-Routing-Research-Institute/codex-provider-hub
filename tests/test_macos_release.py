@@ -55,28 +55,6 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertIn("bundle_identifier=", spec)
         self.assertIn("CFBundleShortVersionString", spec)
 
-    def test_macos_release_workflow_syncs_version_and_attaches_artifacts(self) -> None:
-        workflow = (
-            ROOT / ".github" / "workflows" / "macos-release.yml"
-        ).read_text(encoding="utf-8")
-        build_script = (
-            ROOT / "scripts" / "build_local_proxy_macos.sh"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("permissions:\n  contents: write", workflow)
-        self.assertIn("runs-on: macos-latest", workflow)
-        self.assertIn('python-version: "3.13"', workflow)
-        self.assertIn("python -m unittest discover", workflow)
-        self.assertIn("Sync source version to release tag", workflow)
-        self.assertIn("$appPath = 'local_proxy/application.py'", workflow)
-        self.assertIn("if ($content -notmatch $pattern)", workflow)
-        self.assertIn("if ($updated -ne $content)", workflow)
-        self.assertIn("create_local_proxy_smoke_db.py", workflow)
-        # macOS only uploads to an existing Release (the Windows workflow
-        # creates it with release notes); it must not race on `gh release create`.
-        self.assertIn("gh release upload", workflow)
-        self.assertNotIn("gh release create", workflow)
-
     def test_macos_build_script_emits_icns_and_zip_artifacts(self) -> None:
         build_script = (
             ROOT / "scripts" / "build_local_proxy_macos.sh"

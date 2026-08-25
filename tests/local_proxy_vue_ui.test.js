@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { pathToFileURL } = require("node:url");
 const vm = require("node:vm");
 
 const root = path.join(__dirname, "..", "proxy_static", "src");
@@ -169,6 +170,42 @@ test("Vue views use the shared API helper and clean up polling timers", () => {
   }
 });
 
+test("provider launch command visibility follows the saved runtime setting", () => {
+  const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  const runtime = fs.readFileSync(path.join(root, "components", "RuntimeView.vue"), "utf8");
+
+  assert.match(app, /<ProvidersView[^>]*:show-launch-command="showProviderLaunchCommand"/);
+  assert.match(app, /<RuntimeView[^>]*@launch-command-visibility-change="showProviderLaunchCommand = \$event"/);
+  assert.match(runtime, /defineEmits\(\['launch-command-visibility-change'\]\)/);
+  assert.match(runtime, /emit\('launch-command-visibility-change', settings\.value\.show_provider_launch_command !== false\)/);
+  assert.match(providers, /provider_launch_command !== false && props\.showLaunchCommand/);
+});
+
+test("shared time range selector uses day precision and stays anchored", async () => {
+  const selector = fs.readFileSync(path.join(root, "components", "TimeRangeSelect.vue"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  const range = await import(pathToFileURL(path.join(root, "timeRange.js")));
+  const start = new Date(2026, 7, 24).getTime();
+  const end = new Date(2026, 7, 25).getTime();
+  assert.deepEqual(range.preciseRange("2026-08-24", "00:00:00", "2026-08-25", "00:00:00"), { startAt: start, endAt: end });
+  assert.deepEqual(range.preciseRange("2026-08-24", "12:30:00", "2026-08-24", "13:45:15"), { startAt: new Date(2026, 7, 24, 12, 30).getTime(), endAt: new Date(2026, 7, 24, 13, 45, 15).getTime() });
+  assert.match(selector, /type="date" aria-label="开始日期"/);
+  assert.match(selector, /type="date" aria-label="结束日期"/);
+  assert.match(selector, /type="time" step="1" aria-label="开始时间"/);
+  assert.match(selector, /type="time" step="1" aria-label="结束时间"/);
+  assert.match(selector, /pendingValue/);
+  assert.match(selector, /dateEdited/);
+  assert.match(selector, /startTime\.value = dates\.startTime/);
+  assert.match(selector, /endTime\.value = dates\.endTime/);
+  assert.match(selector, /if \(usesPreset\) \{[\s\S]*emit\('change', pendingValue\.value\)/);
+  assert.match(selector, /preciseRange\(startDate\.value, startTime\.value, endDate\.value, endTime\.value\)/);
+  assert.match(styles, /\.time-range-select\s*\{[^}]*position:\s*relative/s);
+  assert.match(styles, /\.time-range-select-menu\s*\{[^}]*position:\s*absolute[^}]*top:\s*calc\(100% \+ 6px\)[^}]*left:\s*0/s);
+  assert.match(styles, /\.request-filters \.time-range-custom-fields input\s*\{[^}]*min-width:\s*0[^}]*box-sizing:\s*border-box/s);
+  assert.match(selector, /closest\('\.request-filters, \.toolbar-actions'\)/);
+});
+
 test("Vue templates preserve the original desktop console structure", () => {
   const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
@@ -199,7 +236,7 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(requests, /class="request-table-header"/);
   assert.match(requests, /class="request-row"/);
   assert.ok(providers.indexOf('class="search"') < providers.indexOf('class="time-window-control usage-window-wrap"'));
-  assert.ok(requests.indexOf('class="request-search"') < requests.indexOf('class="time-window-control request-window-control"'));
+  assert.ok(requests.indexOf('class="request-search"') < requests.indexOf('request-window-control'));
   assert.match(settings, /UiSelect/);
   assert.match(select, /role="listbox"/);
   assert.match(select, /@keydown="onTriggerKeydown"/);
@@ -216,9 +253,12 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.doesNotMatch(providers, /<select\b/);
   assert.doesNotMatch(requests, /<select\b/);
   assert.doesNotMatch(settings, /<select\b/);
-  assert.match(requests, /TimeRangePopover/);
-  assert.match(requests, /@click="openCustomRange"/);
-  assert.match(requests, /value: 'custom', label: '自定义时间/);
+  assert.match(providers, /TimeRangeSelect/);
+  assert.match(requests, /TimeRangeSelect/);
+  assert.doesNotMatch(providers, /TimeRangePopover|time-range-edit/);
+  assert.doesNotMatch(requests, /TimeRangePopover|time-range-edit/);
+  assert.doesNotMatch(providers, /value: 'custom', label:/);
+  assert.doesNotMatch(requests, /value: 'custom', label:/);
   assert.match(requests, /params\.set\('start_at'/);
   assert.match(requests, /params\.set\('end_at'/);
   assert.match(styles, /\.stage\s*\{[^}]*width:\s*100%[^}]*min-height:\s*100vh[^}]*min-height:\s*100dvh/s);
@@ -246,6 +286,7 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /\.time-range-edit\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
   assert.match(styles, /\.provider-row\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
   assert.match(styles, /\.settings-form\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
+  assert.match(styles, /\.settings-form\.update-panel\s*\{[^}]*margin-top:\s*10px/s);
   assert.match(styles, /\.brand-icon\s*\{[^}]*width:\s*24px[^}]*height:\s*24px/s);
   assert.match(styles, /--font-body:\s*13px/);
   assert.match(styles, /--font-meta:\s*12px/);
