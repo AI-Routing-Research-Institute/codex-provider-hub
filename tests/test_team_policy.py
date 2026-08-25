@@ -254,6 +254,8 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
             self.assertIn("禁止", content)
             self.assertNotIn("tests-windows", content)
             self.assertNotIn("tests-macos", content)
+        self.assertIn("不强制 gh CLI", agents)
+        self.assertIn("gh CLI not required", skill)
         self.assertIn("PR 阶段不运行 CI", agents)
         self.assertIn("release tag", agents)
         self.assertIn("本地测试未运行或失败", agents)
