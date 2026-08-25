@@ -316,9 +316,9 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   max-height: 240px;
   overflow-y: auto;
   padding: 4px 0;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 12px;
-  background: var(--canvas);
+  background: var(--control-surface);
   box-shadow: var(--shadow);
 }
 .ui-select-option {
