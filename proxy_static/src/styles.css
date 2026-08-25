@@ -37,6 +37,8 @@
   --danger-border: #e2aaa6;
   --danger-text: #8f3732;
   --shadow: 0 12px 30px rgb(24 55 84 / 10%);
+  --control-surface: #ffffff;
+  --control-shadow: 0 1px 2px rgb(24 55 84 / 8%);
   --control-radius: 12px;
   --panel-radius: 12px;
 }
@@ -67,6 +69,8 @@
   --danger-border: #91504d;
   --danger-text: #ffc0bb;
   --shadow: 0 18px 48px rgb(0 0 0 / 42%);
+  --control-surface: #1b3047;
+  --control-shadow: 0 1px 2px rgb(0 0 0 / 22%);
 }
 
 * { box-sizing: border-box; }
@@ -175,9 +179,10 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   place-items: center;
   border: 1px solid var(--line-strong);
   border-radius: var(--control-radius);
-  background: var(--surface);
+  background: var(--control-surface);
   color: var(--text);
   font-size: 18px;
+  box-shadow: var(--control-shadow);
 }
 .theme-button:hover, .theme-button:focus-visible, .theme-button[aria-expanded="true"] { border-color: var(--teal); color: var(--teal); outline: none; }
 .theme-menu {
@@ -289,12 +294,13 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   justify-content: space-between;
   gap: 8px;
   padding: 0 14px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 12px;
-  background: var(--canvas);
+  background: var(--control-surface);
   color: var(--text);
   font-size: 13px;
   text-align: left;
+  box-shadow: var(--control-shadow);
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
 .ui-select-trigger:hover { border-color: var(--line-strong); }
@@ -346,7 +352,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .provider-editor-field .ui-select { width: 100%; }
 .session-route-field .ui-select { width: 100%; }
 .setting-row > .ui-select { width: 190px; justify-self: end; }
-.time-range-edit { width: 34px; height: 36px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--surface); color: var(--muted); font-size: 14px; }
+.time-range-edit { width: 34px; height: 36px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--muted); font-size: 14px; box-shadow: var(--control-shadow); }
 .time-range-edit:hover, .time-range-edit:focus-visible, .time-range-edit.active { border-color: var(--teal); color: var(--teal); outline: none; }
 .time-range-label { color: var(--teal); white-space: nowrap; }
 .secondary-button {
@@ -354,10 +360,11 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   padding: 0 10px;
   border: 1px solid var(--line-strong);
   border-radius: var(--control-radius);
-  background: var(--surface);
+  background: var(--control-surface);
   color: var(--text);
   font-size: 11px;
   font-weight: 700;
+  box-shadow: var(--control-shadow);
 }
 .secondary-button:hover, .secondary-button:focus-visible, .secondary-button[aria-pressed="true"] { border-color: var(--teal); color: var(--teal); outline: none; }
 .provider-management-bar {
@@ -416,9 +423,10 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   place-items: center;
   border: 1px solid var(--line-strong);
   border-radius: var(--control-radius);
-  background: var(--surface);
+  background: var(--control-surface);
   color: var(--text);
   font-size: 17px;
+  box-shadow: var(--control-shadow);
 }
 .icon-button:hover, .icon-button:focus-visible { border-color: var(--teal); color: var(--teal); outline: none; }
 
@@ -539,10 +547,11 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   padding: 2px 7px;
   border: 1px solid var(--line);
   border-radius: var(--control-radius);
-  background: var(--surface-soft);
+  background: var(--control-surface);
   color: var(--muted);
   font-size: 10px;
   white-space: nowrap;
+  box-shadow: var(--control-shadow);
 }
 .copy-command:hover, .copy-command:focus-visible { border-color: var(--teal); color: var(--teal); outline: none; }
 .copy-command:disabled { cursor: not-allowed; opacity: .5; }
@@ -574,7 +583,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .monitor-state.degraded, .monitor-state.down { color: var(--red); }
 .monitor-state.unknown { color: var(--muted); }
 .monitor-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.monitor-controls button { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--surface); color: var(--text); cursor: pointer; }
+.monitor-controls button { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--text); box-shadow: var(--control-shadow); cursor: pointer; }
 .monitor-controls button:hover { border-color: var(--hover-border); }
 @media (max-width: 680px) { .monitor-row { grid-template-columns: 1fr; } .monitor-controls { justify-content: flex-start; } }
 .provider-copy code { display: block; margin-top: 5px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -773,7 +782,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .usage-source-badge { background: var(--teal-soft); color: var(--teal); }
 .usage-source-badge.estimated { background: var(--amber-soft); color: var(--amber); }
 .usage-history-empty { padding: 32px 8px; color: var(--muted); font-size: 11px; text-align: center; }
-.usage-history-more { margin: 0 14px 12px; padding: 7px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--surface-soft); color: var(--teal); font-size: 10px; }
+.usage-history-more { margin: 0 14px 12px; padding: 7px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--teal); font-size: 10px; box-shadow: var(--control-shadow); }
 .usage-history-more:hover, .usage-history-more:focus-visible { border-color: var(--teal); outline: none; }
 .usage-history-more:disabled { color: var(--muted); cursor: wait; }
 .provider-meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
@@ -784,7 +793,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .drag-handle { color: var(--muted); font-size: 13px; letter-spacing: -4px; cursor: grab; user-select: none; }
 .provider-row.dragging .drag-handle { cursor: grabbing; }
 .provider-row-actions { display: flex; align-items: center; gap: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
-.provider-action-button { min-width: 38px; height: 26px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: transparent; color: var(--teal); font-size: 10px; }
+.provider-action-button { min-width: 38px; height: 26px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--teal); font-size: 10px; box-shadow: var(--control-shadow); }
 .provider-action-button:hover, .provider-action-button:focus-visible { border-color: var(--teal); background: var(--teal-soft); outline: none; }
 .visibility-button:disabled { cursor: not-allowed; opacity: .42; }
 .active-badge {
@@ -1115,7 +1124,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .footer { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 9px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .footer-actions { gap: 14px; }
 .text-button { padding: 5px 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; }
-.power-button { min-height: 30px; padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--surface); color: var(--muted); font-size: 12px; }
+.power-button { min-height: 30px; padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--muted); font-size: 12px; box-shadow: var(--control-shadow); }
 .power-button:hover { border-color: var(--red); color: var(--red); }
 
 .toast-region {

@@ -158,9 +158,13 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /scrollbar-gutter:\s*stable/);
   assert.match(styles, /@media\s*\(max-width:\s*860px\)[\s\S]*\.workspace\s*\{\s*grid-template-columns:\s*1fr;/s);
   assert.match(styles, /--control-radius:\s*12px/);
+  assert.match(styles, /--control-surface:\s*#ffffff/);
+  assert.match(styles, /:root\[data-theme="dark"\][\s\S]*--control-surface:\s*#1b3047/);
+  assert.match(styles, /\.ui-select-trigger\s*\{[^}]*background:\s*var\(--control-surface\)[^}]*box-shadow:\s*var\(--control-shadow\)/s);
   assert.match(styles, /\.secondary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.secondary-button\s*\{[^}]*background:\s*var\(--control-surface\)/s);
   assert.match(styles, /\.primary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
-  assert.match(styles, /\.icon-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.icon-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)[^}]*background:\s*var\(--control-surface\)/s);
   assert.match(styles, /\.search input\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
   assert.match(styles, /\.time-range-edit\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
   assert.match(styles, /\.provider-row\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
