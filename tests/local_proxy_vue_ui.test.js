@@ -161,6 +161,7 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /--control-surface:\s*#ffffff/);
   assert.match(styles, /:root\[data-theme="dark"\][\s\S]*--control-surface:\s*#1b3047/);
   assert.match(styles, /\.ui-select-trigger\s*\{[^}]*background:\s*var\(--control-surface\)[^}]*box-shadow:\s*var\(--control-shadow\)/s);
+  assert.match(styles, /\.ui-select-menu\s*\{[^}]*border:\s*1px solid var\(--line-strong\)[^}]*background:\s*var\(--control-surface\)/s);
   assert.match(styles, /\.secondary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
   assert.match(styles, /\.secondary-button\s*\{[^}]*background:\s*var\(--control-surface\)/s);
   assert.match(styles, /\.primary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
