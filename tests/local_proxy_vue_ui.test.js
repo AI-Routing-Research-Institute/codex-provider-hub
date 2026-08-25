@@ -152,6 +152,14 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /--request-columns:/);
   assert.match(styles, /scrollbar-gutter:\s*stable/);
   assert.match(styles, /@media\s*\(max-width:\s*860px\)[\s\S]*\.workspace\s*\{\s*grid-template-columns:\s*1fr;/s);
+  assert.match(styles, /--control-radius:\s*12px/);
+  assert.match(styles, /\.secondary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.primary-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.icon-button\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.search input\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.time-range-edit\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
+  assert.match(styles, /\.provider-row\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
+  assert.match(styles, /\.settings-form\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
 });
 
 test("Vue request view preserves upstream phase and timeout labels", () => {
