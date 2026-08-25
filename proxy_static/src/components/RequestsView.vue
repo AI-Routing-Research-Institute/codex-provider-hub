@@ -5,7 +5,7 @@
       <div class="requests-heading-actions"><button v-if="config.features?.session_routing" class="icon-button" type="button" title="设置会话路由" aria-label="设置会话路由" @click="openSessionRoutes"><UiIcon name="settings" /></button><button class="icon-button" type="button" title="刷新请求记录" aria-label="刷新请求记录" @click="loadRequests"><UiIcon name="refresh" /></button></div>
     </div>
     <div class="request-filters" aria-label="请求筛选">
-      <div class="time-window-control request-window-control"><UiSelect v-model="windowName" aria-label="时间范围" :options="requestWindowOptions" @change="loadRequests" /><button class="time-range-edit" type="button" title="设置自定义请求时间" aria-label="设置自定义请求时间"><UiIcon name="calendar" /></button></div>
+      <div class="time-window-control request-window-control"><UiSelect v-model="windowName" aria-label="时间范围" :options="requestWindowOptions" @change="loadRequests" /><button class="time-range-edit" type="button" title="设置自定义请求时间" aria-label="设置自定义请求时间" @click="openCustomRange"><UiIcon name="calendar" /></button></div>
       <UiSelect v-model="statusFilter" aria-label="请求状态" :options="statusOptions" @change="loadRequests" />
       <UiSelect v-model="providerFilter" aria-label="供应商" :options="providerOptions" @change="loadRequests" />
       <label class="request-search"><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off" @input="scheduleSearch" /></label>
@@ -29,6 +29,8 @@
       <button v-if="nextCursor" class="usage-history-more" type="button" @click="loadMore">加载更早记录</button>
     </div>
 
+    <TimeRangePopover :open="customRangeOpen" title="自定义请求时间" :initial-range="customRange" @close="closeCustomRange" @apply="applyCustomRange" />
+
     <div v-if="routePopover" class="session-route-popover" style="top: 120px; left: max(12px, calc(50vw - 190px));">
       <div class="session-route-heading"><strong>设置会话路由</strong><button class="usage-history-close" type="button" aria-label="关闭会话路由设置" @click="routePopover = false"><UiIcon name="close" /></button></div>
       <label class="session-route-field"><span>会话</span><UiSelect v-model="selectedSession" aria-label="会话" :options="sessionOptions" /></label>
@@ -41,6 +43,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { controlFetch, jsonOptions } from '../api.js'
+import TimeRangePopover from './TimeRangePopover.vue'
 import UiSelect from './ui/UiSelect.vue'
 import UiIcon from './ui/UiIcon.vue'
 defineProps({ config: { type: Object, required: true } })
@@ -51,6 +54,8 @@ const providers = ref([])
 const totalCount = ref(0)
 const nextCursor = ref(null)
 const windowName = ref(localStorage.getItem('local-proxy-request-window') || '24h')
+const customRangeOpen = ref(false)
+const customRange = ref(null)
 const statusFilter = ref('all')
 const providerFilter = ref('')
 const query = ref('')
@@ -62,7 +67,7 @@ const selectedSession = ref('')
 const selectedRoute = ref('')
 let timer
 let searchTimer
-const requestWindowOptions = [{ value: '1h', label: '近 1 小时' }, { value: '6h', label: '近 6 小时' }, { value: '24h', label: '近 24 小时' }, { value: '7d', label: '近 7 天' }]
+const requestWindowOptions = [{ value: '1h', label: '近 1 小时' }, { value: '6h', label: '近 6 小时' }, { value: '24h', label: '近 24 小时' }, { value: '7d', label: '近 7 天' }, { value: 'custom', label: '自定义时间…' }]
 const statusOptions = [{ value: 'all', label: '全部状态' }, { value: 'running', label: '运行中' }, { value: 'succeeded', label: '成功' }, { value: 'failed', label: '失败' }]
 const combinedItems = computed(() => [...activeItems.value, ...historyItems.value])
 const providerNames = computed(() => new Map(providers.value.map(provider => [provider.provider_id, provider.name])))
@@ -83,8 +88,31 @@ function reasoningLabel(value) { return ({ low: '低', medium: '中', high: '高
 function durationLabel(item) { const value = requestState(item) === 'running' ? Date.now() - timestamp(item.started_at) : item.duration_ms; if (value == null) return '—'; return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms` }
 function resultLabel(item) { if (requestState(item) === 'running') return runningResultLabel(item); if (item.succeeded) return item.status_code ? `HTTP ${item.status_code}` : '已完成'; if (item.error_kind === 'client_disconnected') return '客户端断开'; return item.error_summary || retryErrorLabel(item) || item.error_kind || (item.status_code ? `HTTP ${item.status_code}` : '失败') }
 function scheduleSearch() { window.clearTimeout(searchTimer); searchTimer = window.setTimeout(loadRequests, 250) }
-async function loadRequests() { if (loading.value) return; loading.value = true; error.value = ''; localStorage.setItem('local-proxy-request-window', windowName.value); try { const params = new URLSearchParams({ window: windowName.value, status: statusFilter.value }); if (providerFilter.value) params.set('provider_id', providerFilter.value); if (query.value.trim()) params.set('query', query.value.trim()); const [payload, status] = await Promise.all([controlFetch(`/api/requests?${params}`), controlFetch('/api/status')]); activeItems.value = payload.active || []; historyItems.value = payload.items || []; totalCount.value = Number(payload.total_count || 0); nextCursor.value = payload.next_cursor || null; providers.value = status.providers || []; emit('count', Number(status.active_requests || 0)) } catch (requestError) { error.value = requestError.message } finally { loading.value = false } }
-async function loadMore() { if (!nextCursor.value) return; const params = new URLSearchParams({ window: windowName.value, status: statusFilter.value, cursor: nextCursor.value }); if (providerFilter.value) params.set('provider_id', providerFilter.value); if (query.value.trim()) params.set('query', query.value.trim()); const payload = await controlFetch(`/api/requests?${params}`); historyItems.value.push(...(payload.items || [])); nextCursor.value = payload.next_cursor || null }
+function requestParams(includeCursor = false) {
+  const params = new URLSearchParams({ window: windowName.value, status: statusFilter.value })
+  if (windowName.value === 'custom' && customRange.value) {
+    params.set('start_at', String(customRange.value.startAt))
+    params.set('end_at', String(customRange.value.endAt))
+  }
+  if (includeCursor && nextCursor.value) params.set('cursor', nextCursor.value)
+  if (providerFilter.value) params.set('provider_id', providerFilter.value)
+  if (query.value.trim()) params.set('query', query.value.trim())
+  return params
+}
+async function loadRequests() {
+  if (loading.value) return
+  if (windowName.value === 'custom' && !customRange.value) { customRangeOpen.value = true; return }
+  loading.value = true; error.value = ''; localStorage.setItem('local-proxy-request-window', windowName.value)
+  try {
+    const params = requestParams()
+    const [payload, status] = await Promise.all([controlFetch(`/api/requests?${params}`), controlFetch('/api/status')])
+    activeItems.value = payload.active || []; historyItems.value = payload.items || []; totalCount.value = Number(payload.total_count || 0); nextCursor.value = payload.next_cursor || null; providers.value = status.providers || []; emit('count', Number(status.active_requests || 0))
+  } catch (requestError) { error.value = requestError.message } finally { loading.value = false }
+}
+async function loadMore() { if (!nextCursor.value) return; const payload = await controlFetch(`/api/requests?${requestParams(true)}`); historyItems.value.push(...(payload.items || [])); nextCursor.value = payload.next_cursor || null }
+function openCustomRange() { customRangeOpen.value = true }
+function closeCustomRange() { customRangeOpen.value = false; if (!customRange.value && windowName.value === 'custom') windowName.value = '24h' }
+function applyCustomRange(range) { customRange.value = range; windowName.value = 'custom'; customRangeOpen.value = false; loadRequests() }
 async function openSessionRoutes() { routePopover.value = true; try { const payload = await controlFetch('/api/sessions'); sessions.value = Array.isArray(payload) ? payload : (payload.items || payload.sessions || []) } catch (requestError) { error.value = requestError.message } }
 async function saveSessionRoute() { if (!selectedSession.value) return; await controlFetch(`/api/session-routes/${encodeURIComponent(selectedSession.value)}`, jsonOptions('POST', { provider_id: selectedRoute.value || null })) }
 onMounted(() => { loadRequests(); timer = window.setInterval(loadRequests, 5000) })

@@ -144,6 +144,11 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.doesNotMatch(providers, /<select\b/);
   assert.doesNotMatch(requests, /<select\b/);
   assert.doesNotMatch(settings, /<select\b/);
+  assert.match(requests, /TimeRangePopover/);
+  assert.match(requests, /@click="openCustomRange"/);
+  assert.match(requests, /value: 'custom', label: '自定义时间/);
+  assert.match(requests, /params\.set\('start_at'/);
+  assert.match(requests, /params\.set\('end_at'/);
   assert.match(styles, /\.stage\s*\{[^}]*width:\s*100%[^}]*min-height:\s*100vh[^}]*min-height:\s*100dvh/s);
   assert.match(styles, /\.app-window\s*\{[^}]*width:\s*100%[^}]*height:\s*100vh[^}]*height:\s*100dvh/s);
   assert.doesNotMatch(styles, /\.app-window\s*\{[^}]*width:\s*min\(1440px, 100%\)/s);
