@@ -118,7 +118,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   height: 100vh;
   height: 100dvh;
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
   background: var(--surface);
 }
@@ -153,6 +153,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   font-size: 17px;
   font-weight: 800;
 }
+.brand-icon { width: 24px; height: 24px; display: block; }
 .brand-copy { min-width: 0; }
 .brand-copy h1 { font-size: 18px; line-height: 1.3; }
 
@@ -205,14 +206,10 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .theme-menu button[aria-checked="true"] { background: var(--teal-soft); color: var(--teal); font-weight: 700; }
 
 .connection-strip {
-  min-height: 52px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-width: 0;
+  display: flex;
   align-items: center;
-  gap: 22px;
-  padding: 9px 20px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface-soft);
+  gap: 18px;
   font-size: 12px;
 }
 .view-tabs { min-height: 42px; display: flex; align-items: end; gap: 4px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -929,7 +926,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .requests-heading-actions { display: flex; align-items: center; gap: 8px; }
 .requests-heading h2 { font-size: 15px; }
 .requests-heading p { margin-top: 3px; color: var(--muted); font-size: var(--font-meta); }
-.request-filters { display: grid; grid-template-columns: 176px 130px minmax(170px, 220px) minmax(220px, 1fr); gap: 8px; }
+.request-filters { display: grid; grid-template-columns: minmax(220px, 1fr) 176px 130px minmax(170px, 220px); gap: 8px; }
 .request-window-control label { min-width: 0; }
 .request-filters select, .request-filters input { width: 100%; height: 36px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--surface); color: var(--text); font-size: var(--font-body); }
 .request-filters select { padding: 0 28px 0 10px; }
@@ -1124,7 +1121,10 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .danger-button:disabled { cursor: not-allowed; opacity: .45; }
 
 .footer { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 9px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: var(--font-meta); }
-.footer-actions { gap: 14px; }
+.footer .connection-strip { flex: 1 1 auto; overflow: hidden; }
+.footer .connection-value:first-child { flex: 0 1 auto; }
+.footer .connection-value.database { flex: 1 1 auto; }
+.footer-actions { flex: 0 0 auto; gap: 14px; }
 .text-button { padding: 5px 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; }
 .power-button { min-height: 30px; padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--control-surface); color: var(--muted); font-size: 12px; box-shadow: var(--control-shadow); }
 .power-button:hover { border-color: var(--red); color: var(--red); }
