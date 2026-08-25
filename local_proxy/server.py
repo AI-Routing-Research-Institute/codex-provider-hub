@@ -42,6 +42,7 @@ from local_proxy.core import (
     _public_requests,
     _public_sessions,
     _query_time_range,
+    _resolve_control_asset,
     _valid_control_request,
     order_proxy_providers,
     retry_policy_from_mapping,
@@ -367,9 +368,13 @@ def _register_control_routes(
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     async def control_asset(asset_name: str):
-        if asset_name not in {"app.js", "styles.css"}:
+        asset_path = _resolve_control_asset(control_asset_dir / "static", asset_name)
+        if asset_path is None:
+            asset_path = _resolve_control_asset(control_asset_dir, asset_name)
+        if asset_path is None:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        response = FileResponse(control_asset_dir / asset_name)
+
+        response = FileResponse(asset_path)
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -1010,7 +1015,7 @@ def _register_control_routes(
 
     app.add_api_route(f"{prefix}/", control_page, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/ui-config", control_ui_config, methods=["GET"], include_in_schema=False)
-    app.add_api_route(f"{prefix}/static/{{asset_name}}", control_asset, methods=["GET"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/static/{{asset_name:path}}", control_asset, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/status", control_status, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/recovery-history", control_recovery_history, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/usage-history", control_usage_history, methods=["GET"], include_in_schema=False)

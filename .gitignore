@@ -36,3 +36,9 @@ direct-current-response.txt
 *.sqlite3-*
 *.db
 *.db-*
+
+# UI development dependencies (编译后的 CSS 会提交，node_modules 不提交)
+proxy_static/dev/node_modules/
+proxy_static/dev/package-lock.json
+proxy_static/node_modules/
+proxy_static/dist/

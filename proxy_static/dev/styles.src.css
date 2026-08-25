@@ -1,0 +1,346 @@
+/**
+ * Codex Provider Hub UI Styles
+ *
+ * 策略：保留所有现有样式 + 添加 Tailwind 工具类
+ * 这样可以渐进式迁移，不会破坏现有界面
+ */
+
+/* 导入原始样式（完整保留） */
+@import "../styles.original.css";
+
+/* 添加 Tailwind */
+@tailwind components;
+@tailwind utilities;
+
+/* 美化后的组件样式 - 全面现代化 */
+@layer components {
+  /* ============================================
+     Toolbar Actions 全面美化
+     参考 sub2api 的 Swiss Minimal 风格
+     统一字体大小、现代化选择框
+     ============================================ */
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 12px;
+
+    @media (max-width: 600px) {
+      width: 100%;
+      gap: 10px;
+    }
+  }
+
+  /* ============================================
+     统一字体大小 - 13px（更现代、可读性更好）
+     ============================================ */
+
+  /* 时间窗口控制 */
+  .time-window-control {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 36px;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .usage-window-wrap {
+    width: 190px;
+
+    @media (max-width: 600px) {
+      flex: 1 1 150px;
+    }
+  }
+
+  .usage-window-control {
+    position: relative;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+  }
+
+  .usage-window-icon {
+    position: absolute;
+    left: 12px;
+    z-index: 1;
+    font-size: 16px;
+    line-height: 1;
+    pointer-events: none;
+    opacity: 0.75;
+    transition: all 0.2s ease;
+  }
+
+  .usage-window-control:hover .usage-window-icon,
+  .usage-window-control:focus-within .usage-window-icon {
+    opacity: 1;
+    color: var(--teal);
+  }
+
+  /* 现代化选择框样式 */
+  .usage-window-control select {
+    width: 150px;
+    height: 38px;
+    padding: 0 32px 0 38px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+
+    /* 统一字体大小为 13px */
+    font-size: 13px;
+    font-weight: 500;
+
+    /* 现代化外观 */
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2366737c' d='M6 9L1.5 4.5h9z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px;
+
+    /* 平滑过渡 */
+    transition: all 0.2s ease;
+    cursor: pointer;
+
+    @media (max-width: 600px) {
+      width: 100%;
+    }
+  }
+
+  .usage-window-control select:hover {
+    border-color: var(--teal);
+    background-color: var(--surface-soft);
+    box-shadow: 0 2px 4px rgba(20, 108, 115, 0.08);
+  }
+
+  .usage-window-control select:focus-visible {
+    border-color: var(--teal);
+    outline: 2px solid var(--teal-soft);
+    outline-offset: 0;
+    box-shadow: 0 0 0 3px var(--teal-soft);
+  }
+
+  /* 深色模式下的选择框箭头 */
+  :root[data-theme="dark"] .usage-window-control select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23a2afb5' d='M6 9L1.5 4.5h9z'/%3E%3C/svg%3E");
+  }
+
+  /* 时间范围编辑按钮 */
+  .time-range-edit {
+    width: 36px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 15px;
+    transition: all 0.2s ease;
+    cursor: pointer;
+  }
+
+  .time-range-edit:hover {
+    border-color: var(--teal);
+    background: var(--teal-soft);
+    color: var(--teal);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(20, 108, 115, 0.12);
+  }
+
+  .time-range-edit:focus-visible,
+  .time-range-edit.active {
+    border-color: var(--teal);
+    background: var(--teal-soft);
+    color: var(--teal);
+    outline: 2px solid var(--teal-soft);
+    outline-offset: 1px;
+  }
+
+  /* 现代化搜索框 */
+  .search {
+    position: relative;
+    height: 38px;
+
+    @media (max-width: 600px) {
+      flex: 1 1 180px;
+      width: 100%;
+    }
+  }
+
+  .search input {
+    width: 220px;
+    height: 38px;
+    padding: 0 14px 0 40px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+
+    /* 统一字体大小 */
+    font-size: 13px;
+    font-weight: 400;
+
+    outline: none;
+    transition: all 0.2s ease;
+
+    @media (max-width: 600px) {
+      width: 100%;
+    }
+  }
+
+  .search input:hover {
+    border-color: var(--teal);
+    background: var(--surface-soft);
+    box-shadow: 0 2px 4px rgba(20, 108, 115, 0.08);
+  }
+
+  .search input:focus {
+    border-color: var(--teal);
+    background: var(--surface);
+    box-shadow: 0 0 0 3px var(--teal-soft);
+  }
+
+  .search input::placeholder {
+    color: var(--muted);
+    opacity: 0.65;
+    font-size: 13px;
+  }
+
+  .search-icon {
+    position: absolute;
+    top: 50%;
+    left: 13px;
+    z-index: 1;
+    color: var(--muted);
+    font-size: 18px;
+    line-height: 1;
+    transform: translateY(-50%);
+    pointer-events: none;
+    opacity: 0.75;
+    transition: all 0.2s ease;
+  }
+
+  .search:focus-within .search-icon {
+    opacity: 1;
+    color: var(--teal);
+  }
+
+  /* 现代化图标按钮 */
+  .icon-button {
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 18px;
+    transition: all 0.2s ease;
+    cursor: pointer;
+
+    @media (max-width: 600px) {
+      flex: 0 0 auto;
+    }
+  }
+
+  .icon-button:hover {
+    border-color: var(--teal);
+    background: var(--teal-soft);
+    color: var(--teal);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(20, 108, 115, 0.15);
+  }
+
+  .icon-button:focus-visible {
+    border-color: var(--teal);
+    color: var(--teal);
+    outline: 2px solid var(--teal-soft);
+    outline-offset: 2px;
+  }
+
+  .icon-button:active {
+    transform: translateY(0);
+  }
+
+  /* 现代化次要按钮 */
+  .secondary-button {
+    height: 38px;
+    padding: 0 16px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+
+    /* 统一字体大小和字重 */
+    font-size: 13px;
+    font-weight: 600;
+
+    transition: all 0.2s ease;
+    cursor: pointer;
+  }
+
+  .secondary-button:hover {
+    border-color: var(--teal);
+    background: var(--teal-soft);
+    color: var(--teal);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(20, 108, 115, 0.15);
+  }
+
+  .secondary-button:focus-visible,
+  .secondary-button[aria-pressed="true"] {
+    border-color: var(--teal);
+    background: var(--teal-soft);
+    color: var(--teal);
+    outline: 2px solid var(--teal-soft);
+    outline-offset: 2px;
+  }
+
+  .secondary-button:active {
+    transform: translateY(0);
+  }
+
+  /* ============================================
+     全局选择框现代化（统一所有 select）
+     ============================================ */
+  select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2366737c' d='M6 9L1.5 4.5h9z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px;
+    padding-right: 32px;
+    cursor: pointer;
+  }
+
+  :root[data-theme="dark"] select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23a2afb5' d='M6 9L1.5 4.5h9z'/%3E%3C/svg%3E");
+  }
+
+  /* ============================================
+     全局输入框现代化
+     ============================================ */
+  input[type="text"],
+  input[type="search"],
+  input[type="url"],
+  input[type="email"],
+  input[type="number"],
+  textarea {
+    font-size: 13px;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+  }
+
+  input[type="text"]:hover,
+  input[type="search"]:hover,
+  input[type="url"]:hover,
+  input[type="email"]:hover,
+  input[type="number"]:hover,
+  textarea:hover {
+    box-shadow: 0 2px 4px rgba(20, 108, 115, 0.08);
+  }
+}

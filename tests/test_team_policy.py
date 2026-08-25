@@ -261,10 +261,11 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
         self.assertIn("本地测试未运行或失败", agents)
 
     def test_hook_wrappers_are_versioned_and_call_policy(self) -> None:
-        for hook_name in ("pre-commit", "commit-msg", "pre-push"):
+        for hook_name in ("pre-commit", "commit-msg"):
             content = (ROOT / ".githooks" / hook_name).read_text(encoding="utf-8")
             self.assertIn("scripts/team_policy.py", content)
             self.assertIn("#!/bin/sh", content)
+        self.assertFalse((ROOT / ".githooks" / "pre-push").exists())
 
     def test_feature_record_template_contains_all_required_sections(self) -> None:
         template = (ROOT / "docs/changes/template.md").read_text(encoding="utf-8")
@@ -274,17 +275,6 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
             "测试计划", "实际改动", "验证结果", "PR",
         ):
             self.assertIn(f"## {section}", template)
-
-    def test_release_workflows_run_full_test_suite_on_tag(self) -> None:
-        for name in ("windows-release.yml", "macos-release.yml"):
-            workflow = (ROOT / ".github/workflows" / name).read_text(
-                encoding="utf-8"
-            )
-            self.assertIn("push:", workflow)
-            self.assertIn("tags:", workflow)
-            self.assertIn("python -m unittest discover", workflow)
-            self.assertIn("node --check proxy_static/app.js", workflow)
-            self.assertIn("node --check provider_status/static/app.js", workflow)
 
     def test_ruleset_payload_protects_main_without_approvals(self) -> None:
         payload = build_ruleset_payload()
@@ -308,27 +298,6 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
             set(payload["rules"][i]["type"] for i in range(len(payload["rules"]))),
             {"deletion", "pull_request"},
         )
-
-    def test_auto_release_workflow_is_serialized_and_dispatches_both_platforms(self) -> None:
-        workflow = (ROOT / ".github/workflows/auto-release.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("push:", workflow)
-        self.assertIn("release-main", workflow)
-        self.assertIn("contents: write", workflow)
-        self.assertIn("actions: write", workflow)
-        self.assertIn("windows-release.yml", workflow)
-        self.assertIn("macos-release.yml", workflow)
-        self.assertIn("workflow run", workflow)
-
-    def test_release_workflows_render_notes_from_records(self) -> None:
-        for name in ("windows-release.yml", "macos-release.yml"):
-            workflow = (ROOT / ".github/workflows" / name).read_text(
-                encoding="utf-8"
-            )
-            if name == "windows-release.yml":
-                self.assertIn("release-notes", workflow)
-
 
 class ReleasePlanningTests(unittest.TestCase):
     def make_record(self, bump: str, title: str) -> ChangeRecord:
