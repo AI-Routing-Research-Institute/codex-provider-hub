@@ -19,6 +19,7 @@ from local_proxy.claude_profile import (
 class ClaudeLocalProxySettingsTests(unittest.TestCase):
     def test_ui_config_uses_unified_port_and_peer_console_path(self) -> None:
         config = claude_ui_config(19000, Path("C:/claude-local-proxy"))
+        self.assertEqual(config["config_button_label"], "导入到 CCS")
         self.assertEqual(config["proxy_url"], "http://127.0.0.1:19000")
         self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/codex/")
         self.assertEqual(config["config_endpoint"], "/control/claude/api/claude-config")
