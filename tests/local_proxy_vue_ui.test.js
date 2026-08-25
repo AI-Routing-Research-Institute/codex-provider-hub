@@ -170,6 +170,20 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /\.time-range-edit\s*\{[^}]*border-radius:\s*var\(--control-radius\)/s);
   assert.match(styles, /\.provider-row\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
   assert.match(styles, /\.settings-form\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
+  assert.match(styles, /--font-body:\s*13px/);
+  assert.match(styles, /--font-meta:\s*12px/);
+  assert.match(styles, /\.time-range-heading strong\s*\{[^}]*font-size:\s*16px/s);
+  assert.match(styles, /\.time-range-heading span\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
+  assert.match(styles, /\.time-range-fields legend\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
+  assert.match(styles, /\.time-range-fields input\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
+  assert.match(styles, /\.auth-label\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
+  assert.match(styles, /\.request-table-header\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
+  assert.match(styles, /\.request-row\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
+
+  const smallFontSizes = styles.match(/font-size:\s*(?:9|10|11)px/g) ?? [];
+  assert.equal(smallFontSizes.length, 2);
+  assert.match(styles, /\.view-tab-count\s*\{[^}]*font-size:\s*9px/s);
+  assert.match(styles, /\.provider-token-detail-icon\s*\{[^}]*font-size:\s*9px/s);
 });
 
 test("Vue request view preserves upstream phase and timeout labels", () => {
