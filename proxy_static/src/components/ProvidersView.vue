@@ -7,11 +7,11 @@
           <p class="provider-count">{{ loading ? '正在读取 CC Switch...' : (manageMode ? `共 ${providers.length} 个供应商，已隐藏 ${hiddenCount} 个` : `已显示 ${visibleProviders.length} 个 ${uiConfig.provider_label || ''} 供应商`) }}<button class="health-refresh-button" type="button" title="刷新服务器检测数据" aria-label="刷新服务器检测数据" @click="loadHealth"><UiIcon name="refresh" /></button></p>
         </div>
         <div class="toolbar-actions">
+          <label class="search"><span class="visually-hidden">搜索供应商</span><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索名称或地址" autocomplete="off" /></label>
           <div class="time-window-control usage-window-wrap">
             <UiSelect v-model="usageWindow" class="usage-window-control" aria-label="Token 统计时间范围" icon="clock" :options="usageWindowOptions" @change="loadStatus" />
             <button class="time-range-edit" type="button" title="设置自定义 Token 时间" aria-label="设置自定义 Token 时间" @click="customRangeOpen = true"><UiIcon name="calendar" /></button>
           </div>
-          <label class="search"><span class="visually-hidden">搜索供应商</span><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索名称或地址" autocomplete="off" /></label>
           <button v-if="catalogEnabled" class="secondary-button" type="button" :aria-pressed="manageMode" @click="manageMode = !manageMode">{{ manageMode ? '完成' : '管理' }}</button>
           <button class="icon-button" type="button" title="重新读取 CC Switch" aria-label="重新读取 CC Switch" @click="loadStatus"><UiIcon name="refresh" /></button>
         </div>

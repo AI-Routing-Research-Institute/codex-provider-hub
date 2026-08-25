@@ -1,7 +1,7 @@
 <template>
   <header class="titlebar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">{{ config.brand_mark || 'CX' }}</div>
+      <div class="brand-mark"><BrandIcon :service-id="config.service_id" :brand-mark="config.brand_mark" /></div>
       <div class="brand-copy"><h1>{{ config.display_name || '本地中转' }}</h1></div>
     </div>
     <div class="title-actions">
@@ -12,13 +12,13 @@
           <button v-for="option in options" :key="option.value" type="button" role="menuitemradio" :aria-checked="theme === option.value" @click="setTheme(option.value)">{{ option.label }}</button>
         </div>
       </div>
-      <div class="service-state"><div class="service-copy"><strong>中转运行中</strong><span>仅监听本机</span></div><span class="live-switch" aria-label="中转运行中"><span /></span></div>
     </div>
   </header>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
+import BrandIcon from './ui/BrandIcon.vue'
 import UiIcon from './ui/UiIcon.vue'
 const options = [{ value: 'system', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }]
 const menuOpen = ref(false)

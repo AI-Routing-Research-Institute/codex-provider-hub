@@ -5,10 +5,10 @@
       <div class="requests-heading-actions"><button v-if="config.features?.session_routing" class="icon-button" type="button" title="设置会话路由" aria-label="设置会话路由" @click="openSessionRoutes"><UiIcon name="settings" /></button><button class="icon-button" type="button" title="刷新请求记录" aria-label="刷新请求记录" @click="loadRequests"><UiIcon name="refresh" /></button></div>
     </div>
     <div class="request-filters" aria-label="请求筛选">
+      <label class="request-search"><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off" @input="scheduleSearch" /></label>
       <div class="time-window-control request-window-control"><UiSelect v-model="windowName" aria-label="时间范围" :options="requestWindowOptions" @change="loadRequests" /><button class="time-range-edit" type="button" title="设置自定义请求时间" aria-label="设置自定义请求时间" @click="openCustomRange"><UiIcon name="calendar" /></button></div>
       <UiSelect v-model="statusFilter" aria-label="请求状态" :options="statusOptions" @change="loadRequests" />
       <UiSelect v-model="providerFilter" aria-label="供应商" :options="providerOptions" @change="loadRequests" />
-      <label class="request-search"><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off" @input="scheduleSearch" /></label>
     </div>
     <div class="request-table-shell">
       <div class="request-table-header" aria-hidden="true"><span class="request-column-status">状态</span><span class="request-column-time">开始时间</span><span>会话</span><span>供应商</span><span>模型</span><span class="request-column-reasoning">推理强度</span><span class="request-column-duration">耗时</span><span class="request-column-token">Token</span><span class="request-column-result">结果</span></div>
