@@ -9,8 +9,7 @@
         <div class="toolbar-actions">
           <label class="search"><span class="visually-hidden">搜索供应商</span><UiIcon class="search-icon" name="search" /><input v-model="query" type="search" placeholder="搜索名称或地址" autocomplete="off" /></label>
           <div class="time-window-control usage-window-wrap">
-            <UiSelect v-model="usageWindow" class="usage-window-control" aria-label="Token 统计时间范围" icon="clock" :options="usageWindowOptions" @change="loadStatus" />
-            <button class="time-range-edit" type="button" title="设置自定义 Token 时间" aria-label="设置自定义 Token 时间" @click="customRangeOpen = true"><UiIcon name="calendar" /></button>
+            <TimeRangeSelect v-model="usageWindow" aria-label="Token 统计时间范围" title="Token 统计时间范围" icon="clock" :options="usageWindowOptions" :initial-range="customRange" @change="loadStatus" @apply="applyCustomRange" />
           </div>
           <button v-if="catalogEnabled" class="secondary-button" type="button" :aria-pressed="manageMode" @click="manageMode = !manageMode">{{ manageMode ? '完成' : '管理' }}</button>
           <button class="icon-button" type="button" title="重新读取 CC Switch" aria-label="重新读取 CC Switch" @click="loadStatus"><UiIcon name="refresh" /></button>
@@ -123,19 +122,19 @@
 
     <div v-if="selectedHealth" class="provider-health-popover show" style="top: 96px; left: max(12px, calc(50vw - 250px));"><div class="provider-health-detail"><div class="provider-health-detail-head"><div><strong>{{ selectedHealth.name }}</strong><span>服务器检测详情</span></div><button class="provider-health-close" type="button" aria-label="关闭检测详情" @click="selectedHealth = null"><UiIcon name="close" /></button></div><div class="provider-health-metrics"><span><span>状态</span><strong>{{ healthLabel(selectedHealth) }}</strong></span><span><span>可用率</span><strong>{{ healthAvailability(selectedHealth) }}</strong></span><span><span>延迟</span><strong>{{ healthLatency(selectedHealth) }}</strong></span></div></div></div>
     <div v-if="selectedUsage" class="usage-history-popover show" style="top: 96px; left: max(12px, calc(50vw - 240px));"><div class="usage-history-heading"><div><strong>{{ selectedUsage.name }} 请求记录</strong><span>{{ usageWindowLabel }}</span></div><button class="usage-history-close" type="button" aria-label="关闭用量记录" @click="selectedUsage = null"><UiIcon name="close" /></button></div><div class="usage-history-summary"><span>Token {{ formatNumber(providerUsage(selectedUsage.provider_id).total_tokens) }}</span><span>请求 {{ providerUsage(selectedUsage.provider_id).request_count || 0 }}</span></div><div class="usage-history-empty">详细请求请在“请求”页面查看</div></div>
-    <TimeRangePopover :open="customRangeOpen" title="自定义 Token 时间" :initial-range="customRange" @close="closeCustomRange" @apply="applyCustomRange" />
   </div>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { controlFetch, jsonOptions } from '../api.js'
-import TimeRangePopover from './TimeRangePopover.vue'
+import TimeRangeSelect from './TimeRangeSelect.vue'
 import UiSelect from './ui/UiSelect.vue'
 import UiIcon from './ui/UiIcon.vue'
 
 const status = ref({ providers: [], usage: { total: {}, by_provider: {} }, retry: {} })
 const uiConfig = ref({ features: {} })
+const props = defineProps({ showLaunchCommand: { type: Boolean, default: true } })
 const health = ref(null)
 const healthError = ref('')
 const loading = ref(true)
@@ -146,8 +145,7 @@ const usageWindowOptions = [
   { value: '24h', label: '近 24 小时' },
   { value: '7d', label: '近 7 天' },
   { value: '30d', label: '近 30 天' },
-  { value: 'all', label: '全部' },
-  { value: 'custom', label: '自定义时间…' }
+  { value: 'all', label: '全部' }
 ]
 const importModeOptions = [{ value: 'skip', label: '仅新增' }, { value: 'overwrite', label: '覆盖已有' }]
 const wireApiOptions = [{ value: 'responses', label: 'responses' }]
@@ -169,7 +167,6 @@ const uploadError = ref('')
 const uploadSsh = ref({ host: '118.195.178.173', port: 22, username: 'ubuntu', password: '' })
 const selectedHealth = ref(null)
 const selectedUsage = ref(null)
-const customRangeOpen = ref(false)
 const customRange = ref(null)
 let timer
 
@@ -177,7 +174,7 @@ const emptyForm = () => ({ name: '', base_url: '', api_key: '', clear_api_key: f
 const form = ref(emptyForm())
 const providers = computed(() => status.value.providers || [])
 const catalogEnabled = computed(() => uiConfig.value.features?.provider_catalog === true)
-const showLaunchCommand = computed(() => uiConfig.value.features?.provider_launch_command !== false)
+const showLaunchCommand = computed(() => uiConfig.value.features?.provider_launch_command !== false && props.showLaunchCommand)
 const visibleProviders = computed(() => providers.value.filter(provider => manageMode.value || !provider.hidden))
 const hiddenCount = computed(() => providers.value.filter(provider => provider.hidden).length)
 const filteredProviders = computed(() => { const term = query.value.trim().toLocaleLowerCase(); return visibleProviders.value.filter(provider => !term || [provider.name, provider.endpoint].some(value => String(value || '').toLocaleLowerCase().includes(term))) })
@@ -204,7 +201,7 @@ async function loadStatus() {
   if (loading.value && providers.value.length) return
   try {
     localStorage.setItem('local-proxy-usage-window', usageWindow.value)
-    if (usageWindow.value === 'custom' && !customRange.value) { customRangeOpen.value = true; return }
+    if (usageWindow.value === 'custom' && !customRange.value) return
     const queryParams = usageWindow.value === 'custom'
       ? `start_at=${customRange.value.startAt}&end_at=${customRange.value.endAt}`
       : `usage_window=${encodeURIComponent(usageWindow.value)}`
@@ -265,8 +262,7 @@ async function uploadStatus() {
     statusUploadProvider.value = null
   } catch (error) { uploadError.value = error.message } finally { uploadSaving.value = false }
 }
-function closeCustomRange() { customRangeOpen.value = false; if (!customRange.value && usageWindow.value === 'custom') usageWindow.value = 'today' }
-function applyCustomRange(range) { customRange.value = range; usageWindow.value = 'custom'; customRangeOpen.value = false; loadStatus() }
+function applyCustomRange(range) { customRange.value = range; usageWindow.value = 'custom'; loadStatus() }
 
 onMounted(() => { loadStatus(); timer = window.setInterval(() => loadStatus(), 5000) })
 onBeforeUnmount(() => window.clearInterval(timer))
