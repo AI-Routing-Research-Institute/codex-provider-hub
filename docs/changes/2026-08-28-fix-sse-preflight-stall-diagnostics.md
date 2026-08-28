@@ -2,7 +2,7 @@
 id = "2026-08-28-fix-sse-preflight-stall-diagnostics"
 type = "fix"
 release_bump = "patch"
-status = "implemented"
+status = "verified"
 +++
 
 # 修复 SSE 首包预检卡死并保留故障现场
@@ -56,10 +56,11 @@ SSE 转发内容和重试语义保持兼容。SQLite 自动新增运行中请求
 
 ## 验证结果
 
-- `\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：通过，495 项测试，耗时 74.106 秒。
+- `\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：rebase 到最新 `origin/main` 后通过，502 项测试，耗时 72.547 秒。
 - 对 `proxy_static/src/*.js` 和 `provider_status/static/app.js` 执行 `node --check`：通过。
-- 对 `tests/*.test.js` 逐个执行 `node --test`：通过，16 项测试。
-- `\.venv\Scripts\python.exe -m compileall -q provider_status local_proxy tests`：通过。
+- 对 `tests/*.test.js` 逐个执行 `node --test`：通过，18 项测试。
+- `npm run build --prefix proxy_static`：通过，Vite 转换 26 个模块；构建产物仅用于验证，未纳入提交。
+- `\.venv\Scripts\python.exe -m compileall -q provider_status local_proxy scripts tests`：通过。
 - `git diff --check`：通过。
 
 ## PR

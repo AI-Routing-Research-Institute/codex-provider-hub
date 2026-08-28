@@ -2,7 +2,7 @@
 id = "2026-08-28-toggle-status-upload-visibility"
 type = "feature"
 release_bump = "minor"
-status = "implemented"
+status = "verified"
 +++
 
 # 上传检测按钮可见性设置
@@ -55,11 +55,11 @@ status = "implemented"
 
 ## 验证结果
 
-- `\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：通过，497 项测试，耗时 72.897 秒。
+- `\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：rebase 到最新 `origin/main` 后通过，502 项测试，耗时 72.547 秒。
 - 对 `proxy_static/src/*.js` 和 `provider_status/static/app.js` 执行 `node --check`：通过。
-- 对 `tests/*.test.js` 逐个执行 `node --test`：通过，16 项测试。
-- `npm run build --prefix proxy_static`：通过，生产包包含 `show_status_upload` 设置并由 `dist/index.html` 正确引用。
-- `\.venv\Scripts\python.exe -m compileall -q provider_status local_proxy tests`：通过。
+- 对 `tests/*.test.js` 逐个执行 `node --test`：通过，18 项测试。
+- `npm run build --prefix proxy_static`：通过，Vite 转换 26 个模块，生产包包含 `show_status_upload` 设置；构建产物仅用于验证，未纳入提交。
+- `\.venv\Scripts\python.exe -m compileall -q provider_status local_proxy scripts tests`：通过。
 - `git diff --check`：通过。
 
 ## PR
