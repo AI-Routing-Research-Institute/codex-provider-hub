@@ -496,6 +496,7 @@ class CodexConfigTests(unittest.TestCase):
         shared_store = mock.Mock()
         shared_store.retry_policy_store = object()
         shared_store.health_status_url_store = object()
+        diagnostic_log = mock.Mock()
         with (
             mock.patch.object(local_proxy_app, "existing_proxy_url", return_value=None),
             mock.patch.object(local_proxy_app, "load_settings", return_value=shared_settings),
@@ -525,6 +526,11 @@ class CodexConfigTests(unittest.TestCase):
                 "build_claude_profile",
                 return_value=claude_profile_instance,
             ) as claude_profile_builder,
+            mock.patch.object(
+                local_proxy_app,
+                "DiagnosticLog",
+                return_value=diagnostic_log,
+            ) as diagnostic_log_factory,
             mock.patch.object(local_proxy_app, "create_proxy_app", return_value=object()) as app_factory,
             mock.patch.object(
                 local_proxy_app,
@@ -575,6 +581,10 @@ class CodexConfigTests(unittest.TestCase):
             claude_profile=claude_profile_instance,
             on_shutdown_requested=mock.ANY,
             update_controller=mock.ANY,
+            diagnostic_log=diagnostic_log,
+        )
+        diagnostic_log_factory.assert_called_once_with(
+            local_proxy_app.data_directory() / "logs" / "proxy-diagnostics.log"
         )
         server_class.assert_called_once_with(
             host="127.0.0.1",

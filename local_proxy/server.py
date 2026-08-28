@@ -17,6 +17,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.background import BackgroundTask
 
+from local_proxy.diagnostics import DiagnosticLog, EventLoopWatchdog
 from local_proxy.core import (
     CONTROL_ASSET_DIR,
     RECOVERY_HISTORY_API_LIMIT,
@@ -36,6 +37,7 @@ from local_proxy.core import (
     UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
     UsageStore,
     _empty_usage_summary,
+    _diagnostic_active_requests,
     _event_loop_heartbeat,
     _forward_request,
     _public_control_status,
@@ -155,16 +157,43 @@ def create_unified_proxy_app(
     update_controller: Any | None = None,
     stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
     upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    diagnostic_log: DiagnosticLog | None = None,
 ) -> FastAPI:
     profiles = {"codex": codex, "claude": claude}
-    runtime_diagnostics = RuntimeDiagnostics()
+    runtime_diagnostics = RuntimeDiagnostics(
+        diagnostic_log_path=(diagnostic_log.path if diagnostic_log is not None else None)
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        runtime_diagnostics.arm()
         heartbeat_task = asyncio.create_task(_event_loop_heartbeat(runtime_diagnostics))
+        watchdog = (
+            EventLoopWatchdog(
+                runtime_diagnostics,
+                diagnostic_log,
+                active_requests=lambda: _diagnostic_active_requests(
+                    tuple(
+                        (service_id, profile.router)
+                        for service_id, profile in profiles.items()
+                    )
+                ),
+            )
+            if diagnostic_log is not None
+            else None
+        )
+        if diagnostic_log is not None:
+            diagnostic_log.write_event(
+                "service_started",
+                service="codex-provider-hub",
+            )
+        if watchdog is not None:
+            watchdog.start()
         try:
             yield
         finally:
+            if watchdog is not None:
+                watchdog.stop()
             heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
             closed: set[int] = set()
@@ -177,6 +206,12 @@ def create_unified_proxy_app(
                         continue
                     closed.add(id(owned_client))
                     await owned_client.aclose()
+            if diagnostic_log is not None:
+                diagnostic_log.write_event(
+                    "service_stopped",
+                    service="codex-provider-hub",
+                )
+                diagnostic_log.close()
 
     app = FastAPI(
         docs_url=None,

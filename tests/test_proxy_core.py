@@ -24,13 +24,16 @@ from local_proxy.core import (
     RecoveryHistoryStore,
     RetryPolicy,
     RetryPolicyStore,
+    SSECapacityFailureCapture,
     TokenUsage,
     UsageCapture,
     UsageStore,
     RETRY_ERROR_BODY_BYTES,
     _codex_thread_id,
     _inspect_http_400_before_output,
+    _inspect_sse_before_output,
     _input_item_id_error_index,
+    _sse_preflight_decision,
     _strip_input_item_ids,
     _public_control_status,
     _public_requests,
@@ -414,6 +417,88 @@ class UsageTests(unittest.TestCase):
                 for row in connection.execute("PRAGMA table_info(request_history)")
             }
         self.assertIn("reasoning_effort", columns)
+
+    def test_inflight_request_is_updated_and_removed_on_completion(self) -> None:
+        started_at = time.time() - 2
+        self.store.start_inflight_request(
+            request_id=17,
+            started_at=started_at,
+            provider_id="provider-a",
+            thread_id="thread-a",
+        )
+        self.store.update_inflight_request(
+            17,
+            provider_id="provider-b",
+            model="gpt-test",
+            reasoning_effort="high",
+            phase="receiving",
+            request_body_bytes=321,
+            retry_count=2,
+        )
+
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            inflight = connection.execute(
+                """
+                SELECT provider_id, model, reasoning_effort, phase,
+                       request_body_bytes, retry_count
+                FROM inflight_requests
+                """
+            ).fetchone()
+
+        self.assertEqual(
+            inflight,
+            ("provider-b", "gpt-test", "high", "receiving", 321, 2),
+        )
+
+        self.store.record_request(
+            request_id=17,
+            started_at=started_at,
+            finished_at=time.time(),
+            provider_id="provider-b",
+            thread_id="thread-a",
+            session_name="测试会话",
+            model="gpt-test",
+            reasoning_effort="high",
+            status_code=200,
+            successful=True,
+            outcome="succeeded",
+            retry_count=2,
+        )
+
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM inflight_requests"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_reopens_database_and_recovers_inflight_request(self) -> None:
+        started_at = time.time() - 3
+        self.store.start_inflight_request(
+            request_id=23,
+            started_at=started_at,
+            provider_id="provider-a",
+            thread_id="thread-a",
+            session_name="中断会话",
+            model="gpt-test",
+            phase="waiting_first_chunk",
+            request_body_bytes=456,
+            retry_count=1,
+        )
+
+        recovered = UsageStore(self.store.path, run_id="next-run")
+        history = recovered.request_history(window="24h", status="failed")
+
+        self.assertEqual(history["total_count"], 1)
+        item = history["items"][0]
+        self.assertEqual(item["outcome"], "interrupted")
+        self.assertEqual(item["error_kind"], "process_restarted")
+        self.assertIn("waiting_first_chunk", item["error_summary"])
+        self.assertIn("456", item["error_summary"])
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM inflight_requests"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
 
     def test_reads_nested_and_legacy_reasoning_effort(self) -> None:
         self.assertEqual(
@@ -829,6 +914,140 @@ class UsageTests(unittest.TestCase):
                 for row in connection.execute("PRAGMA table_info(request_history)")
             }
         self.assertNotIn("request_body", columns)
+
+
+class SSEPreflightTests(unittest.IsolatedAsyncioTestCase):
+    def test_capacity_capture_respects_bare_cr_event_boundaries(self) -> None:
+        separate_events = SSECapacityFailureCapture()
+        self.assertIsNone(
+            separate_events.feed(
+                b'data: {"error":"permanent"}\r\r'
+                b'data: {"code":"model_capacity"}\r\r'
+            )
+        )
+
+        same_event = SSECapacityFailureCapture()
+        failure = same_event.feed(
+            b'data: {"error":"temporary"}\r'
+            b'data: {"code":"model_capacity"}\r\r'
+        )
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure[0], "model_capacity")
+
+    async def test_many_reasoning_events_are_inspected_once(self) -> None:
+        reasoning_events = [
+            (
+                b'data: {"type":"response.reasoning_summary_text.delta",'
+                + f'"delta":"step-{index}"'.encode()
+                + b"}\n\n"
+            )
+            for index in range(2000)
+        ]
+        visible_event = (
+            b'data: {"type":"response.output_text.delta","delta":"done"}\n\n'
+        )
+        chunks = iter((*reasoning_events[1:], visible_event))
+
+        async def stream() -> AsyncIterator[bytes]:
+            for chunk in chunks:
+                yield chunk
+
+        inspected_bytes = 0
+        decision_calls = 0
+
+        def decision(
+            event: bytes,
+            *,
+            end_of_stream: bool = False,
+        ) -> tuple[str, str | None, str | None]:
+            nonlocal inspected_bytes, decision_calls
+            inspected_bytes += len(event)
+            decision_calls += 1
+            return _sse_preflight_decision(event, end_of_stream=end_of_stream)
+
+        buffered, retry_kind, _ = await _inspect_sse_before_output(
+            reasoning_events[0],
+            stream(),
+            decision=decision,
+        )
+
+        total_bytes = sum(map(len, reasoning_events)) + len(visible_event)
+        self.assertIsNone(retry_kind)
+        self.assertIsNotNone(buffered)
+        self.assertIn(b'"delta":"done"', buffered)
+        self.assertEqual(decision_calls, 2001)
+        self.assertLessEqual(inspected_bytes, total_bytes + decision_calls * 2)
+
+    async def test_cross_chunk_crlf_and_bare_cr_events_are_incremental(self) -> None:
+        chunks = (
+            b'\n\r\ndata: {"type":"response.reasoning_summary_text.delta",',
+            b'"delta":"thinking"}\r\rdata: {"type":"response.output_text.delta",',
+            b'"delta":"visible"}\r\r',
+        )
+
+        async def stream() -> AsyncIterator[bytes]:
+            for chunk in chunks:
+                yield chunk
+
+        first = b'data: {"type":"response.created"}\r'
+        buffered, retry_kind, _ = await _inspect_sse_before_output(first, stream())
+
+        self.assertIsNone(retry_kind)
+        self.assertIsNotNone(buffered)
+        self.assertIn(b'"delta":"visible"', buffered)
+
+    async def test_failure_before_visible_output_retries_but_later_failure_commits(self) -> None:
+        failure = (
+            b'data: {"type":"response.failed","response":{"status":"failed",'
+            b'"error":{"code":"upstream_error","message":"try again later"}}}\n\n'
+        )
+        visible = (
+            b'data: {"type":"response.output_text.delta","delta":"visible"}\n\n'
+        )
+
+        async def no_more() -> AsyncIterator[bytes]:
+            if False:
+                yield b""
+
+        buffered, retry_kind, _ = await _inspect_sse_before_output(
+            failure + visible,
+            no_more(),
+        )
+        self.assertIsNone(buffered)
+        self.assertEqual(retry_kind, "upstream_error")
+
+        buffered, retry_kind, _ = await _inspect_sse_before_output(
+            visible + failure,
+            no_more(),
+        )
+        self.assertIsNotNone(buffered)
+        self.assertIsNone(retry_kind)
+
+    async def test_end_of_stream_decision_receives_only_unfinished_event(self) -> None:
+        calls: list[tuple[bytes, bool]] = []
+
+        def decision(
+            event: bytes,
+            *,
+            end_of_stream: bool = False,
+        ) -> tuple[str, str | None, str | None]:
+            calls.append((event, end_of_stream))
+            return "wait", None, None
+
+        async def no_more() -> AsyncIterator[bytes]:
+            if False:
+                yield b""
+
+        first = b"data: first\n\ndata: unfinished"
+        buffered, retry_kind, _ = await _inspect_sse_before_output(
+            first,
+            no_more(),
+            decision=decision,
+        )
+
+        self.assertEqual(buffered, first)
+        self.assertIsNone(retry_kind)
+        self.assertEqual(calls, [(b"data: first\n\n", False), (b"data: unfinished", True)])
 
 
 class RecoveryHistoryTests(unittest.TestCase):
