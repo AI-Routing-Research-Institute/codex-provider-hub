@@ -439,9 +439,12 @@ def validate_pr(base: str, head: str) -> None:
 def run_full_verification() -> None:
     commands = [
         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
-        ["node", "--check", "proxy_static/app.js"],
-        ["node", "--check", "provider_status/static/app.js"],
     ]
+    commands.extend(
+        ["node", "--check", str(path)]
+        for path in sorted(Path("proxy_static/src").glob("*.js"))
+    )
+    commands.append(["node", "--check", "provider_status/static/app.js"])
     commands.extend(
         ["node", "--test", str(path)] for path in sorted(Path("tests").glob("*.test.js"))
     )
