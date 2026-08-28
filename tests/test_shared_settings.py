@@ -170,14 +170,22 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
 
 
 class RuntimeMigrationTests(unittest.TestCase):
-    def test_protocol_launch_command_visibility_defaults_on_and_persists(self) -> None:
+    def test_protocol_button_visibility_defaults_on_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = protocol_settings_path("codex", Path(temp_dir))
 
             self.assertTrue(load_protocol_settings(path)["show_provider_launch_command"])
-            save_protocol_settings({"show_provider_launch_command": False}, path)
+            self.assertTrue(load_protocol_settings(path)["show_status_upload"])
+            save_protocol_settings(
+                {
+                    "show_provider_launch_command": False,
+                    "show_status_upload": False,
+                },
+                path,
+            )
 
             self.assertFalse(load_protocol_settings(path)["show_provider_launch_command"])
+            self.assertFalse(load_protocol_settings(path)["show_status_upload"])
 
     def test_migrates_both_protocols_with_codex_shared_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

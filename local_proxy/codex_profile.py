@@ -136,6 +136,7 @@ def codex_ui_config(port: int, root: Path | None = None) -> dict[str, Any]:
             "usage_history": True,
             "session_routing": True,
             "provider_launch_command": True,
+            "status_upload": True,
             "provider_catalog": True,
         },
     }
@@ -237,6 +238,7 @@ def build_codex_profile(
     def runtime_metadata() -> dict[str, Any]:
         with settings_lock:
             show_launch_command = settings.get("show_provider_launch_command", True)
+            show_status_upload = settings.get("show_status_upload", True)
         return {
             "data_directory": display_path(root),
             "settings_file": display_path(active_settings_path),
@@ -245,15 +247,23 @@ def build_codex_profile(
             "provider_catalog_source": display_path(active_database_path),
             "codex_config_file": "~/.codex/config.toml",
             "show_provider_launch_command": bool(show_launch_command),
+            "show_status_upload": bool(show_status_upload),
         }
 
     def apply_runtime_preferences(payload: Mapping[str, Any]) -> None:
-        if "show_provider_launch_command" not in payload:
-            return
-        show_launch_command = payload["show_provider_launch_command"]
-        if not isinstance(show_launch_command, bool):
-            raise ValueError("临时启动命令显示设置必须是布尔值")
-        persist(show_provider_launch_command=show_launch_command)
+        changes: dict[str, bool] = {}
+        if "show_provider_launch_command" in payload:
+            show_launch_command = payload["show_provider_launch_command"]
+            if not isinstance(show_launch_command, bool):
+                raise ValueError("临时启动命令显示设置必须是布尔值")
+            changes["show_provider_launch_command"] = show_launch_command
+        if "show_status_upload" in payload:
+            show_status_upload = payload["show_status_upload"]
+            if not isinstance(show_status_upload, bool):
+                raise ValueError("上传检测显示设置必须是布尔值")
+            changes["show_status_upload"] = show_status_upload
+        if changes:
+            persist(**changes)
 
     standard_client = httpx.AsyncClient(
         timeout=httpx.Timeout(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from local_proxy.claude import load_claude_proxy_providers
 from local_proxy.core import (
@@ -102,6 +102,7 @@ def claude_ui_config(port: int, root: Path | None = None) -> dict[str, Any]:
         "features": {
             "usage_history": True,
             "session_routing": False,
+            "status_upload": True,
         },
     }
 
@@ -182,12 +183,23 @@ def build_claude_profile(
             persist(selected_provider_id=selected_id)
 
     def runtime_metadata() -> dict[str, Any]:
+        with settings_lock:
+            show_status_upload = settings.get("show_status_upload", True)
         return {
             "data_directory": display_path(root),
             "settings_file": display_path(active_settings_path),
             "usage_database": display_path(active_usage_path),
             "claude_config_file": "~/.claude/settings.json",
+            "show_status_upload": bool(show_status_upload),
         }
+
+    def apply_runtime_preferences(payload: Mapping[str, Any]) -> None:
+        if "show_status_upload" not in payload:
+            return
+        show_status_upload = payload["show_status_upload"]
+        if not isinstance(show_status_upload, bool):
+            raise ValueError("上传检测显示设置必须是布尔值")
+        persist(show_status_upload=show_status_upload)
 
     return ProxyProfile(
         service_id="claude",
@@ -225,6 +237,7 @@ def build_claude_profile(
             ),
         },
         runtime_metadata=runtime_metadata,
+        apply_runtime_preferences=apply_runtime_preferences,
         ui_config=lambda: claude_ui_config(port, root),
         provider_selectable=lambda provider: bool(
             getattr(provider, "compatible", False) and provider.has_credentials
