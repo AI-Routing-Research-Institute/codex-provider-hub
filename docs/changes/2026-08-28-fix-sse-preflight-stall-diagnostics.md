@@ -65,4 +65,4 @@ SSE 转发内容和重试语义保持兼容。SQLite 自动新增运行中请求
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/52
