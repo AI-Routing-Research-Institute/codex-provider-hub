@@ -29,6 +29,7 @@ ALLOWED_TYPES = {
     "feature",
     "fix",
     "refactor",
+    "style",
     "performance",
     "build",
     "docs",
