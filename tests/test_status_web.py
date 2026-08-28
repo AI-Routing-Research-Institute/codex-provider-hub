@@ -1000,6 +1000,52 @@ class ProviderSortTests(unittest.TestCase):
             ["first", "second", "negative", "boolean"],
         )
 
+    def test_provider_sort_manual_order_only_breaks_down_provider_ties(self) -> None:
+        providers = [
+            {"provider_id": "healthy", "state": "healthy", "models": []},
+            {"provider_id": "down-late", "state": "down", "models": []},
+            {"provider_id": "degraded", "state": "degraded", "models": []},
+            {"provider_id": "down-early", "state": "down", "models": []},
+        ]
+
+        sorted_providers = _sort_providers_by_model(
+            providers,
+            "gpt-5.6-sol",
+            manual_order={"down-early": 0, "down-late": 1},
+        )
+
+        self.assertEqual(
+            [provider["provider_id"] for provider in sorted_providers],
+            ["healthy", "degraded", "down-early", "down-late"],
+        )
+
+    def test_provider_sort_manual_order_applies_to_down_manual_success_ties(self) -> None:
+        providers = [
+            {"provider_id": "down-late", "state": "down", "models": []},
+            {"provider_id": "down-early", "state": "down", "models": []},
+        ]
+        manual_jobs = {
+            provider_id: self.manual_job(
+                provider_id,
+                model="gpt-5.6-sol",
+                success=True,
+                finished_at="2026-07-24T05:00:00+00:00",
+            )
+            for provider_id in ("down-late", "down-early")
+        }
+
+        sorted_providers = _sort_providers_by_model(
+            providers,
+            "gpt-5.6-sol",
+            manual_jobs,
+            manual_order={"down-early": 0, "down-late": 1},
+        )
+
+        self.assertEqual(
+            [provider["provider_id"] for provider in sorted_providers],
+            ["down-early", "down-late"],
+        )
+
     def test_provider_sort_uses_manual_success_when_model_is_missing(self) -> None:
         providers = [
             self.provider_rank("automatic-success", 0, "2026-07-23T05:00:00+00:00"),

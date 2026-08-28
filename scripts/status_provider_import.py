@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -137,6 +138,65 @@ def order_providers(provider_ids: list[str], *, fragment_root: Path = FRAGMENT_R
     fragment_root.mkdir(parents=True, exist_ok=True)
     _atomic_write(fragment_root / ".order.json", json.dumps(provider_ids, ensure_ascii=False) + "\n", 0o644)
     return {"status": "ordered", "provider_ids": provider_ids}
+
+
+def _set_probe_mode_in_text(text: str, provider_id: str, probe_mode: str) -> str | None:
+    parts = re.split(r"(?m)(?=^\[\[providers\]\]\s*$)", text)
+    for index, block in enumerate(parts):
+        if _provider_block_id(block) != provider_id:
+            continue
+        if re.search(r"(?m)^probe_mode\s*=\s*(['\"])", block):
+            updated = re.sub(
+                r"(?m)^probe_mode\s*=\s*(['\"])[^'\"]*\1\s*$",
+                f"probe_mode = {json.dumps(probe_mode)}",
+                block,
+                count=1,
+            )
+        else:
+            lines = block.splitlines(keepends=True)
+            insert_at = 1 if lines and lines[0].strip() == "[[providers]]" else 0
+            lines.insert(insert_at, f"probe_mode = {json.dumps(probe_mode)}\n")
+            updated = "".join(lines)
+        parts[index] = updated
+        return "".join(parts)
+    return None
+
+
+def disable_provider(
+    provider_id: str,
+    *,
+    probe_mode: str = "manual_only",
+    config_path: Path = CONFIG_PATH,
+    fragment_root: Path = FRAGMENT_ROOT,
+) -> dict[str, Any]:
+    if not ID_RE.fullmatch(provider_id):
+        raise ImportErrorDetail("provider_id 格式无效")
+    if probe_mode != "manual_only":
+        raise ImportErrorDetail("probe_mode 只能设置为 manual_only")
+    fragment_path = fragment_root / f"{provider_id}.toml"
+    source_path = fragment_path if fragment_path.is_file() else config_path
+    if not source_path.is_file():
+        raise ImportErrorDetail("未找到指定供应商")
+    original = source_path.read_text(encoding="utf-8")
+    updated = _set_probe_mode_in_text(original, provider_id, probe_mode)
+    if updated is None:
+        raise ImportErrorDetail("未找到指定供应商")
+    original_mode = stat.S_IMODE(source_path.stat().st_mode)
+    _atomic_write(source_path, updated, original_mode or 0o644)
+    try:
+        _restart_worker()
+    except Exception:
+        _restore_file(source_path, original.encode("utf-8"))
+        try:
+            os.chmod(source_path, original_mode)
+        except OSError:
+            pass
+        try:
+            _restart_worker(check=False)
+        except Exception:
+            pass
+        raise
+    return {"status": "disabled", "provider_id": provider_id, "probe_mode": probe_mode}
 
 
 def _delete_public_provider(provider_id: str, database_path: Path | None = None) -> None:
@@ -507,6 +567,11 @@ def serve() -> dict[str, Any]:
             return _delete_and_restart(str(payload.get("provider_id") or ""))
         if action == "order":
             return _order_and_restart(list(payload.get("provider_ids") or []))
+        if action == "disable":
+            return disable_provider(
+                str(payload.get("provider_id") or ""),
+                probe_mode=str(payload.get("probe_mode") or "manual_only"),
+            )
         return _import_and_restart(payload)
 
 
