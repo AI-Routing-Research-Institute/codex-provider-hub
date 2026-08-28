@@ -58,6 +58,8 @@ status = "verified"
 - `AGENTS.md` 与 `.agents/skills/git-commit-helper/SKILL.md`：还原完整门禁与自动发版流程描述。
 - `tests/test_team_policy.py`、`tests/test_windows_release.py`、`tests/test_macos_release.py`：还原治理测试。
 - `scripts/team_policy.py` 与两个发布工作流：JS 语法检查路径适配 `#48` 的 Vue 3 + Vite 结构（`proxy_static/src/*.js` + `provider_status/static/app.js`）。
+- `scripts/team_policy.py`：`ALLOWED_TYPES` 增加 `style` 类型（与 commit emoji 的 🌈 style 对齐；#48 起合入的 UI 变更记录使用该类型）。
+- 修正 `2026-08-21-tailwind-css-integration.md` 的 status 为 `verified`（原为非法值 `completed`，阻塞 auto-release 版本计算）。
 - 新增本变更说明。
 
 ## 验证结果
@@ -69,4 +71,4 @@ status = "verified"
 
 ## PR
 
-pending
+#49

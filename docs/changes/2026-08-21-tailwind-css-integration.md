@@ -2,7 +2,7 @@
 id = "2026-08-21-tailwind-css-integration"
 type = "feature"
 release_bump = "minor"
-status = "completed"
+status = "verified"
 +++
 
 # 集成 Tailwind CSS 并现代化 UI 组件
