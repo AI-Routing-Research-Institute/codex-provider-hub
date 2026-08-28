@@ -8,6 +8,31 @@ from local_proxy.core import ProxyProvider
 
 
 class CodexProfileTests(unittest.TestCase):
+    def test_status_upload_visibility_defaults_on_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "codex-data"
+            with (
+                mock.patch.object(codex_profile, "load_local_proxy_providers", return_value=()),
+                mock.patch.object(codex_profile.httpx, "AsyncClient"),
+                mock.patch.object(codex_profile, "CurlClient"),
+            ):
+                profile = codex_profile.build_codex_profile(
+                    database=Path(temp_dir) / "cc-switch.db",
+                    port=17890,
+                    data_root=root,
+                )
+
+                self.assertTrue(profile.runtime_metadata()["show_status_upload"])
+                profile.apply_runtime_preferences({"show_status_upload": False})
+                self.assertFalse(profile.runtime_metadata()["show_status_upload"])
+                self.assertFalse(
+                    codex_profile.load_settings(root / "codex-settings.json")[
+                        "show_status_upload"
+                    ]
+                )
+                with self.assertRaisesRegex(ValueError, "上传检测"):
+                    profile.apply_runtime_preferences({"show_status_upload": "no"})
+
     def test_build_profile_selects_transport_per_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database = Path(temp_dir) / "cc-switch.db"

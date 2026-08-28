@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
+
+from local_proxy.diagnostics import DiagnosticLog, EventLoopWatchdog
 
 
 try:
@@ -116,18 +119,53 @@ class UpstreamResponseHeadersTimeout(TimeoutError):
 class RuntimeDiagnostics:
     """Small thread-safe snapshot of event-loop and request pressure."""
 
-    def __init__(self, *, heartbeat_interval_seconds: float = 0.5) -> None:
+    def __init__(
+        self,
+        *,
+        heartbeat_interval_seconds: float = 0.5,
+        diagnostic_log_path: Path | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
         self._last_heartbeat_at = 0.0
+        self._last_heartbeat_monotonic = 0.0
         self._last_lag_ms = 0.0
         self._max_lag_ms = 0.0
+        self._watchdog_event_count = 0
+        self._last_watchdog_at = 0.0
+        self._last_watchdog_stall_ms = 0.0
+        self._diagnostic_log_path = (
+            str(diagnostic_log_path.expanduser().resolve())
+            if diagnostic_log_path is not None
+            else None
+        )
+
+    def arm(self) -> None:
+        with self._lock:
+            self._last_heartbeat_at = time.time()
+            self._last_heartbeat_monotonic = time.monotonic()
 
     def observe_heartbeat(self, lag_ms: float) -> None:
         with self._lock:
             self._last_heartbeat_at = time.time()
+            self._last_heartbeat_monotonic = time.monotonic()
             self._last_lag_ms = max(0.0, float(lag_ms))
             self._max_lag_ms = max(self._max_lag_ms, self._last_lag_ms)
+
+    def stalled_for_ms(self) -> float:
+        with self._lock:
+            if not self._last_heartbeat_monotonic:
+                return 0.0
+            return max(
+                0.0,
+                (time.monotonic() - self._last_heartbeat_monotonic) * 1000,
+            )
+
+    def observe_watchdog_event(self, stalled_ms: float) -> None:
+        with self._lock:
+            self._watchdog_event_count += 1
+            self._last_watchdog_at = time.time()
+            self._last_watchdog_stall_ms = max(0.0, float(stalled_ms))
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -140,6 +178,18 @@ class RuntimeDiagnostics:
                 ),
                 "event_loop_lag_ms": round(self._last_lag_ms),
                 "event_loop_max_lag_ms": round(self._max_lag_ms),
+                "watchdog_event_count": self._watchdog_event_count,
+                "last_watchdog_at": (
+                    round(self._last_watchdog_at * 1000)
+                    if self._last_watchdog_at
+                    else None
+                ),
+                "last_watchdog_stall_ms": (
+                    round(self._last_watchdog_stall_ms)
+                    if self._last_watchdog_at
+                    else None
+                ),
+                "diagnostic_log_path": self._diagnostic_log_path,
             }
 
 
@@ -314,9 +364,11 @@ class TokenUsage:
 class UsageStore:
     """Persist aggregate-safe request usage without request or response content."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, run_id: str | None = None) -> None:
         self.path = path
+        self.run_id = str(run_id or uuid.uuid4().hex)[:64]
         self._lock = threading.Lock()
+        self._inflight_lock = threading.Lock()
         self._last_request_history_cleanup_at = 0.0
         self._initialize()
 
@@ -324,6 +376,12 @@ class UsageStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=5.0)
         connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+
+    def _connect_inflight(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path, timeout=0.1)
+        connection.execute("PRAGMA busy_timeout = 100")
         return connection
 
     def _initialize(self) -> None:
@@ -385,6 +443,24 @@ class UsageStore:
                     ON request_history(session_key);
                 CREATE INDEX IF NOT EXISTS request_history_usage_id
                     ON request_history(usage_id);
+                CREATE TABLE IF NOT EXISTS inflight_requests (
+                    run_id TEXT NOT NULL,
+                    request_id INTEGER NOT NULL,
+                    started_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    session_key TEXT,
+                    session_name TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    reasoning_effort TEXT,
+                    phase TEXT NOT NULL,
+                    request_body_bytes INTEGER NOT NULL DEFAULT 0,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (run_id, request_id)
+                );
+                CREATE INDEX IF NOT EXISTS inflight_requests_updated_at
+                    ON inflight_requests(updated_at);
                 """
             )
             columns = {
@@ -407,6 +483,124 @@ class UsageStore:
                 SET succeeded = CASE WHEN status_code BETWEEN 200 AND 299 THEN 1 ELSE 0 END
                 WHERE succeeded IS NULL
                 """
+            )
+            self._recover_interrupted_requests(connection)
+
+    def _recover_interrupted_requests(self, connection: sqlite3.Connection) -> None:
+        recovered_at = time.time()
+        connection.execute(
+            """
+            INSERT INTO request_history (
+                started_at, finished_at, provider_id, thread_id, session_key,
+                session_name, model, reasoning_effort, status_code, succeeded,
+                outcome, duration_ms, retry_count, error_kind, error_summary,
+                usage_id, input_tokens, output_tokens, total_tokens,
+                cached_tokens, reasoning_tokens, usage_source, estimate_method
+            )
+            SELECT
+                started_at, ?, provider_id, thread_id, session_key,
+                session_name, model, reasoning_effort, NULL, 0,
+                'interrupted',
+                CAST(MAX(0, (? - started_at) * 1000) AS INTEGER),
+                retry_count, 'process_restarted',
+                '本地中转在请求完成前退出或重启（阶段：' || phase ||
+                    '，请求体：' || request_body_bytes || ' 字节）',
+                NULL, 0, 0, 0, 0, 0, NULL, NULL
+            FROM inflight_requests
+            """,
+            (recovered_at, recovered_at),
+        )
+        connection.execute("DELETE FROM inflight_requests")
+
+    def start_inflight_request(
+        self,
+        *,
+        request_id: int,
+        started_at: float,
+        provider_id: str,
+        thread_id: str | None,
+        session_name: str = "未知会话",
+        model: str = "unknown",
+        reasoning_effort: str | None = None,
+        phase: str = "accepted",
+        request_body_bytes: int = 0,
+        retry_count: int = 0,
+    ) -> None:
+        timestamp = time.time()
+        safe_thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
+        values = (
+            self.run_id,
+            int(request_id),
+            min(float(started_at), timestamp),
+            timestamp,
+            str(provider_id)[:240],
+            safe_thread_id,
+            _session_key(safe_thread_id),
+            str(session_name or "未知会话")[:240],
+            str(model or "unknown")[:240],
+            _normalize_reasoning_effort(reasoning_effort),
+            str(phase or "accepted")[:40],
+            max(0, int(request_body_bytes)),
+            max(0, int(retry_count)),
+        )
+        with (
+            self._inflight_lock,
+            closing(self._connect_inflight()) as connection,
+            connection,
+        ):
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO inflight_requests (
+                    run_id, request_id, started_at, updated_at, provider_id,
+                    thread_id, session_key, session_name, model,
+                    reasoning_effort, phase, request_body_bytes, retry_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+
+    def update_inflight_request(
+        self,
+        request_id: int,
+        *,
+        provider_id: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        phase: str | None = None,
+        request_body_bytes: int | None = None,
+        retry_count: int | None = None,
+    ) -> None:
+        assignments = ["updated_at = ?"]
+        values: list[Any] = [time.time()]
+        optional_values = (
+            ("provider_id", None if provider_id is None else str(provider_id)[:240]),
+            ("model", None if model is None else str(model or "unknown")[:240]),
+            (
+                "reasoning_effort",
+                None if reasoning_effort is None else _normalize_reasoning_effort(reasoning_effort),
+            ),
+            ("phase", None if phase is None else str(phase or "requesting")[:40]),
+            (
+                "request_body_bytes",
+                None if request_body_bytes is None else max(0, int(request_body_bytes)),
+            ),
+            ("retry_count", None if retry_count is None else max(0, int(retry_count))),
+        )
+        for column, value in optional_values:
+            if value is None:
+                continue
+            assignments.append(f"{column} = ?")
+            values.append(value)
+        values.extend((self.run_id, int(request_id)))
+        with (
+            self._inflight_lock,
+            closing(self._connect_inflight()) as connection,
+            connection,
+        ):
+            connection.execute(
+                f"UPDATE inflight_requests SET {', '.join(assignments)} "
+                "WHERE run_id = ? AND request_id = ?",
+                values,
             )
 
     def record(
@@ -451,6 +645,7 @@ class UsageStore:
     def record_request(
         self,
         *,
+        request_id: int | None = None,
         started_at: float,
         provider_id: str,
         thread_id: str | None,
@@ -515,6 +710,11 @@ class UsageStore:
                 """,
                 values,
             )
+            if request_id is not None:
+                connection.execute(
+                    "DELETE FROM inflight_requests WHERE run_id = ? AND request_id = ?",
+                    (self.run_id, int(request_id)),
+                )
             self._cleanup_request_history_if_due(connection, completed_at)
 
     def request_history(
@@ -1623,6 +1823,7 @@ class ActiveRequest:
     started_wall_at: float
     model: str = "unknown"
     reasoning_effort: str | None = None
+    request_body_bytes: int = 0
     phase: str = "requesting"
     last_activity_wall_at: float | None = None
 
@@ -1948,6 +2149,7 @@ class ProviderRouter:
         snapshot: RouteSnapshot,
         model: str,
         reasoning_effort: str | None = None,
+        request_body_bytes: int | None = None,
     ) -> None:
         with self._lock:
             detail = self._active_request_details.get(snapshot.request_id)
@@ -1960,6 +2162,11 @@ class ProviderRouter:
                 started_wall_at=detail.started_wall_at,
                 model=str(model or "unknown")[:240],
                 reasoning_effort=_normalize_reasoning_effort(reasoning_effort),
+                request_body_bytes=(
+                    detail.request_body_bytes
+                    if request_body_bytes is None
+                    else max(0, int(request_body_bytes))
+                ),
                 phase=detail.phase,
                 last_activity_wall_at=detail.last_activity_wall_at,
             )
@@ -1982,6 +2189,7 @@ class ProviderRouter:
                 started_wall_at=detail.started_wall_at,
                 model=detail.model,
                 reasoning_effort=detail.reasoning_effort,
+                request_body_bytes=detail.request_body_bytes,
                 phase=str(phase or "requesting")[:40],
                 last_activity_wall_at=(
                     time.time() if activity else detail.last_activity_wall_at
@@ -2065,6 +2273,7 @@ class ProviderRouter:
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
                     reasoning_effort=detail.reasoning_effort,
+                    request_body_bytes=detail.request_body_bytes,
                     phase=detail.phase,
                     last_activity_wall_at=detail.last_activity_wall_at,
                 )
@@ -2143,6 +2352,7 @@ class ProviderRouter:
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
                     reasoning_effort=detail.reasoning_effort,
+                    request_body_bytes=detail.request_body_bytes,
                     phase="retrying",
                     last_activity_wall_at=detail.last_activity_wall_at,
                 )
@@ -2272,6 +2482,25 @@ def _default_ui_config(service_name: str) -> dict[str, Any]:
     }
 
 
+def _diagnostic_active_requests(
+    services: Iterable[tuple[str, ProviderRouter]],
+) -> tuple[dict[str, Any], ...]:
+    now = time.time()
+    return tuple(
+        {
+            "service": service_name,
+            "request_id": detail.request_id,
+            "provider_id": detail.provider_id,
+            "model": detail.model,
+            "phase": detail.phase,
+            "request_body_bytes": detail.request_body_bytes,
+            "age_ms": max(0, round((now - detail.started_wall_at) * 1000)),
+        }
+        for service_name, router in services
+        for detail in router.status().active_request_details
+    )
+
+
 def create_proxy_app(
     router: ProviderRouter | None = None,
     *,
@@ -2315,6 +2544,7 @@ def create_proxy_app(
     codex_profile: Any | None = None,
     claude_profile: Any | None = None,
     update_controller: Any | None = None,
+    diagnostic_log: DiagnosticLog | None = None,
 ) -> FastAPI:
     if codex_profile is not None or claude_profile is not None:
         if codex_profile is None or claude_profile is None:
@@ -2329,6 +2559,7 @@ def create_proxy_app(
             update_controller=update_controller,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
             upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
+            diagnostic_log=diagnostic_log,
         )
     if router is None:
         raise ValueError("必须提供供应商路由器")
@@ -2360,7 +2591,9 @@ def create_proxy_app(
         health_status_url
     )
     active_input_item_id_compatibility_store = input_item_id_compatibility_store
-    runtime_diagnostics = RuntimeDiagnostics()
+    runtime_diagnostics = RuntimeDiagnostics(
+        diagnostic_log_path=(diagnostic_log.path if diagnostic_log is not None else None)
+    )
     if (
         active_input_item_id_compatibility_store is None
         and service_name == "codex-local-proxy"
@@ -2370,14 +2603,35 @@ def create_proxy_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        runtime_diagnostics.arm()
         heartbeat_task = asyncio.create_task(_event_loop_heartbeat(runtime_diagnostics))
+        watchdog = (
+            EventLoopWatchdog(
+                runtime_diagnostics,
+                diagnostic_log,
+                active_requests=lambda: _diagnostic_active_requests(
+                    ((service_name, router),)
+                ),
+            )
+            if diagnostic_log is not None
+            else None
+        )
+        if diagnostic_log is not None:
+            diagnostic_log.write_event("service_started", service=service_name)
+        if watchdog is not None:
+            watchdog.start()
         try:
             yield
         finally:
+            if watchdog is not None:
+                watchdog.stop()
             heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
             if owns_client:
                 await upstream_client.aclose()
+            if diagnostic_log is not None:
+                diagnostic_log.write_event("service_stopped", service=service_name)
+                diagnostic_log.close()
 
     app = FastAPI(
         docs_url=None,
@@ -2969,6 +3223,7 @@ def _public_control_status(
             "provider_id": detail.provider_id,
             "model": detail.model,
             "phase": detail.phase,
+            "request_body_bytes": detail.request_body_bytes,
             "started_at": round(detail.started_wall_at * 1000),
             "age_ms": max(0, round((now - detail.started_wall_at) * 1000)),
             "last_activity_at": (
@@ -3304,6 +3559,49 @@ def _record_recovery_event(
         pass
 
 
+def _start_inflight_request(
+    store: UsageStore | None,
+    *,
+    snapshot: RouteSnapshot,
+    thread_id: str | None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None,
+) -> None:
+    if store is None:
+        return
+    session_name = "未知会话"
+    if thread_id is not None and session_name_resolver is not None:
+        try:
+            session_name = session_name_resolver((thread_id,)).get(
+                thread_id,
+                session_name,
+            )
+        except (OSError, TypeError, ValueError):
+            pass
+    try:
+        store.start_inflight_request(
+            request_id=snapshot.request_id,
+            started_at=snapshot.started_wall_at,
+            provider_id=snapshot.provider.provider_id,
+            thread_id=thread_id,
+            session_name=session_name,
+        )
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def _update_inflight_request(
+    store: UsageStore | None,
+    request_id: int,
+    **changes: Any,
+) -> None:
+    if store is None:
+        return
+    try:
+        store.update_inflight_request(request_id, **changes)
+    except (OSError, sqlite3.Error):
+        pass
+
+
 def _record_request_event(
     store: UsageStore | None,
     *,
@@ -3334,6 +3632,7 @@ def _record_request_event(
             pass
     try:
         store.record_request(
+            request_id=snapshot.request_id,
             started_at=snapshot.started_wall_at,
             provider_id=snapshot.provider.provider_id,
             thread_id=thread_id,
@@ -3360,6 +3659,30 @@ async def _record_recovery_event_async(
     if store is None:
         return
     await asyncio.to_thread(_record_recovery_event, store, **event)
+
+
+async def _start_inflight_request_async(
+    store: UsageStore | None,
+    **event: Any,
+) -> None:
+    if store is None:
+        return
+    await asyncio.to_thread(_start_inflight_request, store, **event)
+
+
+async def _update_inflight_request_async(
+    store: UsageStore | None,
+    request_id: int,
+    **changes: Any,
+) -> None:
+    if store is None:
+        return
+    await asyncio.to_thread(
+        _update_inflight_request,
+        store,
+        request_id,
+        **changes,
+    )
 
 
 async def _record_request_event_async(
@@ -3481,6 +3804,12 @@ async def _forward_request(
             content={"error": {"message": "本地中转尚未配置可用供应商"}},
         )
     provider = snapshot.provider
+    await _start_inflight_request_async(
+        usage_store,
+        snapshot=snapshot,
+        thread_id=thread_id,
+        session_name_resolver=session_name_resolver,
+    )
     if not provider.has_credentials:
         router.finish_request(snapshot, status_code=503, error="credential_missing")
         await _record_request_event_async(
@@ -3543,7 +3872,20 @@ async def _forward_request(
             content={"error": {"message": "请求体超过本地中转允许的大小"}},
         )
     model, reasoning_effort = await asyncio.to_thread(_request_metadata, request_body)
-    router.update_request_model(snapshot, model, reasoning_effort)
+    router.update_request_model(
+        snapshot,
+        model,
+        reasoning_effort,
+        request_body_bytes=len(request_body),
+    )
+    await _update_inflight_request_async(
+        usage_store,
+        snapshot.request_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        phase="connecting",
+        request_body_bytes=len(request_body),
+    )
     upstream_response: httpx.Response | None = None
     first_chunk: bytes | None = None
     stream: AsyncIterator[bytes] | None = None
@@ -3562,6 +3904,13 @@ async def _forward_request(
         reroute_before_attempt = True
         provider = snapshot.provider
         router.update_request_phase(snapshot, "connecting")
+        await _update_inflight_request_async(
+            usage_store,
+            snapshot.request_id,
+            provider_id=provider.provider_id,
+            phase="connecting",
+            retry_count=max(0, attempt - 1),
+        )
         attempt_client = (
             client_selector(provider) if client_selector is not None else client
         )
@@ -3626,6 +3975,11 @@ async def _forward_request(
                 timeout_seconds=upstream_response_headers_timeout_seconds,
             )
             router.update_request_phase(snapshot, "waiting_first_chunk")
+            await _update_inflight_request_async(
+                usage_store,
+                snapshot.request_id,
+                phase="waiting_first_chunk",
+            )
             retry_kind = None
             if retry_policy.enabled:
                 retry_kind = (
@@ -3733,6 +4087,12 @@ async def _forward_request(
                     and retry_policy.enabled
                 ):
                     assert stream is not None
+                    router.update_request_phase(snapshot, "preflighting_sse")
+                    await _update_inflight_request_async(
+                        usage_store,
+                        snapshot.request_id,
+                        phase="preflighting_sse",
+                    )
                     first_chunk, retry_kind, retry_summary = (
                         await _inspect_sse_before_output(
                             first_chunk,
@@ -3838,6 +4198,13 @@ async def _forward_request(
                 error_summary=retry_summary,
                 error_provider_id=failed_provider_id,
             )
+            await _update_inflight_request_async(
+                usage_store,
+                snapshot.request_id,
+                provider_id=snapshot.provider.provider_id,
+                phase="retrying",
+                retry_count=attempt,
+            )
         await _record_recovery_event_async(
             recovery_history_store,
             snapshot=snapshot,
@@ -3929,6 +4296,11 @@ async def _forward_request(
                     first_chunk,
                 )
                 router.update_request_phase(snapshot, "receiving", activity=True)
+                await _update_inflight_request_async(
+                    usage_store,
+                    snapshot.request_id,
+                    phase="receiving",
+                )
                 yield first_chunk
             assert stream is not None
             async for chunk in stream:
@@ -4307,20 +4679,17 @@ async def _inspect_sse_before_output(
 ) -> tuple[bytes | None, str | None, str | None]:
     decide = decision or _sse_preflight_decision
     buffered = bytearray(first_chunk)
+    event_parser = SSEPreflightEventParser()
     marker_capture = SSECapacityFailureCapture()
     raw_failure = marker_capture.feed(first_chunk)
-    boundary_tail = first_chunk[-3:]
-    decision_required = _sse_chunk_completes_event(b"", first_chunk)
+    pending_events = event_parser.feed(first_chunk)
     while True:
-        action, retry_kind, retry_summary = (
-            decide(bytes(buffered))
-            if decision_required
-            else ("wait", None, None)
-        )
-        if action == "retry":
-            return None, retry_kind, retry_summary
-        if action == "commit":
-            return bytes(buffered), None, None
+        for event in pending_events:
+            action, retry_kind, retry_summary = decide(event + b"\n\n")
+            if action == "retry":
+                return None, retry_kind, retry_summary
+            if action == "commit":
+                return bytes(buffered), None, None
         if raw_failure is not None:
             return None, raw_failure[0], raw_failure[1]
         if len(buffered) >= SSE_RETRY_PREFLIGHT_BYTES:
@@ -4328,12 +4697,18 @@ async def _inspect_sse_before_output(
         try:
             chunk = await anext(stream)
             raw_failure = marker_capture.feed(chunk)
-            decision_required = _sse_chunk_completes_event(boundary_tail, chunk)
-            boundary_tail = (boundary_tail + chunk)[-3:]
+            pending_events = event_parser.feed(chunk)
             buffered.extend(chunk)
         except StopAsyncIteration:
+            finalized_events, remaining = event_parser.finalize()
+            for event in finalized_events:
+                action, retry_kind, retry_summary = decide(event + b"\n\n")
+                if action == "retry":
+                    return None, retry_kind, retry_summary
+                if action == "commit":
+                    return bytes(buffered), None, None
             action, retry_kind, retry_summary = decide(
-                bytes(buffered),
+                remaining,
                 end_of_stream=True,
             )
             if action == "retry":
@@ -4341,10 +4716,50 @@ async def _inspect_sse_before_output(
             return bytes(buffered) or None, None, None
 
 
-def _sse_chunk_completes_event(previous_tail: bytes, chunk: bytes) -> bool:
-    boundary_window = previous_tail + chunk
-    normalized = boundary_window.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    return b"\n\n" in normalized
+class SSEPreflightEventParser:
+    """Split SSE events incrementally while preserving an unfinished event."""
+
+    def __init__(self) -> None:
+        self._line = bytearray()
+        self._event_lines: list[bytes] = []
+        self._pending_cr = False
+
+    def feed(self, chunk: bytes) -> tuple[bytes, ...]:
+        completed: list[bytes] = []
+        for value in chunk:
+            if self._pending_cr:
+                self._finish_line(completed)
+                self._pending_cr = False
+                if value == 0x0A:
+                    continue
+            if value == 0x0D:
+                self._pending_cr = True
+            elif value == 0x0A:
+                self._finish_line(completed)
+            else:
+                self._line.append(value)
+        return tuple(completed)
+
+    def finalize(self) -> tuple[tuple[bytes, ...], bytes]:
+        completed: list[bytes] = []
+        if self._pending_cr:
+            self._finish_line(completed)
+            self._pending_cr = False
+        if self._line:
+            self._event_lines.append(bytes(self._line))
+            self._line.clear()
+        remaining = b"\n".join(self._event_lines)
+        self._event_lines.clear()
+        return tuple(completed), remaining
+
+    def _finish_line(self, completed: list[bytes]) -> None:
+        line = bytes(self._line)
+        self._line.clear()
+        if line:
+            self._event_lines.append(line)
+            return
+        completed.append(b"\n".join(self._event_lines))
+        self._event_lines.clear()
 
 
 def _sse_preflight_decision(
@@ -4381,6 +4796,7 @@ class SSECapacityFailureCapture:
     def __init__(self) -> None:
         self._tail = b""
         self._line_has_content = False
+        self._skip_lf = False
         self._failed_event = False
         self._capacity_code = False
         self._capacity_message = False
@@ -4391,11 +4807,21 @@ class SSECapacityFailureCapture:
             return self._failure
         offset = 0
         while offset < len(chunk):
-            newline = chunk.find(b"\n", offset)
-            line_end = len(chunk) if newline < 0 else newline
+            if self._skip_lf:
+                self._skip_lf = False
+                if chunk[offset] == 0x0A:
+                    offset += 1
+                    continue
+            carriage_return = chunk.find(b"\r", offset)
+            line_feed = chunk.find(b"\n", offset)
+            line_end = min(
+                value
+                for value in (carriage_return, line_feed, len(chunk))
+                if value >= 0
+            )
             segment = chunk[offset:line_end]
             self._scan_segment(segment)
-            if segment.strip(b"\r"):
+            if segment:
                 self._line_has_content = True
             if self._failed_event and (
                 self._capacity_code or self._capacity_message
@@ -4411,14 +4837,18 @@ class SSECapacityFailureCapture:
                     _sanitize_retry_summary(summary),
                 )
                 return self._failure
-            if newline < 0:
+            if line_end == len(chunk):
                 break
-            if not self._line_has_content:
-                self._reset_event()
-            self._line_has_content = False
-            self._tail = b""
-            offset = newline + 1
+            self._finish_line()
+            self._skip_lf = chunk[line_end] == 0x0D
+            offset = line_end + 1
         return self._failure
+
+    def _finish_line(self) -> None:
+        if not self._line_has_content:
+            self._reset_event()
+        self._line_has_content = False
+        self._tail = b""
 
     def _scan_segment(self, segment: bytes) -> None:
         if not segment:

@@ -17,12 +17,41 @@ from local_proxy.claude_profile import (
 
 
 class ClaudeLocalProxySettingsTests(unittest.TestCase):
+    def test_status_upload_visibility_defaults_on_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "claude-data"
+            with (
+                mock.patch.object(
+                    claude_profile,
+                    "load_claude_proxy_providers",
+                    return_value=(),
+                ),
+                mock.patch.object(claude_profile, "ClaudeCurlClient"),
+            ):
+                profile = claude_profile.build_claude_profile(
+                    database=Path(temp_dir) / "cc-switch.db",
+                    port=17890,
+                    data_root=root,
+                )
+
+                self.assertTrue(profile.runtime_metadata()["show_status_upload"])
+                profile.apply_runtime_preferences({"show_status_upload": False})
+                self.assertFalse(profile.runtime_metadata()["show_status_upload"])
+                self.assertFalse(
+                    claude_profile.load_settings(root / "claude-settings.json")[
+                        "show_status_upload"
+                    ]
+                )
+                with self.assertRaisesRegex(ValueError, "上传检测"):
+                    profile.apply_runtime_preferences({"show_status_upload": "no"})
+
     def test_ui_config_uses_unified_port_and_peer_console_path(self) -> None:
         config = claude_ui_config(19000, Path("C:/claude-local-proxy"))
         self.assertEqual(config["config_button_label"], "导入到 CCS")
         self.assertEqual(config["proxy_url"], "http://127.0.0.1:19000")
         self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/codex/")
         self.assertEqual(config["config_endpoint"], "/control/claude/api/claude-config")
+        self.assertTrue(config["features"]["status_upload"])
 
     def test_defaults_use_shared_data_directory_and_protocol_files(self) -> None:
         self.assertNotIn("port", default_settings())

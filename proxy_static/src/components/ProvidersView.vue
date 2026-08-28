@@ -44,7 +44,7 @@
               <div class="provider-title">
                 <button class="provider-select" type="button" :disabled="provider.current || manageMode || switchingId === provider.provider_id" @click.stop="selectProvider(provider)"><strong>{{ provider.name }}</strong></button>
                 <button v-if="showLaunchCommand && !manageMode" class="copy-command" type="button" @click.stop="copyLaunchCommand(provider)">复制临时启动命令</button>
-                <button v-if="provider.status_upload_supported && !manageMode" class="copy-command status-upload-button" type="button" @click.stop="openStatusUpload(provider)">上传检测</button>
+                <button v-if="showStatusUpload && provider.status_upload_supported && !manageMode" class="copy-command status-upload-button" type="button" @click.stop="openStatusUpload(provider)">上传检测</button>
               </div>
               <code>{{ provider.endpoint || '未提供地址' }}</code>
             </div>
@@ -134,7 +134,7 @@ import UiIcon from './ui/UiIcon.vue'
 
 const status = ref({ providers: [], usage: { total: {}, by_provider: {} }, retry: {} })
 const uiConfig = ref({ features: {} })
-const props = defineProps({ showLaunchCommand: { type: Boolean, default: true } })
+const props = defineProps({ showLaunchCommand: { type: Boolean, default: true }, showStatusUpload: { type: Boolean, default: true } })
 const health = ref(null)
 const healthError = ref('')
 const loading = ref(true)
@@ -175,6 +175,7 @@ const form = ref(emptyForm())
 const providers = computed(() => status.value.providers || [])
 const catalogEnabled = computed(() => uiConfig.value.features?.provider_catalog === true)
 const showLaunchCommand = computed(() => uiConfig.value.features?.provider_launch_command !== false && props.showLaunchCommand)
+const showStatusUpload = computed(() => uiConfig.value.features?.status_upload !== false && props.showStatusUpload)
 const visibleProviders = computed(() => providers.value.filter(provider => manageMode.value || !provider.hidden))
 const hiddenCount = computed(() => providers.value.filter(provider => provider.hidden).length)
 const filteredProviders = computed(() => { const term = query.value.trim().toLocaleLowerCase(); return visibleProviders.value.filter(provider => !term || [provider.name, provider.endpoint].some(value => String(value || '').toLocaleLowerCase().includes(term))) })

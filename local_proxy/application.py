@@ -39,6 +39,7 @@ from local_proxy.codex_profile import (
     codex_ui_config,
     load_settings as load_codex_settings,
 )
+from local_proxy.diagnostics import DiagnosticLog
 from local_proxy.paths import display_path, resolve_user_path
 from local_proxy.status_upload import StatusUploadManager
 from local_proxy.shared_settings import (
@@ -326,6 +327,9 @@ def run_application(
         claude_profile=claude_profile,
         on_shutdown_requested=stop_application,
         update_controller=update_controller,
+        diagnostic_log=DiagnosticLog(
+            data_directory() / "logs" / "proxy-diagnostics.log"
+        ),
     )
     server = LocalProxyServer(
         host=DEFAULT_HOST,

@@ -11,6 +11,7 @@ import httpx
 from local_proxy.claude import ClaudeProxyProvider
 from local_proxy.codex import codex_cli_launch_command
 from local_proxy.core import ProviderRouter, ProxyProvider, RetryPolicy, TokenUsage, UsageStore, create_proxy_app
+from local_proxy.diagnostics import DiagnosticLog
 from local_proxy.protocols.claude_messages import ClaudeMessagesProtocol
 from local_proxy.server import ProxyProfile
 from local_proxy.shared_settings import SharedRuntimeCoordinator, SharedSettingsStore
@@ -77,6 +78,7 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
             ui_config=lambda: {
                 "service_id": "codex",
                 "config_endpoint": "/control/codex/api/codex-config",
+                "features": {"status_upload": True, "private_feature": True},
                 "api_key": "must-not-leak",
             },
             config_fragment=lambda: "codex-config",
@@ -94,6 +96,7 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
             ui_config=lambda: {
                 "service_id": "claude",
                 "config_endpoint": "/control/claude/api/claude-config",
+                "features": {"status_upload": True},
             },
             config_fragment=lambda: "claude-config",
             config_endpoint_name="claude-config",
@@ -278,6 +281,9 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(codex_config.json()["service_id"], "codex")
         self.assertEqual(claude_config.json()["service_id"], "claude")
         self.assertEqual(codex_config.headers["cache-control"], "no-store")
+        self.assertTrue(codex_config.json()["features"]["status_upload"])
+        self.assertNotIn("private_feature", codex_config.json()["features"])
+        self.assertTrue(claude_config.json()["features"]["status_upload"])
         self.assertNotIn("api_key", codex_config.json())
         self.assertNotIn("codex-secret", codex_config.text)
         self.assertNotIn("claude-secret", claude_config.text)
@@ -405,6 +411,35 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["service"], "codex-provider-hub")
         self.assertEqual(set(response.json()["services"]), {"codex", "claude"})
         self.assertIn("event_loop_lag_ms", response.json()["diagnostics"])
+        self.assertIn("watchdog_event_count", response.json()["diagnostics"])
+        self.assertIn("last_watchdog_at", response.json()["diagnostics"])
+
+    async def test_health_reports_diagnostic_log_path_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "proxy-diagnostics.log"
+            diagnostic_log = DiagnosticLog(path)
+            app = create_proxy_app(
+                codex_profile=self.codex_profile,
+                claude_profile=self.claude_profile,
+                diagnostic_log=diagnostic_log,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            )
+            try:
+                async with app.router.lifespan_context(app):
+                    response = await client.get("/healthz")
+            finally:
+                await client.aclose()
+
+            self.assertEqual(
+                response.json()["diagnostics"]["diagnostic_log_path"],
+                str(path.resolve()),
+            )
+            log_text = path.read_text(encoding="utf-8")
+            self.assertIn('"event":"service_started"', log_text)
+            self.assertIn('"event":"service_stopped"', log_text)
 
     async def test_slow_request_history_does_not_block_health_endpoint(self) -> None:
         started = threading.Event()
