@@ -184,6 +184,68 @@ timeout_seconds = 90
 
     def test_management_list_does_not_expose_credential_name(self) -> None:
         self.assertNotIn("credential_name", status_import._public_management_provider({"id": "alpha", "credential_name": "secret.key"}))
+
+    def test_disable_provider_sets_manual_only_without_changing_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fragments = root / "providers.d"
+            fragments.mkdir()
+            fragment = fragments / "hybzg.toml"
+            fragment.write_text(
+                '[[providers]]\nid = "hybzg"\ncredential_name = "secret.key"\nprobe_mode = "automatic"\nmodels = ["gpt-test"]\n',
+                encoding="utf-8",
+            )
+            secret_root = root / "secrets"
+            secret_root.mkdir()
+            secret = secret_root / "secret.key"
+            secret.write_text("keep-me\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(status_import, "CONFIG_PATH", root / "providers.toml"),
+                mock.patch.object(status_import, "FRAGMENT_ROOT", fragments),
+                mock.patch.object(status_import, "SECRET_ROOT", secret_root),
+                mock.patch.object(status_import, "ORDER_PATH", fragments / ".order.json"),
+                mock.patch.object(status_import, "DROPIN_PATH", root / "dropin.conf"),
+                mock.patch.object(status_import, "_restart_worker"),
+            ):
+                result = status_import.disable_provider(
+                    "hybzg",
+                    config_path=root / "providers.toml",
+                    fragment_root=fragments,
+                )
+
+            self.assertEqual(result, {"status": "disabled", "provider_id": "hybzg", "probe_mode": "manual_only"})
+            self.assertIn('probe_mode = "manual_only"', fragment.read_text(encoding="utf-8"))
+            self.assertEqual(secret.read_text(encoding="utf-8"), "keep-me\n")
+
+    def test_disable_provider_restores_fragment_when_restart_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fragments = root / "providers.d"
+            fragments.mkdir()
+            fragment = fragments / "hybzg.toml"
+            original = '[[providers]]\nid = "hybzg"\nprobe_mode = "automatic"\n'
+            fragment.write_text(original, encoding="utf-8")
+
+            with (
+                mock.patch.object(status_import, "CONFIG_PATH", root / "providers.toml"),
+                mock.patch.object(status_import, "FRAGMENT_ROOT", fragments),
+                mock.patch.object(status_import, "ORDER_PATH", fragments / ".order.json"),
+                mock.patch.object(status_import, "DROPIN_PATH", root / "dropin.conf"),
+                mock.patch.object(status_import, "_restart_worker", side_effect=RuntimeError("restart failed")),
+            ):
+                with self.assertRaises(RuntimeError):
+                    status_import.disable_provider(
+                        "hybzg",
+                        config_path=root / "providers.toml",
+                        fragment_root=fragments,
+                    )
+
+            self.assertEqual(fragment.read_text(encoding="utf-8"), original)
+
+    def test_disable_provider_rejects_other_probe_modes(self) -> None:
+        with self.assertRaisesRegex(ImportErrorDetail, "manual_only"):
+            status_import.disable_provider("hybzg", probe_mode="automatic")
     def test_remote_bootstrap_accepts_json_after_command_output(self) -> None:
         class Channel:
             def recv_exit_status(self):

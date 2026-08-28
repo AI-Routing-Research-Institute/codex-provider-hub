@@ -594,6 +594,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .status-upload-error { margin: 12px 0 0; color: var(--red); font-size: 12px; }
 .status-upload-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .monitor-list { display: grid; gap: 8px; margin-top: 16px; }
+.monitor-order-hint { margin-top: 10px; color: var(--muted); font-size: var(--font-meta); }
 .monitor-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface-soft); }
 .monitor-main { min-width: 0; display: grid; gap: 4px; }
 .monitor-name { font-weight: 700; }
@@ -601,6 +602,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .monitor-state { font-size: 12px; font-weight: 700; }
 .monitor-state.healthy { color: var(--green); }
 .monitor-state.probing { color: var(--teal); }
+.monitor-state.recovering { color: var(--teal); }
 .monitor-state.degraded, .monitor-state.down { color: var(--red); }
 .monitor-state.unknown { color: var(--muted); }
 .monitor-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
