@@ -128,11 +128,16 @@ def create_app(
         providers = _read_status(store, _WINDOW_DAYS[window], now)
         manual_jobs = _latest_manual_jobs(control_store, providers)
         manual_histories = _manual_histories(control_store, providers)
+        manual_order = {
+            str(provider.get("provider_id")): index
+            for index, provider in enumerate(providers)
+        }
         providers = _sort_providers_by_model(
             providers,
             _SORT_MODEL,
             manual_jobs,
             manual_histories,
+            manual_order=manual_order,
         )
         data_status, last_checked = _freshness(providers, now)
         response.headers["Cache-Control"] = "public, max-age=30"
@@ -315,6 +320,7 @@ def _sort_providers_by_model(
     model_name: str,
     manual_jobs: dict[str, ManualProbeJob] | None = None,
     manual_histories: ManualHistories | None = None,
+    manual_order: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     indexed = list(enumerate(providers))
     indexed.sort(
@@ -324,6 +330,7 @@ def _sort_providers_by_model(
             item[0],
             manual_jobs,
             manual_histories,
+            manual_order,
         )
     )
     return [provider for _index, provider in indexed]
@@ -335,7 +342,16 @@ def _provider_sort_key(
     original_index: int,
     manual_jobs: dict[str, ManualProbeJob] | None = None,
     manual_histories: ManualHistories | None = None,
-) -> tuple[int, int, float, int]:
+    manual_order: dict[str, int] | None = None,
+) -> tuple[int, int, float, int, int]:
+    provider_id = str(provider.get("provider_id"))
+    state_rank = 1 if str(provider.get("state", "")).lower() == "down" else 0
+    tie_breaker = original_index
+    if state_rank:
+        tie_breaker = (manual_order or {}).get(
+            provider_id,
+            len(manual_order or {}) + original_index,
+        )
     model = next(
         (
             item
@@ -351,6 +367,7 @@ def _provider_sort_key(
             original_index,
             manual_jobs,
             manual_histories,
+            manual_order,
         )
 
     raw_streak = model.get("consecutive_successes")
@@ -362,9 +379,8 @@ def _provider_sort_key(
         else 0
     )
     if streak > 0:
-        return (0, -streak, 0.0, original_index)
+        return (0, -streak, 0.0, state_rank, tie_breaker)
 
-    provider_id = str(provider.get("provider_id"))
     success_times = [
         success_at
         for success_at in (
@@ -379,8 +395,8 @@ def _provider_sort_key(
         if success_at is not None
     ]
     if success_times:
-        return (1, 0, -max(success_times).timestamp(), original_index)
-    return (2, 0, 0.0, original_index)
+        return (1, 0, -max(success_times).timestamp(), state_rank, tie_breaker)
+    return (2, 0, 0.0, state_rank, tie_breaker)
 
 
 def _manual_probe_sort_key(
@@ -389,7 +405,8 @@ def _manual_probe_sort_key(
     original_index: int,
     manual_jobs: dict[str, ManualProbeJob] | None,
     manual_histories: ManualHistories | None,
-) -> tuple[int, int, float, int]:
+    manual_order: dict[str, int] | None = None,
+) -> tuple[int, int, float, int, int]:
     latest_success = _manual_probe_last_success_at(
         str(provider.get("provider_id")),
         model_name,
@@ -397,8 +414,24 @@ def _manual_probe_sort_key(
         manual_histories,
     )
     if latest_success is None:
-        return (2, 0, 0.0, original_index)
-    return (1, 0, -latest_success.timestamp(), original_index)
+        provider_id = str(provider.get("provider_id"))
+        state_rank = 1 if str(provider.get("state", "")).lower() == "down" else 0
+        tie_breaker = original_index
+        if state_rank:
+            tie_breaker = (manual_order or {}).get(
+                provider_id,
+                len(manual_order or {}) + original_index,
+            )
+        return (2, 0, 0.0, state_rank, tie_breaker)
+    provider_id = str(provider.get("provider_id"))
+    state_rank = 1 if str(provider.get("state", "")).lower() == "down" else 0
+    tie_breaker = original_index
+    if state_rank:
+        tie_breaker = (manual_order or {}).get(
+            provider_id,
+            len(manual_order or {}) + original_index,
+        )
+    return (1, 0, -latest_success.timestamp(), state_rank, tie_breaker)
 
 
 def _manual_probe_last_success_at(
