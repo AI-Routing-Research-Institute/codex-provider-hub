@@ -73,6 +73,7 @@ def default_protocol_settings() -> dict[str, Any]:
         "hidden_provider_ids": [],
         "session_provider_overrides": {},
         "show_provider_launch_command": True,
+        "show_status_upload": True,
     }
 
 
@@ -186,6 +187,9 @@ def load_protocol_settings(path: Path) -> dict[str, Any]:
     show_launch_command = payload.get("show_provider_launch_command")
     if isinstance(show_launch_command, bool):
         settings["show_provider_launch_command"] = show_launch_command
+    show_status_upload = payload.get("show_status_upload")
+    if isinstance(show_status_upload, bool):
+        settings["show_status_upload"] = show_status_upload
     return settings
 
 
@@ -217,6 +221,9 @@ def save_protocol_settings(settings: dict[str, Any], path: Path) -> None:
     show_launch_command = settings.get("show_provider_launch_command")
     if isinstance(show_launch_command, bool):
         normalized["show_provider_launch_command"] = show_launch_command
+    show_status_upload = settings.get("show_status_upload")
+    if isinstance(show_status_upload, bool):
+        normalized["show_status_upload"] = show_status_upload
     _write_json_object(path, normalized)
 
 
@@ -391,6 +398,12 @@ class SharedRuntimeCoordinator:
             and not isinstance(payload["show_provider_launch_command"], bool)
         ):
             raise ValueError("临时启动命令显示设置必须是布尔值")
+        if (
+            getattr(profile, "apply_runtime_preferences", None) is not None
+            and "show_status_upload" in payload
+            and not isinstance(payload["show_status_upload"], bool)
+        ):
+            raise ValueError("上传检测显示设置必须是布尔值")
         source, loaded = self._prepare_database(database_value)
         with self._lock:
             self.settings_store.replace_runtime(

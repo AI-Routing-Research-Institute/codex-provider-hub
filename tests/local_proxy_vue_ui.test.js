@@ -170,16 +170,21 @@ test("Vue views use the shared API helper and clean up polling timers", () => {
   }
 });
 
-test("provider launch command visibility follows the saved runtime setting", () => {
+test("provider action visibility follows the saved runtime settings", () => {
   const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
   const runtime = fs.readFileSync(path.join(root, "components", "RuntimeView.vue"), "utf8");
 
   assert.match(app, /<ProvidersView[^>]*:show-launch-command="showProviderLaunchCommand"/);
+  assert.match(app, /<ProvidersView[^>]*:show-status-upload="showStatusUpload"/);
   assert.match(app, /<RuntimeView[^>]*@launch-command-visibility-change="showProviderLaunchCommand = \$event"/);
-  assert.match(runtime, /defineEmits\(\['launch-command-visibility-change'\]\)/);
+  assert.match(app, /<RuntimeView[^>]*@status-upload-visibility-change="showStatusUpload = \$event"/);
+  assert.match(runtime, /defineEmits\(\['launch-command-visibility-change', 'status-upload-visibility-change'\]\)/);
   assert.match(runtime, /emit\('launch-command-visibility-change', settings\.value\.show_provider_launch_command !== false\)/);
+  assert.match(runtime, /emit\('status-upload-visibility-change', settings\.value\.show_status_upload !== false\)/);
   assert.match(providers, /provider_launch_command !== false && props\.showLaunchCommand/);
+  assert.match(providers, /status_upload !== false && props\.showStatusUpload/);
+  assert.match(providers, /showStatusUpload && provider\.status_upload_supported && !manageMode/);
 });
 
 test("shared time range selector uses day precision and stays anchored", async () => {

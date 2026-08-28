@@ -78,6 +78,7 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
             ui_config=lambda: {
                 "service_id": "codex",
                 "config_endpoint": "/control/codex/api/codex-config",
+                "features": {"status_upload": True, "private_feature": True},
                 "api_key": "must-not-leak",
             },
             config_fragment=lambda: "codex-config",
@@ -95,6 +96,7 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
             ui_config=lambda: {
                 "service_id": "claude",
                 "config_endpoint": "/control/claude/api/claude-config",
+                "features": {"status_upload": True},
             },
             config_fragment=lambda: "claude-config",
             config_endpoint_name="claude-config",
@@ -279,6 +281,9 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(codex_config.json()["service_id"], "codex")
         self.assertEqual(claude_config.json()["service_id"], "claude")
         self.assertEqual(codex_config.headers["cache-control"], "no-store")
+        self.assertTrue(codex_config.json()["features"]["status_upload"])
+        self.assertNotIn("private_feature", codex_config.json()["features"])
+        self.assertTrue(claude_config.json()["features"]["status_upload"])
         self.assertNotIn("api_key", codex_config.json())
         self.assertNotIn("codex-secret", codex_config.text)
         self.assertNotIn("claude-secret", claude_config.text)

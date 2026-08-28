@@ -79,7 +79,13 @@ UI_CONFIG_FIELDS = frozenset(
     }
 )
 UI_FEATURE_FIELDS = frozenset(
-    {"usage_history", "session_routing", "provider_launch_command", "provider_catalog"}
+    {
+        "usage_history",
+        "session_routing",
+        "provider_launch_command",
+        "status_upload",
+        "provider_catalog",
+    }
 )
 
 

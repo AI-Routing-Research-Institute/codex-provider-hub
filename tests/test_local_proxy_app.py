@@ -40,6 +40,7 @@ class LocalProxySettingsTests(unittest.TestCase):
         self.assertEqual(config["peer_console_url"], "http://127.0.0.1:19000/control/claude/")
         self.assertEqual(config["config_endpoint"], "/control/codex/api/codex-config")
         self.assertTrue(config["features"]["provider_launch_command"])
+        self.assertTrue(config["features"]["status_upload"])
         self.assertTrue(config["features"]["provider_catalog"])
 
     def test_shared_settings_round_trip_and_corrupt_fallback(self) -> None:
