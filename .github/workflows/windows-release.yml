@@ -1,0 +1,152 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v-prefixed tag to publish"
+        required: true
+        default: "v0.1.7"
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      # Git tag is the single source of truth for the release version. Rewrite
+      # APP_VERSION in the checked-out source so source and tag can never drift,
+      # which is what previously caused builds to fail on a version mismatch.
+      - name: Sync source version to release tag
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release tag must be 'v<major>.<minor>.<patch>': $env:RELEASE_TAG"
+          }
+          $appPath = 'local_proxy/application.py'
+          $pattern = '(?m)^APP_VERSION = ".*?"'
+          $content = Get-Content -LiteralPath $appPath -Raw
+          if ($content -notmatch $pattern) {
+            throw "Could not inject version $version into APP_VERSION"
+          }
+          $updated = $content -replace $pattern, "APP_VERSION = `"$version`""
+          if ($updated -ne $content) {
+            Set-Content -LiteralPath $appPath -Value $updated -NoNewline -Encoding utf8
+          }
+          Write-Host "APP_VERSION synced to $version from tag $env:RELEASE_TAG"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-status.txt
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-status.txt pyinstaller==6.21.0
+
+      - name: Run Python tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem proxy_static/src -Filter *.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          node --check provider_status/static/app.js
+
+      - name: Run JavaScript tests
+        shell: pwsh
+        run: |
+          Get-ChildItem tests -Filter *.test.js | ForEach-Object {
+            node --test $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          .\scripts\build_local_proxy_exe.ps1 -Version $version
+
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          python scripts\create_local_proxy_smoke_db.py .build\release-smoke.db
+          $exe = (Resolve-Path .\dist\CodexLocalProxy-win-x64.exe).Path
+          $database = (Resolve-Path .build\release-smoke.db).Path
+          $versionCheck = Start-Process `
+            -FilePath $exe `
+            -ArgumentList "--version" `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+          if ($versionCheck.ExitCode -ne 0) { throw "Packaged --version check failed" }
+          $smokeCheck = Start-Process `
+            -FilePath $exe `
+            -ArgumentList @("--smoke-test", "--database", $database) `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+          if ($smokeCheck.ExitCode -ne 0) { throw "Packaged smoke test failed" }
+
+      - name: Generate release notes from verified change records
+        shell: pwsh
+        run: |
+          $previous = git describe --tags --match "v*" --exclude $env:RELEASE_TAG --abbrev=0
+          New-Item -ItemType Directory -Force -Path .build | Out-Null
+          python scripts\team_policy.py release-notes `
+            --base-tag $previous `
+            --head $env:RELEASE_TAG `
+            --output .build\release-notes.md
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexLocalProxy-win-x64-${{ env.RELEASE_TAG }}
+          path: |
+            dist/CodexLocalProxy-win-x64.exe
+            dist/CodexLocalProxy-win-x64.exe.sha256
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG `
+              dist\CodexLocalProxy-win-x64.exe `
+              dist\CodexLocalProxy-win-x64.exe.sha256 `
+              --clobber
+          } else {
+            gh release create $env:RELEASE_TAG `
+              dist\CodexLocalProxy-win-x64.exe `
+              dist\CodexLocalProxy-win-x64.exe.sha256 `
+              --verify-tag `
+              --title "Codex 本地中转 $env:RELEASE_TAG" `
+              --notes-file .build\release-notes.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release publish failed" }
