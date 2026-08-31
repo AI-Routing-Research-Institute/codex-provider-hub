@@ -219,15 +219,20 @@ async def _stream_with_idle_timeout(
     *,
     timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
 ) -> AsyncIterator[bytes]:
-    while True:
-        try:
-            chunk = await _next_stream_chunk(
-                stream,
-                timeout_seconds=timeout_seconds,
-            )
-        except StopAsyncIteration:
-            return
-        yield chunk
+    try:
+        while True:
+            try:
+                chunk = await _next_stream_chunk(
+                    stream,
+                    timeout_seconds=timeout_seconds,
+                )
+            except StopAsyncIteration:
+                return
+            yield chunk
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            await close()
 
 
 def _stream_idle_retry_summary(exc: UpstreamStreamIdleTimeout) -> str:
@@ -273,12 +278,14 @@ def _finalize_stream_captures(
 def _feed_stream_captures(
     usage_capture: Any | None,
     failure_capture: Any | None,
+    terminal_capture: Any | None,
     chunk: bytes,
-) -> None:
+) -> str | None:
     if usage_capture is not None:
         usage_capture.feed(chunk)
     if failure_capture is not None:
         failure_capture.feed(chunk)
+    return terminal_capture.feed(chunk) if terminal_capture is not None else None
 
 
 class DisconnectAwareStreamingResponse(StreamingResponse):
@@ -291,22 +298,42 @@ class DisconnectAwareStreamingResponse(StreamingResponse):
 
         stream_task = asyncio.create_task(self.stream_response(send))
         disconnect_task = asyncio.create_task(self.listen_for_disconnect(receive))
-        done, pending = await asyncio.wait(
-            {stream_task, disconnect_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        tasks = {stream_task, disconnect_task}
+        try:
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
-        if stream_task in done:
-            await stream_task
-        else:
-            await disconnect_task
+            if stream_task in done:
+                await stream_task
+            else:
+                await disconnect_task
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._close_body_iterator()
 
         if self.background is not None:
             await self.background()
+
+    async def _close_body_iterator(self) -> None:
+        close = getattr(self.body_iterator, "aclose", None)
+        if close is None:
+            return
+        close_task = asyncio.create_task(close())
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            with suppress(asyncio.CancelledError, Exception):
+                await close_task
+            raise
 
 
 SSE_MODEL_CAPACITY_CODE_RE = re.compile(
@@ -743,7 +770,9 @@ class UsageStore:
             if cutoff < timestamp - REQUEST_HISTORY_HOURS * 3600:
                 raise ValueError("自定义时间不能早于最近 7 天的保留范围")
         else:
-            hours = {"1h": 1, "6h": 6, "24h": 24, "7d": 7}[normalized_window]
+            hours = {"1h": 1, "6h": 6, "24h": 24, "7d": 7 * 24}[
+                normalized_window
+            ]
             cutoff = timestamp - hours * 3600
             upper_bound = None
         bounded_limit = max(1, min(int(limit), REQUEST_HISTORY_PAGE_LIMIT))
@@ -4277,6 +4306,9 @@ async def _forward_request(
             and hasattr(protocol_adapter, "failure_capture")
             else SSEFailureCapture()
         )
+    terminal_capture = (
+        SSETerminalCapture() if _is_event_stream(upstream_response) else None
+    )
 
     async def response_body() -> AsyncIterator[bytes]:
         stream_failure: tuple[str, str] | None = None
@@ -4286,10 +4318,11 @@ async def _forward_request(
         persistence_ready = False
         try:
             if first_chunk is not None:
-                await asyncio.to_thread(
+                terminal_event = await asyncio.to_thread(
                     _feed_stream_captures,
                     usage_capture,
                     failure_capture,
+                    terminal_capture,
                     first_chunk,
                 )
                 router.update_request_phase(snapshot, "receiving", activity=True)
@@ -4298,17 +4331,26 @@ async def _forward_request(
                     snapshot.request_id,
                     phase="receiving",
                 )
+                if terminal_event is not None:
+                    stream_completed = True
                 yield first_chunk
+                if terminal_event is not None:
+                    return
             assert stream is not None
             async for chunk in stream:
-                await asyncio.to_thread(
+                terminal_event = await asyncio.to_thread(
                     _feed_stream_captures,
                     usage_capture,
                     failure_capture,
+                    terminal_capture,
                     chunk,
                 )
                 router.update_request_phase(snapshot, "receiving", activity=True)
+                if terminal_event is not None:
+                    stream_completed = True
                 yield chunk
+                if terminal_event is not None:
+                    return
             stream_completed = True
         except UpstreamStreamIdleTimeout as exc:
             stream_failure = (
@@ -4360,36 +4402,41 @@ async def _forward_request(
                 persistence_ready = True
             finally:
                 try:
-                    await upstream_response.aclose()
+                    close_stream = getattr(stream, "aclose", None)
+                    if close_stream is not None:
+                        await close_stream()
                 finally:
-                    router.finish_request(
-                        snapshot,
-                        status_code=upstream_response.status_code,
-                        error=history_kind,
-                    )
-                    if persistence_ready:
-                        await _record_stream_completion_async(
-                            usage_store,
-                            recovery_history_store,
-                            snapshot=snapshot,
-                            thread_id=thread_id,
-                            session_name_resolver=session_name_resolver,
-                            model=(
-                                usage_capture.model
-                                if usage_capture is not None
-                                else model
-                            ),
-                            reasoning_effort=reasoning_effort,
-                            usage=usage,
+                    try:
+                        await upstream_response.aclose()
+                    finally:
+                        router.finish_request(
+                            snapshot,
                             status_code=upstream_response.status_code,
-                            successful=successful,
-                            retry_count=max(0, attempt - 1),
-                            error_kind=history_kind,
-                            error_summary=history_summary,
-                            stream_failure=stream_failure,
-                            attempt=attempt,
-                            max_attempts=retry_policy.max_attempts,
+                            error=history_kind,
                         )
+                        if persistence_ready:
+                            await _record_stream_completion_async(
+                                usage_store,
+                                recovery_history_store,
+                                snapshot=snapshot,
+                                thread_id=thread_id,
+                                session_name_resolver=session_name_resolver,
+                                model=(
+                                    usage_capture.model
+                                    if usage_capture is not None
+                                    else model
+                                ),
+                                reasoning_effort=reasoning_effort,
+                                usage=usage,
+                                status_code=upstream_response.status_code,
+                                successful=successful,
+                                retry_count=max(0, attempt - 1),
+                                error_kind=history_kind,
+                                error_summary=history_summary,
+                                stream_failure=stream_failure,
+                                attempt=attempt,
+                                max_attempts=retry_policy.max_attempts,
+                            )
 
     return DisconnectAwareStreamingResponse(
         response_body(),
@@ -4757,6 +4804,48 @@ class SSEPreflightEventParser:
             return
         completed.append(b"\n".join(self._event_lines))
         self._event_lines.clear()
+
+
+class SSETerminalCapture:
+    """Recognize complete protocol terminal events across arbitrary chunks."""
+
+    _TERMINAL_EVENTS = frozenset(
+        {
+            "error",
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+        }
+    )
+
+    def __init__(self) -> None:
+        self._parser = SSEPreflightEventParser()
+        self._terminal_event: str | None = None
+
+    @property
+    def terminal_event(self) -> str | None:
+        return self._terminal_event
+
+    def feed(self, chunk: bytes) -> str | None:
+        if self._terminal_event is not None or not chunk:
+            return self._terminal_event
+        for event in self._parser.feed(chunk):
+            event_name, payload = _sse_event_payload(event)
+            if payload == b"[DONE]":
+                self._terminal_event = "[DONE]"
+                break
+            root = _decode_json(payload) if payload is not None else None
+            if not isinstance(root, dict):
+                continue
+            event_type = (
+                root.get("type")
+                if isinstance(root.get("type"), str)
+                else event_name
+            )
+            if event_type in self._TERMINAL_EVENTS:
+                self._terminal_event = event_type
+                break
+        return self._terminal_event
 
 
 def _sse_preflight_decision(

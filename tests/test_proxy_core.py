@@ -25,6 +25,7 @@ from local_proxy.core import (
     RetryPolicy,
     RetryPolicyStore,
     SSECapacityFailureCapture,
+    SSETerminalCapture,
     TokenUsage,
     UsageCapture,
     UsageStore,
@@ -634,6 +635,29 @@ class UsageTests(unittest.TestCase):
                 now=now,
             )
 
+    def test_request_history_uses_full_168_hour_window_for_seven_days(self) -> None:
+        now = 2_000_000.0
+        recorded_at = now - 8 * 3600
+        self.store.record_request(
+            started_at=recorded_at,
+            finished_at=recorded_at,
+            provider_id="provider-a",
+            thread_id=None,
+            session_name="eight-hours-ago",
+            model="gpt-5",
+            status_code=200,
+            successful=True,
+            outcome="succeeded",
+            retry_count=0,
+        )
+
+        six_hours = self.store.request_history(window="6h", now=now)
+        seven_days = self.store.request_history(window="7d", now=now)
+
+        self.assertEqual(six_hours["total_count"], 0)
+        self.assertEqual(seven_days["total_count"], 1)
+        self.assertEqual(seven_days["items"][0]["session_name"], "eight-hours-ago")
+
     def test_request_history_cleanup_is_throttled(self) -> None:
         now = 2_000_000.0
         self.store.request_history(now=now)
@@ -917,6 +941,34 @@ class UsageTests(unittest.TestCase):
 
 
 class SSEPreflightTests(unittest.IsolatedAsyncioTestCase):
+    def test_terminal_capture_requires_a_complete_protocol_event(self) -> None:
+        capture = SSETerminalCapture()
+
+        self.assertIsNone(
+            capture.feed(
+                b'data: {"type":"response.output_text.delta",'
+                b'"delta":"literal response.completed text"}\n\n'
+                b'data: {"type":"response.com'
+            )
+        )
+        self.assertEqual(
+            capture.feed(b'pleted","response":{"status":"completed"}}\r\n\r\n'),
+            "response.completed",
+        )
+        self.assertEqual(capture.terminal_event, "response.completed")
+
+    def test_terminal_capture_recognizes_done_and_failure_events(self) -> None:
+        done = SSETerminalCapture()
+        failed = SSETerminalCapture()
+
+        self.assertEqual(done.feed(b"data: [DONE]\n\n"), "[DONE]")
+        self.assertEqual(
+            failed.feed(
+                b'event: response.failed\ndata: {"response":{"status":"failed"}}\n\n'
+            ),
+            "response.failed",
+        )
+
     def test_capacity_capture_respects_bare_cr_event_boundaries(self) -> None:
         separate_events = SSECapacityFailureCapture()
         self.assertIsNone(
@@ -4396,6 +4448,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         async def send(message):
             if message["type"] == "http.response.body" and message.get("body"):
                 first_body_sent.set()
+                await never_continue.wait()
 
         await asyncio.wait_for(response(scope, response_receive, send), timeout=1)
         await upstream_client.aclose()
@@ -4406,6 +4459,232 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history["total_count"], 1)
         self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
         self.assertEqual(history["items"][0]["error_summary"], "客户端取消")
+
+    async def test_downstream_send_error_closes_suspended_response_body(self) -> None:
+        stream_closed = asyncio.Event()
+        never_continue = asyncio.Event()
+
+        class StalledStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                await never_continue.wait()
+
+            async def aclose(self) -> None:
+                stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=StalledStream(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client, usage_store=usage_store)
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        request_body_sent = False
+
+        async def request_receive():
+            nonlocal request_body_sent
+            if request_body_sent:
+                return {"type": "http.disconnect"}
+            request_body_sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "asgi": {"spec_version": "2.4"},
+            "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, request_receive))
+        never_disconnect = asyncio.Event()
+
+        async def response_receive():
+            await never_disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                raise OSError("fixture downstream closed")
+
+        with self.assertRaises(OSError):
+            await asyncio.wait_for(response(scope, response_receive, send), timeout=1)
+        await upstream_client.aclose()
+
+        self.assertTrue(stream_closed.is_set())
+        self.assertEqual(router.status().active_request_details, ())
+        history = usage_store.request_history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
+        with closing(sqlite3.connect(usage_store.path)) as connection:
+            inflight_count = connection.execute(
+                "SELECT COUNT(*) FROM inflight_requests"
+            ).fetchone()[0]
+        self.assertEqual(inflight_count, 0)
+
+    async def test_terminal_event_finishes_when_upstream_never_reaches_eof(self) -> None:
+        stream_closed = asyncio.Event()
+        never_continue = asyncio.Event()
+
+        class StalledAfterCompleted(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (
+                    b'data: {"type":"response.completed","response":{"status":"completed",'
+                    b'"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}\n\n'
+                )
+                await never_continue.wait()
+
+            async def aclose(self) -> None:
+                stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=StalledAfterCompleted(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client, usage_store=usage_store)
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        request_body_sent = False
+
+        async def request_receive():
+            nonlocal request_body_sent
+            if request_body_sent:
+                return {"type": "http.disconnect"}
+            request_body_sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "asgi": {"spec_version": "2.4"},
+            "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, request_receive))
+        never_disconnect = asyncio.Event()
+        sent_body = bytearray()
+
+        async def response_receive():
+            await never_disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                sent_body.extend(message.get("body", b""))
+
+        await asyncio.wait_for(response(scope, response_receive, send), timeout=1)
+        await upstream_client.aclose()
+
+        self.assertIn(b"response.completed", sent_body)
+        self.assertTrue(stream_closed.is_set())
+        self.assertEqual(router.status().active_request_details, ())
+        history = usage_store.request_history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertTrue(history["items"][0]["succeeded"])
+        self.assertEqual(history["items"][0]["total_tokens"], 12)
+
+    async def test_failure_terminal_event_finishes_stalled_upstream_as_failure(self) -> None:
+        stream_closed = asyncio.Event()
+        never_continue = asyncio.Event()
+
+        class StalledAfterFailure(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (
+                    b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                    b'data: {"type":"response.failed","response":{"status":"failed",'
+                    b'"error":{"code":"upstream_error","message":"try again later"}}}\n\n'
+                )
+                await never_continue.wait()
+
+            async def aclose(self) -> None:
+                stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=StalledAfterFailure(),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        router = ProviderRouter((provider("selected", current=True),))
+        app = create_proxy_app(router, client=upstream_client, usage_store=usage_store)
+        route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/v1/{upstream_path:path}"
+        )
+        from starlette.requests import Request
+
+        request_body_sent = False
+
+        async def request_receive():
+            nonlocal request_body_sent
+            if request_body_sent:
+                return {"type": "http.disconnect"}
+            request_body_sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"model":"test"}',
+                "more_body": False,
+            }
+
+        scope = {
+            "type": "http", "asgi": {"spec_version": "2.4"},
+            "method": "POST", "path": "/v1/responses",
+            "raw_path": b"/v1/responses", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1), "root_path": "",
+        }
+        response = await route.endpoint("responses", Request(scope, request_receive))
+        never_disconnect = asyncio.Event()
+
+        async def response_receive():
+            await never_disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            return None
+
+        await asyncio.wait_for(response(scope, response_receive, send), timeout=1)
+        await upstream_client.aclose()
+
+        self.assertTrue(stream_closed.is_set())
+        self.assertEqual(router.status().active_request_details, ())
+        history = usage_store.request_history()
+        self.assertEqual(history["total_count"], 1)
+        self.assertFalse(history["items"][0]["succeeded"])
+        self.assertEqual(history["items"][0]["error_kind"], "upstream_error")
 
     async def test_forwards_request_stream_headers_query_and_response(self) -> None:
         observed: dict[str, object] = {}
