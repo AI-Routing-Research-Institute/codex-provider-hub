@@ -42,11 +42,11 @@ class ControlUiTests(unittest.TestCase):
             )
             self.assertEqual(
                 resolve_control_asset(root, "app.js"),
-                classic / "app.js",
+                (classic / "app.js").resolve(),
             )
             self.assertEqual(
                 resolve_control_asset(root, "assets/bundle.js"),
-                modern / "bundle.js",
+                (modern / "bundle.js").resolve(),
             )
             self.assertIsNone(resolve_control_asset(root, "../classic/app.js"))
             self.assertIsNone(resolve_control_asset(root, "index.html"))
