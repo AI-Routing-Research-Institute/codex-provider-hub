@@ -87,7 +87,7 @@ REQUEST_HEADERS_TO_REPLACE = HOP_BY_HOP_HEADERS | {
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
 MAX_CODEX_TURN_METADATA_CHARS = 32 * 1024
 RESPONSE_HEADERS_TO_DROP = HOP_BY_HOP_HEADERS | {"content-length"}
-RETRYABLE_STATUS_CODES = {403, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {402, 403, 500, 502, 503, 504}
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(authorization|api[-_ ]?key|access[-_ ]?token|token|secret)\b"
     r"[\"']?(\s*[:=]\s*)[\"']?(?:bearer\s+)?[^\s,;\"'}]+[\"']?"
