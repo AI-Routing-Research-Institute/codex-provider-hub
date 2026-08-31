@@ -87,6 +87,7 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
                     "port": 18888,
                     "database_path": str(database),
                     "health_status_url": "https://status.example.test/api/status",
+                    "console_ui": "classic",
                 }
             )
 
@@ -96,6 +97,7 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
                 claude.runtime_settings_snapshot()["health_status_url"],
                 "https://status.example.test/api/status",
             )
+            self.assertEqual(claude.runtime_settings_snapshot()["console_ui"], "classic")
             self.assertEqual(codex.applied, [(database.resolve(), ("codex-a",))])
             self.assertEqual(claude.applied, [(database.resolve(), ())])
             self.assertIs(codex.retry_policy_store, claude.retry_policy_store)
@@ -109,6 +111,7 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
                 }
             )
             self.assertEqual(codex.runtime_settings_snapshot()["configured_port"], 19999)
+            self.assertEqual(codex.runtime_settings_snapshot()["console_ui"], "classic")
             self.assertEqual(len(codex.applied), 2)
             self.assertEqual(len(claude.applied), 2)
 
@@ -118,6 +121,33 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
             persisted = load_shared_settings(shared_settings_path(root))
             self.assertEqual(persisted["port"], 19999)
             self.assertEqual(persisted["retry"]["max_attempts"], 9)
+            self.assertEqual(persisted["console_ui"], "classic")
+
+    def test_rejects_unknown_console_ui_without_changing_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database = root / "cc-switch.db"
+            database.touch()
+            store = SharedSettingsStore(
+                path=shared_settings_path(root),
+                settings={"port": 17890, "database_path": str(database)},
+            )
+            codex = FakeProfile("codex")
+            claude = FakeProfile("claude")
+            SharedRuntimeCoordinator(store, (codex, claude), active_port=17890)
+
+            with self.assertRaisesRegex(ValueError, "classic 或 modern"):
+                codex.on_runtime_settings_changed(
+                    {
+                        "port": 18888,
+                        "database_path": str(database),
+                        "health_status_url": None,
+                        "console_ui": "other",
+                    }
+                )
+
+            self.assertEqual(store.snapshot()["port"], 17890)
+            self.assertEqual(store.snapshot()["console_ui"], "modern")
 
     def test_database_validation_accepts_a_protocol_with_no_providers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -170,6 +200,13 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
 
 
 class RuntimeMigrationTests(unittest.TestCase):
+    def test_shared_console_ui_defaults_to_modern_and_invalid_values_fall_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = shared_settings_path(Path(temp_dir))
+            self.assertEqual(load_shared_settings(path)["console_ui"], "modern")
+            path.write_text('{"console_ui": "unknown"}', encoding="utf-8")
+            self.assertEqual(load_shared_settings(path)["console_ui"], "modern")
+
     def test_protocol_button_visibility_defaults_on_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = protocol_settings_path("codex", Path(temp_dir))

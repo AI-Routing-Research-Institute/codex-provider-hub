@@ -2,3 +2,5 @@
 .githooks/* text eol=lf
 deploy/systemd/*.service text eol=lf
 deploy/nginx/*.conf text eol=lf
+proxy_static/index.html text eol=lf
+proxy_static/dist/index.html text eol=lf
