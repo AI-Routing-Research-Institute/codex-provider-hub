@@ -27,10 +27,10 @@
       </div>
 
       <div class="usage-summary" aria-live="polite">
-        <div class="usage-metric total"><span>Token 总量</span><strong>{{ formatNumber(usage.total_tokens) }}</strong></div>
-        <div class="usage-metric"><span>输入</span><strong>{{ formatNumber(usage.input_tokens) }}</strong></div>
-        <div class="usage-metric"><span>输出</span><strong>{{ formatNumber(usage.output_tokens) }}</strong></div>
-        <div class="usage-metric"><span>缓存</span><strong>{{ formatNumber(usage.cached_tokens) }}</strong></div>
+        <div class="usage-metric total"><span>Token 总量</span><strong>{{ formatTokenCount(usage.total_tokens) }}</strong></div>
+        <div class="usage-metric"><span>输入 Token</span><strong>{{ formatTokenCount(usage.input_tokens) }}</strong></div>
+        <div class="usage-metric"><span>输出 Token</span><strong>{{ formatTokenCount(usage.output_tokens) }}</strong></div>
+        <div class="usage-metric"><span>缓存 Token</span><strong>{{ formatTokenCount(usage.cached_tokens) }}</strong></div>
         <div class="usage-estimate-wrap"><span v-if="usage.estimated_requests" id="usage-estimated-note">含估算请求</span></div>
       </div>
 
@@ -57,11 +57,11 @@
               <span v-else class="provider-request-empty">暂无数据</span>
               <button v-if="healthFor(provider)" class="provider-health-toggle" type="button" title="查看检测详情" @click.stop="selectedHealth = provider">详情</button>
             </div>
-            <button class="provider-token-cell" type="button" :disabled="!providerUsage(provider.provider_id).request_count" @click.stop="selectedUsage = provider">
-              <strong :class="providerUsage(provider.provider_id).total_tokens ? 'provider-token-value' : 'provider-token-zero'">{{ formatNumber(providerUsage(provider.provider_id).total_tokens) }}</strong>
+            <button class="provider-token-cell" type="button" :disabled="!providerUsage(provider.provider_id).request_count" @click.stop="openUsageHistory(provider, $event.currentTarget)">
+              <strong :class="providerUsage(provider.provider_id).total_tokens ? 'provider-token-value' : 'provider-token-zero'">{{ formatTokenCount(providerUsage(provider.provider_id).total_tokens) }}</strong>
               <span v-if="providerUsage(provider.provider_id).request_count" class="provider-token-detail-icon">i</span>
             </button>
-            <div class="provider-request-cell"><button v-if="provider.active_requests" class="active-badge" type="button" :title="sessionNames(provider)">{{ provider.active_requests }} 活动</button><span class="provider-request-count">{{ providerUsage(provider.provider_id).request_count || 0 }}</span></div>
+            <div class="provider-request-cell"><button v-if="provider.active_requests" class="active-badge" type="button" :disabled="manageMode" :title="sessionNames(provider)" @click.stop="$emit('navigate-requests', provider.provider_id)">{{ provider.active_requests }} 活动</button><span class="provider-request-count">{{ providerUsage(provider.provider_id).request_count || 0 }}</span></div>
             <div class="provider-meta">
               <span class="auth-label" :class="{ missing: !provider.has_credentials }">{{ provider.has_credentials ? '已配置' : '缺少 Key' }}</span>
               <div v-if="manageMode" class="provider-row-actions">
@@ -86,7 +86,7 @@
         <div class="metric"><span>自动恢复</span><strong>{{ status.retry?.enabled === false ? '已关闭' : '已启用' }}</strong></div>
       </div>
       <div class="recovery" :class="{ active: status.retry?.active?.length, blocked: status.retry?.circuit_open?.length }">
-        <div class="recovery-heading"><strong>{{ recoveryTitle }}</strong><button v-if="status.retry?.recent_errors?.length" class="recovery-details-button" type="button" aria-label="查看最近 24 小时恢复记录">i</button></div>
+        <div class="recovery-heading"><strong>{{ recoveryTitle }}</strong><button v-if="hasRecoveryDetails" ref="recoveryDetailsButton" class="recovery-details-button" type="button" aria-label="查看最近 24 小时恢复记录" :aria-expanded="recoveryPopoverOpen" @click.stop="toggleRecoveryDetails">i</button></div>
       </div>
       <div class="draining"><strong>{{ drainingRequests ? `${drainingRequests} 个旧请求正在处理` : '没有旧请求正在处理' }}</strong></div>
     </aside>
@@ -121,20 +121,23 @@
     </div>
 
     <div v-if="selectedHealth" class="provider-health-popover show" style="top: 96px; left: max(12px, calc(50vw - 250px));"><div class="provider-health-detail"><div class="provider-health-detail-head"><div><strong>{{ selectedHealth.name }}</strong><span>服务器检测详情</span></div><button class="provider-health-close" type="button" aria-label="关闭检测详情" @click="selectedHealth = null"><UiIcon name="close" /></button></div><div class="provider-health-metrics"><span><span>状态</span><strong>{{ healthLabel(selectedHealth) }}</strong></span><span><span>可用率</span><strong>{{ healthAvailability(selectedHealth) }}</strong></span><span><span>延迟</span><strong>{{ healthLatency(selectedHealth) }}</strong></span></div></div></div>
-    <div v-if="selectedUsage" class="usage-history-popover show" style="top: 96px; left: max(12px, calc(50vw - 240px));"><div class="usage-history-heading"><div><strong>{{ selectedUsage.name }} 请求记录</strong><span>{{ usageWindowLabel }}</span></div><button class="usage-history-close" type="button" aria-label="关闭用量记录" @click="selectedUsage = null"><UiIcon name="close" /></button></div><div class="usage-history-summary"><span>Token {{ formatNumber(providerUsage(selectedUsage.provider_id).total_tokens) }}</span><span>请求 {{ providerUsage(selectedUsage.provider_id).request_count || 0 }}</span></div><div class="usage-history-empty">详细请求请在“请求”页面查看</div></div>
+    <div v-if="selectedUsage" ref="usageHistoryPopover" class="usage-history-popover show" :style="usagePopoverStyle" role="dialog" aria-label="请求记录"><div class="usage-history-heading"><div><strong>{{ selectedUsage.name }} 请求记录</strong><span>{{ usageWindowLabel }} · {{ usageHistoryTotalCount }} 条</span></div><button class="usage-history-close" type="button" aria-label="关闭用量记录" @click="closeUsageHistory"><UiIcon name="close" /></button></div><div class="usage-history-summary"><span>Token {{ formatTokenCount(usageHistoryTotals?.total_tokens ?? providerUsage(selectedUsage.provider_id).total_tokens) }}</span><span>成功 {{ formatTokenCount(usageHistoryTotals?.successful_tokens) }}</span><span>失败 {{ formatTokenCount(usageHistoryTotals?.failed_tokens) }}</span></div><ol class="usage-history-list"><li v-if="usageHistoryLoading" class="usage-history-empty">正在读取请求记录…</li><li v-else-if="usageHistoryError" class="usage-history-empty">{{ usageHistoryError }}</li><li v-else-if="!usageHistoryItems.length" class="usage-history-empty">当前时间范围内没有请求记录</li><li v-for="item in usageHistoryItems" v-else :key="item.id || item.recorded_at" class="usage-history-item" :class="{ failed: item.succeeded !== true }"><div class="usage-history-item-top"><time class="usage-history-time">{{ formatHistoryTime(item.recorded_at) }}</time><strong class="usage-history-model" :title="item.model || 'unknown'">{{ item.model || 'unknown' }}</strong><strong class="usage-history-total">{{ formatTokenCount(item.total_tokens) }}</strong></div><div class="usage-history-detail"><span>输入 {{ formatTokenCount(item.input_tokens) }}</span><span>输出 {{ formatTokenCount(item.output_tokens) }}</span><span v-if="item.cached_tokens">缓存 {{ formatTokenCount(item.cached_tokens) }}</span><span v-if="item.reasoning_tokens">推理 {{ formatTokenCount(item.reasoning_tokens) }}</span><span>{{ item.succeeded === true ? '成功' : '失败' }}</span></div></li></ol><button v-if="usageHistoryNextCursor" class="usage-history-more" type="button" :disabled="usageHistoryLoading" @click="loadUsageHistory">{{ usageHistoryLoading ? '加载中…' : '加载更早记录' }}</button></div>
+    <div v-if="recoveryPopoverOpen" ref="recoveryPopover" class="recovery-popover show" :style="recoveryPopoverStyle" role="dialog" aria-label="恢复记录"><div class="recovery-popover-heading"><strong>恢复记录</strong><span>近 24 小时 · {{ recoveryTotalCount }} 条</span><button class="usage-history-close" type="button" aria-label="关闭恢复记录" @click="closeRecoveryDetails"><UiIcon name="close" /></button></div><ol><li v-if="recoveryLoading" class="recovery-empty">正在加载恢复记录…</li><li v-else-if="recoveryError" class="recovery-empty">{{ recoveryError }}</li><li v-else-if="!recoveryItems.length" class="recovery-empty">近 24 小时没有恢复记录</li><li v-for="item in recoveryItems" v-else :key="recoveryItemKey(item)"><span class="recovery-error-meta">{{ recoveryMeta(item) }}</span><span class="recovery-error-summary">{{ item.summary || '上游临时错误' }}</span></li></ol><button v-if="recoveryNextCursor" class="usage-history-more" type="button" :disabled="recoveryLoading" @click="loadRecoveryHistory({ loadMore: true })">{{ recoveryLoading ? '加载中…' : '加载更早记录' }}</button></div>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { controlFetch, jsonOptions } from '../api.js'
 import TimeRangeSelect from './TimeRangeSelect.vue'
 import UiSelect from './ui/UiSelect.vue'
 import UiIcon from './ui/UiIcon.vue'
+import { formatTokenCount } from '../token-format.js'
 
 const status = ref({ providers: [], usage: { total: {}, by_provider: {} }, retry: {} })
 const uiConfig = ref({ features: {} })
 const props = defineProps({ showLaunchCommand: { type: Boolean, default: true }, showStatusUpload: { type: Boolean, default: true } })
+defineEmits(['navigate-requests'])
 const health = ref(null)
 const healthError = ref('')
 const loading = ref(true)
@@ -167,6 +170,24 @@ const uploadError = ref('')
 const uploadSsh = ref({ host: '118.195.178.173', port: 22, username: 'ubuntu', password: '' })
 const selectedHealth = ref(null)
 const selectedUsage = ref(null)
+const usageHistoryPopover = ref(null)
+const usageHistoryItems = ref([])
+const usageHistoryTotals = ref(null)
+const usageHistoryNextCursor = ref('')
+const usageHistoryTotalCount = ref(0)
+const usageHistoryLoading = ref(false)
+const usageHistoryError = ref('')
+const usageHistoryAnchor = ref(null)
+const usagePopoverStyle = ref({})
+const recoveryPopoverOpen = ref(false)
+const recoveryPopover = ref(null)
+const recoveryDetailsButton = ref(null)
+const recoveryPopoverStyle = ref({})
+const recoveryItems = ref([])
+const recoveryNextCursor = ref('')
+const recoveryTotalCount = ref(0)
+const recoveryLoading = ref(false)
+const recoveryError = ref('')
 const customRange = ref(null)
 let timer
 
@@ -184,11 +205,54 @@ const usage = computed(() => status.value.usage?.total || {})
 const drainingRequests = computed(() => providers.value.reduce((sum, provider) => sum + Number(provider.draining_requests || 0), 0))
 const lastRequestLabel = computed(() => status.value.last_status_code ? `HTTP ${status.value.last_status_code}` : '尚无请求')
 const recoveryTitle = computed(() => status.value.retry?.circuit_open?.length ? '自动恢复已暂停' : (status.value.retry?.active?.length ? '正在自动恢复' : '自动恢复已就绪'))
+const hasRecoveryDetails = computed(() => Boolean(status.value.retry?.recent_errors?.length || status.value.retry?.history?.total_count))
 const wireApiLabel = computed(() => currentProvider.value?.wire_api === 'responses' ? 'Responses · SSE' : currentProvider.value?.wire_api === 'anthropic_messages' ? 'Messages · SSE' : (currentProvider.value?.wire_api || uiConfig.value.protocol_label || '—'))
 const usageWindowLabel = computed(() => ({ today: '今日', '24h': '近 24 小时', '7d': '近 7 天', '30d': '近 30 天', all: '全部' })[usageWindow.value])
 
-function formatNumber(value) { return Number(value || 0).toLocaleString('zh-CN') }
 function providerUsage(id) { return status.value.usage?.by_provider?.[id] || {} }
+function formatHistoryTime(value) { const number = Number(value || 0); return number ? new Date(number < 10_000_000_000 ? number * 1000 : number).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—' }
+function positionUsageHistory() {
+  const anchor = usageHistoryAnchor.value
+  const popover = usageHistoryPopover.value
+  if (!anchor || !popover) return
+  const margin = 12
+  const rect = anchor.getBoundingClientRect()
+  const width = Math.min(480, window.innerWidth - margin * 2)
+  const height = Math.min(popover.getBoundingClientRect().height, window.innerHeight - margin * 2)
+  const left = Math.min(window.innerWidth - width - margin, Math.max(margin, rect.right - width))
+  const top = rect.bottom + 8 + height <= window.innerHeight - margin ? rect.bottom + 8 : Math.max(margin, rect.top - height - 8)
+  usagePopoverStyle.value = { left: `${Math.round(left)}px`, top: `${Math.round(top)}px` }
+}
+function usageHistoryParams(cursor = '') {
+  const params = new URLSearchParams({ provider_id: selectedUsage.value.provider_id })
+  if (usageWindow.value === 'custom' && customRange.value) { params.set('start_at', String(customRange.value.startAt)); params.set('end_at', String(customRange.value.endAt)) } else params.set('usage_window', usageWindow.value)
+  if (cursor) params.set('cursor', cursor)
+  return params
+}
+async function loadUsageHistory({ reset = false } = {}) {
+  if (!selectedUsage.value || usageHistoryLoading.value) return
+  usageHistoryLoading.value = true; usageHistoryError.value = ''
+  if (reset) { usageHistoryItems.value = []; usageHistoryNextCursor.value = ''; usageHistoryTotals.value = null; usageHistoryTotalCount.value = 0 }
+  try {
+    const result = await controlFetch(`/api/usage-history?${usageHistoryParams(reset ? '' : usageHistoryNextCursor.value)}`)
+    usageHistoryItems.value = reset ? (result.items || []) : [...usageHistoryItems.value, ...(result.items || [])]
+    usageHistoryNextCursor.value = result.next_cursor || ''
+    usageHistoryTotalCount.value = Number(result.total_count || 0)
+    usageHistoryTotals.value = result.total || null
+  } catch (error) { usageHistoryError.value = error.message || '无法读取请求记录' } finally { usageHistoryLoading.value = false; await nextTick(); positionUsageHistory() }
+}
+async function openUsageHistory(provider, anchor) {
+  if (selectedUsage.value?.provider_id === provider.provider_id) { closeUsageHistory(); return }
+  selectedHealth.value = null; selectedUsage.value = provider; usageHistoryAnchor.value = anchor
+  await nextTick(); positionUsageHistory(); await loadUsageHistory({ reset: true })
+}
+function closeUsageHistory() { selectedUsage.value = null; usageHistoryAnchor.value = null; usageHistoryItems.value = []; usageHistoryNextCursor.value = ''; usageHistoryTotals.value = null; usageHistoryError.value = '' }
+function recoveryItemKey(item) { return [item.recorded_at, item.request_id, item.provider_id, item.attempt, item.outcome].join('-') }
+function recoveryMeta(item) { const provider = providers.value.find(value => value.provider_id === item.provider_id); const kind = ({ rate_limited: '频率限制', model_capacity: '模型容量', connection: '连接失败', stream_start: '流启动失败', stream_idle_timeout: '流空闲超时' })[item.kind] || item.kind || '临时故障'; const outcome = ({ retrying: '已安排重试', exhausted: '重试已结束', client_disconnected: '客户端已断开', passed_through: '已透传' })[item.outcome] || '已记录'; return [`失败 ${formatHistoryTime(item.recorded_at)}`, provider?.name || item.provider_id || '未知供应商', `第 ${item.attempt || 1} 次请求`, kind, outcome].join(' · ') }
+function positionRecoveryDetails() { const anchor = recoveryDetailsButton.value; const popover = recoveryPopover.value; if (!anchor || !popover) return; const margin = 12; const gap = 8; const anchorRect = anchor.getBoundingClientRect(); const popoverRect = popover.getBoundingClientRect(); const left = Math.min(window.innerWidth - popoverRect.width - margin, Math.max(margin, anchorRect.right - popoverRect.width)); const below = anchorRect.bottom + gap; const above = anchorRect.top - popoverRect.height - gap; const top = below + popoverRect.height <= window.innerHeight - margin ? below : Math.max(margin, above); recoveryPopoverStyle.value = { left: `${Math.round(left)}px`, top: `${Math.round(top)}px` } }
+async function loadRecoveryHistory({ loadMore = false } = {}) { if (recoveryLoading.value || (!loadMore && !hasRecoveryDetails.value)) return; recoveryLoading.value = true; recoveryError.value = ''; try { const params = new URLSearchParams({ limit: '50' }); if (loadMore && recoveryNextCursor.value) params.set('cursor', recoveryNextCursor.value); const result = await controlFetch(`/api/recovery-history?${params}`); recoveryItems.value = loadMore ? [...recoveryItems.value, ...(result.items || [])] : (result.items || []); recoveryNextCursor.value = result.next_cursor || ''; recoveryTotalCount.value = Number(result.total_count || recoveryItems.value.length) } catch (error) { recoveryError.value = error.message || '无法读取恢复记录' } finally { recoveryLoading.value = false; await nextTick(); positionRecoveryDetails() } }
+async function toggleRecoveryDetails() { if (recoveryPopoverOpen.value) { closeRecoveryDetails(); return } recoveryPopoverOpen.value = true; recoveryItems.value = []; recoveryNextCursor.value = ''; recoveryTotalCount.value = 0; await nextTick(); positionRecoveryDetails(); await loadRecoveryHistory() }
+function closeRecoveryDetails() { recoveryPopoverOpen.value = false; recoveryItems.value = []; recoveryNextCursor.value = ''; recoveryTotalCount.value = 0; recoveryError.value = '' }
 function sessionNames(provider) { return (provider.active_sessions || []).map(item => item.name || item.session_name || item).join('\n') }
 function normalizeEndpoint(value) { return String(value || '').replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase() }
 function healthFor(provider) { return health.value?.providers?.find(item => normalizeEndpoint(item.endpoint || item.base_url) === normalizeEndpoint(provider.endpoint) || item.id === provider.provider_id || item.name === provider.name) }
@@ -265,6 +329,6 @@ async function uploadStatus() {
 }
 function applyCustomRange(range) { customRange.value = range; usageWindow.value = 'custom'; loadStatus() }
 
-onMounted(() => { loadStatus(); timer = window.setInterval(() => loadStatus(), 5000) })
-onBeforeUnmount(() => window.clearInterval(timer))
+onMounted(() => { loadStatus(); timer = window.setInterval(() => loadStatus(), 5000); window.addEventListener('resize', positionUsageHistory); window.addEventListener('resize', positionRecoveryDetails) })
+onBeforeUnmount(() => { window.clearInterval(timer); window.removeEventListener('resize', positionUsageHistory); window.removeEventListener('resize', positionRecoveryDetails) })
 </script>
