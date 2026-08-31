@@ -2366,6 +2366,83 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.status().total_retries, 1)
         self.assertEqual(router.status().last_error, "http_403")
 
+    async def test_http_402_is_retried_with_upstream_error_summary(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    402,
+                    headers={"content-type": "application/json"},
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "message": "Budget pool quota has been exhausted"
+                            }
+                        }
+                    ).encode(),
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=2),
+            retry_sleep=lambda _: _empty_wait(),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 2)
+        status = router.status()
+        self.assertEqual(status.last_retry_kind, "http_402")
+        self.assertIn(
+            "Budget pool quota has been exhausted",
+            status.recent_retry_errors[0].summary,
+        )
+
+    async def test_http_402_retries_indefinitely_until_provider_recovers(self) -> None:
+        attempts = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 5:
+                return httpx.Response(402, content=b"quota exhausted")
+            return httpx.Response(200, content=b"recovered")
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(max_attempts=-1),
+            retry_sleep=lambda _: _empty_wait(),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post("/v1/responses", json={"model": "test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"recovered")
+        self.assertEqual(attempts, 6)
+        self.assertEqual(router.status().total_retries, 5)
+
     async def test_retry_policy_control_api_validates_updates_and_hides_secrets(self) -> None:
         changed: list[RetryPolicy] = []
         store = RetryPolicyStore()
