@@ -283,6 +283,8 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
             self.assertIn("push:", workflow)
             self.assertIn("tags:", workflow)
             self.assertIn("python -m unittest discover", workflow)
+            self.assertIn("npm run build --prefix proxy_static", workflow)
+            self.assertIn("node --check proxy_static/classic/app.js", workflow)
             self.assertIn("Get-ChildItem proxy_static/src", workflow)
             self.assertIn("node --check provider_status/static/app.js", workflow)
 

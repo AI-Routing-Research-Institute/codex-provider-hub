@@ -235,10 +235,21 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         root = await self.client.get("/control/", follow_redirects=False)
         codex_page = await self.client.get("/control/codex/")
         claude_page = await self.client.get("/control/claude/")
+        codex_classic_page = await self.client.get("/control/codex/?ui=classic")
+        claude_classic_page = await self.client.get("/control/claude/?ui=classic")
+        invalid_override_page = await self.client.get("/control/codex/?ui=unknown")
         script_match = re.search(r'src="\./static/(assets/[^"]+\.js)"', codex_page.text)
         style_match = re.search(r'href="\./static/(assets/[^"]+\.css)"', codex_page.text)
+        classic_script_match = re.search(
+            r'src="\./static/(app\.js)[^"]*"', codex_classic_page.text
+        )
+        classic_style_match = re.search(
+            r'href="\./static/(styles\.css)[^"]*"', codex_classic_page.text
+        )
         self.assertIsNotNone(script_match)
         self.assertIsNotNone(style_match)
+        self.assertIsNotNone(classic_script_match)
+        self.assertIsNotNone(classic_style_match)
         codex_script = await self.client.get(
             f"/control/codex/static/{script_match.group(1)}"
         )
@@ -250,6 +261,12 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         )
         claude_styles = await self.client.get(
             f"/control/claude/static/{style_match.group(1)}"
+        )
+        classic_script = await self.client.get(
+            f"/control/codex/static/{classic_script_match.group(1)}"
+        )
+        classic_styles = await self.client.get(
+            f"/control/codex/static/{classic_style_match.group(1)}"
         )
         codex_config = await self.client.get("/control/codex/api/ui-config")
         claude_config = await self.client.get("/control/claude/api/ui-config")
@@ -272,10 +289,16 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(root.status_code, 307)
         self.assertEqual(root.headers["location"], "/control/codex/")
         self.assertEqual(codex_page.content, claude_page.content)
+        self.assertEqual(codex_classic_page.content, claude_classic_page.content)
+        self.assertEqual(invalid_override_page.content, codex_page.content)
         self.assertEqual(codex_script.status_code, 200)
         self.assertEqual(codex_script.content, claude_script.content)
         self.assertEqual(codex_styles.status_code, 200)
         self.assertEqual(codex_styles.content, claude_styles.content)
+        self.assertEqual(classic_script.status_code, 200)
+        self.assertIn(b"runtime-console-ui", classic_script.content)
+        self.assertEqual(classic_styles.status_code, 200)
+        self.assertIn(b".setting-segmented", classic_styles.content)
         traversal = await self.client.get("/control/codex/static/../index.html")
         self.assertEqual(traversal.status_code, 404)
         self.assertEqual(codex_config.json()["service_id"], "codex")
@@ -376,9 +399,12 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
                     "port": 18888,
                     "database_path": str(database),
                     "health_status_url": "https://status.example.test/api",
+                    "console_ui": "classic",
                 },
             )
             claude_view = await self.client.get("/control/claude/api/runtime-settings")
+            classic_page = await self.client.get("/control/claude/")
+            modern_override_page = await self.client.get("/control/claude/?ui=modern")
             claude_update = await self.client.post(
                 "/control/claude/api/runtime-settings",
                 headers=headers,
@@ -398,8 +424,12 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(codex_update.status_code, 200)
         self.assertEqual(claude_view.json()["configured_port"], 18888)
+        self.assertEqual(claude_view.json()["console_ui"], "classic")
+        self.assertIn('./static/app.js', classic_page.text)
+        self.assertIn('./static/assets/', modern_override_page.text)
         self.assertEqual(claude_update.status_code, 200)
         self.assertEqual(codex_view.json()["configured_port"], 19999)
+        self.assertEqual(codex_view.json()["console_ui"], "classic")
         self.assertEqual(applied, ["codex", "claude", "codex", "claude"])
         self.assertEqual(retry_update.status_code, 200)
         self.assertEqual(codex_status.json()["retry"]["max_attempts"], 7)

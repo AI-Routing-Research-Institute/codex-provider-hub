@@ -62,6 +62,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-status.txt pyinstaller==6.21.0
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: proxy_static/package-lock.json
+
+      - name: Build Vue control console
+        shell: bash
+        run: |
+          npm ci --prefix proxy_static
+          npm run build --prefix proxy_static
+
       - name: Run Python tests
         shell: bash
         run: python -m unittest discover -s tests -p "test_*.py"
@@ -69,6 +82,7 @@ jobs:
       - name: Check JavaScript syntax
         shell: pwsh
         run: |
+          node --check proxy_static/classic/app.js
           Get-ChildItem proxy_static/src -Filter *.js | ForEach-Object {
             node --check $_.FullName
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
