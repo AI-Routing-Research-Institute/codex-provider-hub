@@ -136,7 +136,7 @@ color: var(--text);
 编译后验证语法：
 
 ```bash
-node --check proxy_static/app.js
+node --check proxy_static/classic/app.js
 ```
 
 本地运行：

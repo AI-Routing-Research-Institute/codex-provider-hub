@@ -355,7 +355,7 @@ Production systemd and Nginx templates are in `deploy/`. Example domains and pro
 .
 ├── local_proxy_app.py         Unified application entry point
 ├── local_proxy/               Local proxy, protocols, provider catalogs, lifecycle
-├── proxy_static/              Shared Codex and Claude Code control panel
+├── proxy_static/              Classic and Vue Codex/Claude control panels
 ├── probe_tools/               Provider probe tools
 ├── provider_status/           Health worker, storage, and status page
 ├── config/                    Public example configuration
@@ -368,8 +368,10 @@ Production systemd and Nginx templates are in `deploy/`. Example domains and pro
 ### Tests
 
 ```powershell
+npm ci --prefix proxy_static
+npm run build --prefix proxy_static
 python -m unittest discover -s tests
-node --check proxy_static/app.js
+node --check proxy_static/classic/app.js
 node --check provider_status/static/app.js
 Get-ChildItem tests -Filter *.test.js | ForEach-Object { node --test $_.FullName }
 ```

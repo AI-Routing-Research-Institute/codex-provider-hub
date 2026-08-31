@@ -25,6 +25,12 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
+from local_proxy.control_ui import (
+    CONTROL_ASSET_DIR,
+    control_index_path,
+    resolve_control_asset,
+    select_control_ui,
+)
 from local_proxy.diagnostics import DiagnosticLog, EventLoopWatchdog
 
 
@@ -37,20 +43,11 @@ except ImportError:  # The desktop installer installs it; keep diagnostics impor
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 17890
 DEFAULT_DATABASE = Path.home() / ".cc-switch" / "cc-switch.db"
-CONTROL_ASSET_DIR = Path(__file__).resolve().parents[1] / "proxy_static" / "dist"
 MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 RETRY_ERROR_BODY_BYTES = 4 * 1024
 RETRY_ERROR_HISTORY_LIMIT = 5
 
 
-def _resolve_control_asset(asset_dir: Path, asset_name: str) -> Path | None:
-    root = asset_dir.resolve()
-    candidate = (root / asset_name).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return None
-    return candidate if candidate.is_file() else None
 RETRY_ERROR_MESSAGE_CHARS = 220
 RETRY_ERROR_READ_TIMEOUT_SECONDS = 0.25
 INPUT_ITEM_ID_COMPATIBILITY_TTL_SECONDS = 24 * 3600
@@ -2661,8 +2658,10 @@ def create_proxy_app(
         return RedirectResponse("/control/", status_code=307)
 
     @app.get("/control/", include_in_schema=False)
-    async def control_page() -> FileResponse:
-        return FileResponse(control_asset_dir / "index.html")
+    async def control_page(request: Request) -> FileResponse:
+        settings = runtime_settings_snapshot() if runtime_settings_snapshot is not None else None
+        console_ui = select_control_ui(settings, request.query_params.get("ui"))
+        return FileResponse(control_index_path(control_asset_dir, console_ui))
 
     @app.get("/control/api/ui-config", include_in_schema=False)
     async def control_ui_config():
@@ -2671,9 +2670,7 @@ def create_proxy_app(
 
     @app.get("/control/static/{asset_name:path}", include_in_schema=False)
     async def control_asset(asset_name: str):
-        asset_path = _resolve_control_asset(control_asset_dir / "static", asset_name)
-        if asset_path is None:
-            asset_path = _resolve_control_asset(control_asset_dir, asset_name)
+        asset_path = resolve_control_asset(control_asset_dir, asset_name)
         if asset_path is None:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
         response = FileResponse(asset_path)

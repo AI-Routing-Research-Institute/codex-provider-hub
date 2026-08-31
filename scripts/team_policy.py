@@ -438,9 +438,13 @@ def validate_pr(base: str, head: str) -> None:
 
 
 def run_full_verification() -> None:
+    npm = "npm.cmd" if os.name == "nt" else "npm"
     commands = [
+        [npm, "ci", "--prefix", "proxy_static"],
+        [npm, "run", "build", "--prefix", "proxy_static"],
         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
     ]
+    commands.append(["node", "--check", "proxy_static/classic/app.js"])
     commands.extend(
         ["node", "--check", str(path)]
         for path in sorted(Path("proxy_static/src").glob("*.js"))

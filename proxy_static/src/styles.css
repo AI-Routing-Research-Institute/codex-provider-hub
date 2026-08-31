@@ -1072,6 +1072,12 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 }
 .setting-row select { padding-right: 28px; }
 .setting-row select:focus-visible, .setting-row input:focus-visible { border-color: var(--teal); outline: 2px solid var(--teal-soft); }
+.setting-segmented { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 3px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--surface-soft); }
+.setting-segmented label { position: relative; min-width: 0; }
+.setting-segmented input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.setting-segmented span { min-height: 28px; display: grid; place-items: center; padding: 4px 7px; border-radius: calc(var(--control-radius) - 2px); color: var(--muted); font-size: var(--font-meta); font-weight: 700; cursor: pointer; white-space: nowrap; }
+.setting-segmented input:checked + span { background: var(--surface); color: var(--teal); box-shadow: 0 1px 3px rgb(18 28 33 / 14%); }
+.setting-segmented input:focus-visible + span { outline: 2px solid var(--teal); outline-offset: 1px; }
 .setting-toggle input[type="checkbox"] {
   position: relative;
   width: 42px;

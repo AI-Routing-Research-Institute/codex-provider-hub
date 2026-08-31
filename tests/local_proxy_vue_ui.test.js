@@ -187,6 +187,18 @@ test("provider action visibility follows the saved runtime settings", () => {
   assert.match(providers, /showStatusUpload && provider\.status_upload_supported && !manageMode/);
 });
 
+test("Vue runtime settings switch between classic and modern consoles", () => {
+  const runtime = fs.readFileSync(path.join(root, "components", "RuntimeView.vue"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+
+  assert.match(runtime, /v-model="settings\.console_ui"[^>]*value="classic"/);
+  assert.match(runtime, /v-model="settings\.console_ui"[^>]*value="modern"/);
+  assert.match(runtime, /console_ui: settings\.value\.console_ui \|\| 'modern'/);
+  assert.match(runtime, /searchParams\.delete\('ui'\)/);
+  assert.match(runtime, /window\.location\.replace\(nextUrl\.toString\(\)\)/);
+  assert.match(styles, /\.setting-segmented/);
+});
+
 test("shared time range selector uses day precision and stays anchored", async () => {
   const selector = fs.readFileSync(path.join(root, "components", "TimeRangeSelect.vue"), "utf8");
   const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");

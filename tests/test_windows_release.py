@@ -27,7 +27,8 @@ class WindowsReleaseTests(unittest.TestCase):
             result["control_paths"],
             ["/control/codex/", "/control/claude/"],
         )
-        self.assertEqual(result["control_asset_count"], 3)
+        self.assertGreaterEqual(result["control_asset_count"], 6)
+        self.assertEqual(result["control_ui_modes"], ["classic", "modern"])
         self.assertEqual(result["claude_provider_count"], 1)
         self.assertEqual(result["claude_compatible_provider_count"], 1)
         self.assertTrue(result["tray_backend_available"])
@@ -40,6 +41,8 @@ class WindowsReleaseTests(unittest.TestCase):
         )
 
         self.assertIn('ROOT / "proxy_static"', spec)
+        self.assertIn('ROOT / "proxy_static" / "classic"', spec)
+        self.assertIn('ROOT / "proxy_static" / "dist"', spec)
         self.assertNotIn('ROOT / "local_proxy_static"', spec)
         self.assertNotIn('ROOT / "claude_proxy_static"', spec)
         self.assertIn('collect_submodules("tiktoken_ext")', spec)

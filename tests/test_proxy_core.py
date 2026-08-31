@@ -4491,6 +4491,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(upstream_client.aclose)
 
         page = await client.get("/control/")
+        classic_page = await client.get("/control/?ui=classic")
+        invalid_override_page = await client.get("/control/?ui=unknown")
         script = None
         styles = None
         ui_config = await client.get("/control/api/ui-config")
@@ -4506,14 +4508,22 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(page.status_code, 200)
         self.assertIn("本地中转", page.text)
+        self.assertIn('./static/app.js', classic_page.text)
+        self.assertEqual(invalid_override_page.content, page.content)
         script_match = re.search(r'src="\./static/(assets/[^"]+\.js)"', page.text)
         style_match = re.search(r'href="\./static/(assets/[^"]+\.css)"', page.text)
         self.assertIsNotNone(script_match)
         self.assertIsNotNone(style_match)
         script = await client.get(f"/control/static/{script_match.group(1)}")
         styles = await client.get(f"/control/static/{style_match.group(1)}")
+        classic_script = await client.get("/control/static/app.js")
+        classic_styles = await client.get("/control/static/styles.css")
         self.assertEqual(script.status_code, 200)
         self.assertEqual(styles.status_code, 200)
+        self.assertEqual(classic_script.status_code, 200)
+        self.assertIn("runtime-console-ui", classic_script.text)
+        self.assertEqual(classic_styles.status_code, 200)
+        self.assertIn(".setting-segmented", classic_styles.text)
         self.assertGreater(len(script.content), 50_000)
         self.assertGreater(len(styles.content), 10_000)
         self.assertIn("local-proxy-theme", script.text)

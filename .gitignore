@@ -41,4 +41,5 @@ direct-current-response.txt
 proxy_static/dev/node_modules/
 proxy_static/dev/package-lock.json
 proxy_static/node_modules/
-proxy_static/dist/
+!proxy_static/dist/
+!proxy_static/dist/**

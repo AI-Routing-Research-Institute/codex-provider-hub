@@ -355,7 +355,7 @@ cp config/providers.example.toml config/providers.toml
 .
 ├── local_proxy_app.py         统一启动入口
 ├── local_proxy/               本地中转、协议、供应商目录与应用生命周期
-├── proxy_static/              Codex 与 Claude Code 共享控制台
+├── proxy_static/              经典与 Vue 两套 Codex/Claude 共享控制台
 ├── probe_tools/               供应商探测工具
 ├── provider_status/           健康监测 Worker、存储和状态页
 ├── config/                    公开示例配置
@@ -368,8 +368,10 @@ cp config/providers.example.toml config/providers.toml
 ### 测试
 
 ```powershell
+npm ci --prefix proxy_static
+npm run build --prefix proxy_static
 python -m unittest discover -s tests
-node --check proxy_static/app.js
+node --check proxy_static/classic/app.js
 node --check provider_status/static/app.js
 Get-ChildItem tests -Filter *.test.js | ForEach-Object { node --test $_.FullName }
 ```

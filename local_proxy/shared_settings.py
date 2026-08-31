@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable
 
+from local_proxy.control_ui import CONTROL_UI_DEFAULT, CONTROL_UI_MODES, normalize_control_ui
 from local_proxy.core import (
     DEFAULT_DATABASE,
     DEFAULT_PORT,
@@ -22,7 +23,7 @@ from local_proxy.paths import display_path, resolve_user_path
 
 
 APP_DATA_DIRECTORY_NAME = ".codex-local-proxy"
-SHARED_SETTINGS_VERSION = 1
+SHARED_SETTINGS_VERSION = 2
 PROTOCOL_SETTINGS_VERSION = 1
 SERVICE_IDS = ("codex", "claude")
 
@@ -62,6 +63,7 @@ def default_shared_settings() -> dict[str, Any]:
         "database_path": display_path(DEFAULT_DATABASE),
         "retry": RetryPolicy().as_public_dict(),
         "health_status_url": None,
+        "console_ui": CONTROL_UI_DEFAULT,
     }
 
 
@@ -128,6 +130,7 @@ def load_shared_settings(path: Path | None = None) -> dict[str, Any]:
         )
     except ValueError:
         pass
+    settings["console_ui"] = normalize_control_ui(payload.get("console_ui"))
     return settings
 
 
@@ -151,6 +154,7 @@ def _shared_settings_from_mapping(payload: dict[str, Any]) -> dict[str, Any]:
         )
     except ValueError:
         pass
+    settings["console_ui"] = normalize_control_ui(payload.get("console_ui"))
     return settings
 
 
@@ -262,6 +266,7 @@ class SharedSettingsStore:
         port: int,
         database_path: Path,
         health_status_url: str | None,
+        console_ui: str,
     ) -> None:
         with self._lock:
             candidate = dict(self._settings)
@@ -269,6 +274,7 @@ class SharedSettingsStore:
                 port=port,
                 database_path=display_path(database_path),
                 health_status_url=health_status_url,
+                console_ui=console_ui,
             )
             save_shared_settings(candidate, self.path)
             self._settings = _shared_settings_from_mapping(candidate)
@@ -339,6 +345,7 @@ class SharedRuntimeCoordinator:
             "restart_required": settings["port"] != self.active_port,
             "database_path": settings["database_path"],
             "health_status_url": settings["health_status_url"],
+            "console_ui": settings["console_ui"],
             **dict(profile.runtime_metadata()),
             "shared_settings_file": display_path(self.settings_store.path),
         }
@@ -392,6 +399,12 @@ class SharedRuntimeCoordinator:
         if not isinstance(database_value, str) or not database_value.strip():
             raise ValueError("数据来源不能为空")
         health_url = normalize_health_status_url(payload.get("health_status_url"))
+        console_ui = payload.get(
+            "console_ui",
+            self.settings_store.snapshot()["console_ui"],
+        )
+        if not isinstance(console_ui, str) or console_ui not in CONTROL_UI_MODES:
+            raise ValueError("控制台界面必须是 classic 或 modern")
         if (
             getattr(profile, "apply_runtime_preferences", None) is not None
             and "show_provider_launch_command" in payload
@@ -410,6 +423,7 @@ class SharedRuntimeCoordinator:
                 port=configured_port,
                 database_path=source,
                 health_status_url=health_url,
+                console_ui=console_ui,
             )
             for current_service_id, providers in loaded.items():
                 self.profiles[current_service_id].apply_runtime_database(source, providers)

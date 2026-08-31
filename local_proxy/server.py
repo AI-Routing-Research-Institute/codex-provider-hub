@@ -17,6 +17,11 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.background import BackgroundTask
 
+from local_proxy.control_ui import (
+    control_index_path,
+    resolve_control_asset,
+    select_control_ui,
+)
 from local_proxy.diagnostics import DiagnosticLog, EventLoopWatchdog
 from local_proxy.core import (
     CONTROL_ASSET_DIR,
@@ -44,7 +49,6 @@ from local_proxy.core import (
     _public_requests,
     _public_sessions,
     _query_time_range,
-    _resolve_control_asset,
     _valid_control_request,
     order_proxy_providers,
     retry_policy_from_mapping,
@@ -390,8 +394,14 @@ def _register_control_routes(
         payload["catalog"] = dict(result)
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
-    async def control_page() -> FileResponse:
-        return FileResponse(control_asset_dir / "index.html")
+    async def control_page(request: Request) -> FileResponse:
+        settings = (
+            profile.runtime_settings_snapshot()
+            if profile.runtime_settings_snapshot is not None
+            else None
+        )
+        console_ui = select_control_ui(settings, request.query_params.get("ui"))
+        return FileResponse(control_index_path(control_asset_dir, console_ui))
 
     async def control_ui_config():
         configured = dict(profile.ui_config() if profile.ui_config is not None else {})
@@ -409,9 +419,7 @@ def _register_control_routes(
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     async def control_asset(asset_name: str):
-        asset_path = _resolve_control_asset(control_asset_dir / "static", asset_name)
-        if asset_path is None:
-            asset_path = _resolve_control_asset(control_asset_dir, asset_name)
+        asset_path = resolve_control_asset(control_asset_dir, asset_name)
         if asset_path is None:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
 

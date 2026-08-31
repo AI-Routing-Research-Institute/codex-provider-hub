@@ -181,14 +181,22 @@ def existing_proxy_url(
 
 
 def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
-    missing_assets = []
-    if not (CONTROL_ASSET_DIR / "index.html").is_file():
-        missing_assets.append("index.html")
-    assets_dir = CONTROL_ASSET_DIR / "static" / "assets"
-    if not any(assets_dir.glob("*.js")):
-        missing_assets.append("assets/*.js")
-    if not any(assets_dir.glob("*.css")):
-        missing_assets.append("assets/*.css")
+    required_assets = (
+        "classic/index.html",
+        "classic/app.js",
+        "classic/styles.css",
+        "dist/index.html",
+    )
+    missing_assets = [
+        name for name in required_assets if not (CONTROL_ASSET_DIR / name).is_file()
+    ]
+    modern_assets_dir = CONTROL_ASSET_DIR / "dist" / "static" / "assets"
+    modern_javascript = tuple(modern_assets_dir.glob("*.js"))
+    modern_styles = tuple(modern_assets_dir.glob("*.css"))
+    if not modern_javascript:
+        missing_assets.append("dist/static/assets/*.js")
+    if not modern_styles:
+        missing_assets.append("dist/static/assets/*.css")
     if missing_assets:
         raise FileNotFoundError(
             "本地中转页面资源缺失：" + "、".join(missing_assets)
@@ -224,7 +232,8 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
             "codex": "/v1/*",
             "claude": ["/v1/messages", "/v1/messages/count_tokens"],
         },
-        "control_asset_count": 3,
+        "control_asset_count": len(required_assets) + len(modern_javascript) + len(modern_styles),
+        "control_ui_modes": ["classic", "modern"],
         "claude_provider_count": len(claude_providers),
         "claude_compatible_provider_count": sum(
             provider.compatible and provider.has_credentials
