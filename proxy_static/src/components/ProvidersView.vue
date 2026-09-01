@@ -31,7 +31,7 @@
         <div class="usage-metric"><span>输入 Token</span><strong>{{ formatTokenCount(usage.input_tokens) }}</strong></div>
         <div class="usage-metric"><span>输出 Token</span><strong>{{ formatTokenCount(usage.output_tokens) }}</strong></div>
         <div class="usage-metric"><span>缓存 Token</span><strong>{{ formatTokenCount(usage.cached_tokens) }}</strong></div>
-        <div class="usage-estimate-wrap"><span v-if="usage.estimated_requests" id="usage-estimated-note">含估算请求</span></div>
+        <div class="usage-estimate-wrap"><span v-if="usage.estimated_requests" id="usage-estimated-note">含估算请求</span><button class="usage-share-button" type="button" title="生成今日 Token 分享卡片" aria-label="生成今日 Token 分享卡片" @click="shareCardOpen = true"><UiIcon name="share" />分享卡片</button></div>
       </div>
 
       <div class="provider-list-shell">
@@ -123,6 +123,8 @@
     <div v-if="historyDetail" ref="historyDetailPopover" class="history-detail-popover show" :style="historyDetailStyle" role="status" @pointerleave="hideHistoryDetail"><strong>{{ historyDetailLabel }}</strong><span>{{ historyMeta(historyDetail) }}</span><span v-if="historyReason(historyDetail)">原因：{{ historyReason(historyDetail) }}</span></div>
     <div v-if="selectedUsage" ref="usageHistoryPopover" class="usage-history-popover show" :style="usagePopoverStyle" role="dialog" aria-label="请求记录"><div class="usage-history-heading"><div><strong>{{ selectedUsage.name }} 请求记录</strong><span>{{ usageWindowLabel }} · {{ usageHistoryTotalCount }} 条</span></div><button class="usage-history-close" type="button" aria-label="关闭用量记录" @click="closeUsageHistory"><UiIcon name="close" /></button></div><div class="usage-history-summary"><span>Token {{ formatTokenCount(usageHistoryTotals?.total_tokens ?? providerUsage(selectedUsage.provider_id).total_tokens) }}</span><span>成功 {{ formatTokenCount(usageHistoryTotals?.successful_tokens) }}</span><span>失败 {{ formatTokenCount(usageHistoryTotals?.failed_tokens) }}</span></div><ol class="usage-history-list"><li v-if="usageHistoryLoading" class="usage-history-empty">正在读取请求记录…</li><li v-else-if="usageHistoryError" class="usage-history-empty">{{ usageHistoryError }}</li><li v-else-if="!usageHistoryItems.length" class="usage-history-empty">当前时间范围内没有请求记录</li><li v-for="item in usageHistoryItems" v-else :key="item.id || item.recorded_at" class="usage-history-item" :class="{ failed: item.succeeded !== true }"><div class="usage-history-item-top"><time class="usage-history-time">{{ formatHistoryTime(item.recorded_at) }}</time><strong class="usage-history-model" :title="item.model || 'unknown'">{{ item.model || 'unknown' }}</strong><strong class="usage-history-total">{{ formatTokenCount(item.total_tokens) }}</strong></div><div class="usage-history-detail"><span>输入 {{ formatTokenCount(item.input_tokens) }}</span><span>输出 {{ formatTokenCount(item.output_tokens) }}</span><span v-if="item.cached_tokens">缓存 {{ formatTokenCount(item.cached_tokens) }}</span><span v-if="item.reasoning_tokens">推理 {{ formatTokenCount(item.reasoning_tokens) }}</span><span>{{ item.succeeded === true ? '成功' : '失败' }}</span></div></li></ol><button v-if="usageHistoryNextCursor" class="usage-history-more" type="button" :disabled="usageHistoryLoading" @click="loadUsageHistory">{{ usageHistoryLoading ? '加载中…' : '加载更早记录' }}</button></div>
     <div v-if="recoveryPopoverOpen" ref="recoveryPopover" class="recovery-popover show" :style="recoveryPopoverStyle" role="dialog" aria-label="恢复记录"><div class="recovery-popover-heading"><strong>恢复记录</strong><span>近 24 小时 · {{ recoveryTotalCount }} 条</span><button class="usage-history-close" type="button" aria-label="关闭恢复记录" @click="closeRecoveryDetails"><UiIcon name="close" /></button></div><ol><li v-if="recoveryLoading" class="recovery-empty">正在加载恢复记录…</li><li v-else-if="recoveryError" class="recovery-empty">{{ recoveryError }}</li><li v-else-if="!recoveryItems.length" class="recovery-empty">近 24 小时没有恢复记录</li><li v-for="item in recoveryItems" v-else :key="recoveryItemKey(item)"><span class="recovery-error-meta">{{ recoveryMeta(item) }}</span><span class="recovery-error-summary">{{ item.summary || '上游临时错误' }}</span></li></ol><button v-if="recoveryNextCursor" class="usage-history-more" type="button" :disabled="recoveryLoading" @click="loadRecoveryHistory({ loadMore: true })">{{ recoveryLoading ? '加载中…' : '加载更早记录' }}</button></div>
+
+    <ShareCardDialog v-if="shareCardOpen" @close="shareCardOpen = false" />
   </div>
 </template>
 
@@ -130,6 +132,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { controlFetch, jsonOptions } from '../api.js'
 import TimeRangeSelect from './TimeRangeSelect.vue'
+import ShareCardDialog from './ShareCardDialog.vue'
 import UiSelect from './ui/UiSelect.vue'
 import UiIcon from './ui/UiIcon.vue'
 import { formatTokenCount } from '../token-format.js'
@@ -198,6 +201,7 @@ const recoveryTotalCount = ref(0)
 const recoveryLoading = ref(false)
 const recoveryError = ref('')
 const customRange = ref(null)
+const shareCardOpen = ref(false)
 let timer
 
 const emptyForm = () => ({ name: '', base_url: '', api_key: '', clear_api_key: false, transport: 'httpx', wire_api: 'responses', headers: '{}', query_params: '{}' })
