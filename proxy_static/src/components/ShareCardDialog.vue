@@ -138,12 +138,24 @@ function drawPosterBackdrop(context, width, height) {
   context.globalAlpha = 1
 }
 
+function fitText(context, text, maxWidth, baseSize, fontFamily, weight = '700') {
+  let size = baseSize
+  let label = text
+  while (size > 10 && context.measureText(label).width > maxWidth) {
+    if (label.length > 4) label = `${label.slice(0, Math.max(3, label.length - 2))}…`
+    else size -= 1
+    context.font = `${weight} ${size}px ${fontFamily}`
+  }
+  return { label, size }
+}
+
 function drawCard() {
   const canvas = canvasElement.value
   const card = data.value
   if (!canvas || !card) return
   const width = 600
-  const height = 940
+  const height = 1000
+  const centerX = width / 2
   const scale = Math.max(2, Math.min(3, Math.round(window.devicePixelRatio || 1) + 1))
   canvas.width = width * scale
   canvas.height = height * scale
@@ -152,67 +164,97 @@ function drawCard() {
   context.scale(scale, scale)
   const fontFamily = '"PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif'
   context.textBaseline = 'alphabetic'
-  context.textAlign = 'left'
+  context.textAlign = 'center'
 
-  drawPosterBackdrop(context, width, height)
+  const background = context.createLinearGradient(0, 0, width * 0.35, height)
+  background.addColorStop(0, '#0a0a26')
+  background.addColorStop(0.45, '#2c1358')
+  background.addColorStop(0.8, '#6b2180')
+  background.addColorStop(1, '#a3346e')
+  context.fillStyle = background
+  context.fillRect(0, 0, width, height)
+  paintGlow(context, width * 0.88, height * 0.1, 320, 'rgba(236, 72, 153, 0.4)')
+  paintGlow(context, width * 0.08, height * 0.94, 340, 'rgba(251, 191, 36, 0.24)')
+  for (const star of posterStars({ count: 40, width, height })) {
+    context.globalAlpha = star.alpha * 0.9
+    context.fillStyle = '#ffffff'
+    context.beginPath()
+    context.arc(star.x, star.y, star.radius, 0, Math.PI * 2)
+    context.fill()
+    if (star.sparkle) {
+      const arm = star.radius * 3.2
+      context.strokeStyle = '#ffffff'
+      context.lineWidth = 1
+      context.beginPath()
+      context.moveTo(star.x - arm, star.y)
+      context.lineTo(star.x + arm, star.y)
+      context.moveTo(star.x, star.y - arm)
+      context.lineTo(star.x, star.y + arm)
+      context.stroke()
+    }
+  }
+  context.globalAlpha = 1
 
-  const accent = context.createLinearGradient(90, 0, width - 90, 0)
+  const accent = context.createLinearGradient(120, 0, width - 120, 0)
   accent.addColorStop(0, '#fbbf24')
   accent.addColorStop(0.5, '#f472b6')
   accent.addColorStop(1, '#38bdf8')
 
   context.fillStyle = 'rgba(255, 255, 255, 0.72)'
-  context.font = `700 15px ${fontFamily}`
-  if ('letterSpacing' in context) context.letterSpacing = '5px'
-  context.fillText(`${String(card.brandMark).slice(0, 4)} · 今日 TOKEN 战报`, 56, 76)
+  context.font = `700 14px ${fontFamily}`
+  if ('letterSpacing' in context) context.letterSpacing = '6px'
+  context.fillText(`${String(card.brandMark).slice(0, 4)} · 今日 TOKEN 战报`, centerX, 70)
   if ('letterSpacing' in context) context.letterSpacing = '0px'
 
   context.fillStyle = '#ffffff'
-  context.font = `800 34px ${fontFamily}`
-  context.fillText(`${card.dateLabel} ${card.weekdayLabel}`, 56, 126)
+  context.font = `800 32px ${fontFamily}`
+  context.fillText(`${card.dateLabel} ${card.weekdayLabel}`, centerX, 116)
   context.fillStyle = 'rgba(255, 255, 255, 0.55)'
   context.font = `400 14px ${fontFamily}`
-  context.fillText('这一天，你和模型并肩作战', 56, 154)
+  context.fillText('这一天，你和模型并肩作战', centerX, 146)
 
-  context.fillStyle = 'rgba(255, 255, 255, 0.4)'
-  context.font = `500 26px ${fontFamily}`
-  context.fillText('今日狂飙', 56, 250)
+  context.fillStyle = 'rgba(255, 255, 255, 0.5)'
+  context.font = `500 18px ${fontFamily}`
+  if ('letterSpacing' in context) context.letterSpacing = '10px'
+  context.fillText('今日狂飙', centerX, 236)
+  if ('letterSpacing' in context) context.letterSpacing = '0px'
+
   context.save()
   context.shadowColor = 'rgba(251, 191, 36, 0.55)'
   context.shadowBlur = 34
   const numberSize = card.totalTokens > 99_999_999 ? 74 : card.totalTokens > 9_999_999 ? 84 : 96
   context.font = `900 ${numberSize}px ${fontFamily}`
   context.fillStyle = '#ffffff'
-  context.fillText(formatGroupedTokens(card.totalTokens), 56, 350)
+  context.fillText(formatGroupedTokens(card.totalTokens), centerX, 344)
   context.restore()
   context.fillStyle = accent
   context.font = `800 20px ${fontFamily}`
-  if ('letterSpacing' in context) context.letterSpacing = '8px'
-  context.fillText('TOKENS', 58, 392)
+  if ('letterSpacing' in context) context.letterSpacing = '10px'
+  context.fillText('TOKENS', centerX, 388)
   if ('letterSpacing' in context) context.letterSpacing = '0px'
 
-  const badgeWidth = 54 + card.badgeTitle.length * 22
-  const badge = context.createLinearGradient(56, 0, 56 + badgeWidth, 0)
+  context.font = `800 17px ${fontFamily}`
+  const badgeWidth = Math.min(440, 54 + card.badgeTitle.length * 20)
+  const badge = context.createLinearGradient(centerX - badgeWidth / 2, 0, centerX + badgeWidth / 2, 0)
   badge.addColorStop(0, '#f59e0b')
   badge.addColorStop(1, '#ec4899')
-  roundedRect(context, 56, 424, badgeWidth, 42, 21)
+  roundedRect(context, centerX - badgeWidth / 2, 414, badgeWidth, 42, 21)
   context.fillStyle = badge
   context.fill()
   context.fillStyle = '#1c1030'
-  context.font = `800 17px ${fontFamily}`
-  context.textAlign = 'center'
-  context.fillText(card.badgeTitle, 56 + badgeWidth / 2, 452)
-  context.textAlign = 'left'
+  context.fillText(card.badgeTitle, centerX, 441)
 
   if (card.yesterday?.direction) {
     const tone = card.yesterday.direction === 'up' ? '#4ade80' : card.yesterday.direction === 'down' ? '#fca5a5' : 'rgba(255,255,255,0.75)'
     const arrow = card.yesterday.direction === 'up' ? '↑' : card.yesterday.direction === 'down' ? '↓' : '→'
+    const compareText = `${arrow} ${card.yesterday.label}`
+    context.font = `700 15px ${fontFamily}`
+    const pillWidth = 44 + compareText.length * 16
     context.fillStyle = 'rgba(255, 255, 255, 0.14)'
-    roundedRect(context, 56, 486, 54 + card.yesterday.label.length * 17, 34, 17)
+    roundedRect(context, centerX - pillWidth / 2, 482, pillWidth, 34, 17)
     context.fill()
     context.fillStyle = tone
-    context.font = `700 15px ${fontFamily}`
-    context.fillText(`${arrow} ${card.yesterday.label}`, 72, 509)
+    context.fillText(compareText, centerX, 505)
   }
 
   const capsules = [
@@ -220,32 +262,47 @@ function drawCard() {
     ['输出', card.outputTokens],
     ['缓存', card.cachedTokens]
   ]
-  const capsuleTop = 548
   const capsuleWidth = (width - 112 - 2 * 14) / 3
   capsules.forEach(([label, value], index) => {
     const left = 56 + index * (capsuleWidth + 14)
     context.fillStyle = 'rgba(255, 255, 255, 0.1)'
-    roundedRect(context, left, capsuleTop, capsuleWidth, 62, 14)
+    roundedRect(context, left, 552, capsuleWidth, 62, 14)
     context.fill()
     context.strokeStyle = 'rgba(255, 255, 255, 0.16)'
     context.lineWidth = 1
     context.stroke()
     context.fillStyle = 'rgba(255, 255, 255, 0.6)'
     context.font = `500 13px ${fontFamily}`
-    context.fillText(label, left + 14, capsuleTop + 24)
+    context.fillText(label, left + capsuleWidth / 2, 578)
     context.fillStyle = '#ffffff'
     context.font = `700 20px ${fontFamily}`
-    context.fillText(formatTokenCount(value), left + 14, capsuleTop + 48)
+    context.fillText(formatTokenCount(value), left + capsuleWidth / 2, 604)
   })
 
-  context.fillStyle = 'rgba(255, 255, 255, 0.4)'
-  context.font = `500 24px ${fontFamily}`
-  context.fillText('今日消耗构成', 56, 678)
+  const statsParts = [`${formatGroupedTokens(card.requestCount)} 次请求`]
+  if (card.requestCount > 0) statsParts.push(`成功率 ${card.successRate}%`)
+  if (card.failedRequests) statsParts.push(`失败 ${formatGroupedTokens(card.failedRequests)} 次`)
+  if (card.estimatedRequests) statsParts.push('含估算')
+  context.font = `500 14px ${fontFamily}`
+  if (context.measureText(statsParts.join(' · ')).width > 460) context.font = `500 12px ${fontFamily}`
+  context.fillStyle = 'rgba(255, 255, 255, 0.6)'
+  context.fillText(statsParts.join(' · '), centerX, 646)
 
-  const donutCenterX = 152
-  const donutCenterY = 800
-  const donutRadius = 74
-  const donutWidth = 22
+  const divider = context.createLinearGradient(centerX - 60, 0, centerX + 60, 0)
+  divider.addColorStop(0, 'rgba(255,255,255,0.05)')
+  divider.addColorStop(0.5, 'rgba(255,255,255,0.3)')
+  divider.addColorStop(1, 'rgba(255,255,255,0.05)')
+  context.fillStyle = divider
+  context.fillRect(centerX - 60, 684, 120, 1)
+  context.fillStyle = 'rgba(255, 255, 255, 0.7)'
+  context.font = `600 16px ${fontFamily}`
+  if ('letterSpacing' in context) context.letterSpacing = '4px'
+  context.fillText('今日消耗构成', centerX, 714)
+  if ('letterSpacing' in context) context.letterSpacing = '0px'
+
+  const donutCenterY = 810
+  const donutRadius = 76
+  const donutWidth = 24
   const palette = ['#f472b6', '#a78bfa', '#38bdf8', '#fbbf24', '#34d399']
   const providerEntries = card.byProvider.slice(0, 5)
   const donutTotal = providerEntries.reduce((sum, entry) => sum + entry.totalTokens, 0) || 1
@@ -257,72 +314,59 @@ function drawCard() {
       context.strokeStyle = palette[index % palette.length]
       context.lineWidth = donutWidth
       context.lineCap = 'butt'
-      context.arc(donutCenterX, donutCenterY, donutRadius, angle, angle + slice)
+      context.arc(centerX, donutCenterY, donutRadius, angle, angle + slice)
       context.stroke()
       angle += slice
     })
-    context.beginPath()
-    context.arc(donutCenterX, donutCenterY, donutRadius - donutWidth / 2 - 4, 0, Math.PI * 2)
-    context.strokeStyle = 'rgba(255,255,255,0.14)'
-    context.lineWidth = 1
-    context.stroke()
+    context.font = `800 30px ${fontFamily}`
     context.fillStyle = '#ffffff'
-    context.font = `800 22px ${fontFamily}`
-    context.textAlign = 'center'
-    context.fillText(`${providerEntries.length} 家`, donutCenterX, donutCenterY - 2)
-    context.fillStyle = 'rgba(255, 255, 255, 0.55)'
-    context.font = `500 12px ${fontFamily}`
-    context.fillText('供应商出战', donutCenterX, donutCenterY + 20)
-    context.textAlign = 'left'
+    context.fillText(`${providerEntries[0].tokenShare}%`, centerX, donutCenterY - 4)
+    context.font = `700 15px ${fontFamily}`
+    context.fillStyle = '#fde68a'
+    const champion = fitText(context, providerEntries[0].name, 108, 15, fontFamily, '700')
+    context.fillText(`本命 ${champion.label}`, centerX, donutCenterY + 24)
   } else {
     context.strokeStyle = 'rgba(255,255,255,0.2)'
     context.lineWidth = donutWidth
     context.beginPath()
-    context.arc(donutCenterX, donutCenterY, donutRadius, 0, Math.PI * 2)
+    context.arc(centerX, donutCenterY, donutRadius, 0, Math.PI * 2)
     context.stroke()
+    context.fillStyle = 'rgba(255,255,255,0.6)'
+    context.font = `600 16px ${fontFamily}`
+    context.fillText('今日无出战', centerX, donutCenterY + 6)
   }
 
-  const legendLeft = 268
-  let legendTop = 726
-  if (providerEntries.length) {
-    context.fillStyle = 'rgba(255, 255, 255, 0.62)'
-    context.font = `500 13px ${fontFamily}`
-    context.fillText('本命供应商', legendLeft, legendTop)
-    context.fillStyle = '#ffffff'
-    context.font = `800 22px ${fontFamily}`
-    let champion = providerEntries[0].name
-    while (champion.length > 12 && context.measureText(champion).width > 240) champion = `${champion.slice(0, -2)}…`
-    context.fillText(champion, legendLeft, legendTop + 28)
-    context.fillStyle = '#fde68a'
-    context.font = `800 16px ${fontFamily}`
-    context.fillText(`独挑 ${providerEntries[0].tokenShare}% 今日用量`, legendLeft, legendTop + 52)
-    legendTop += 84
-    providerEntries.slice(1, 4).forEach((entry, index) => {
-      const top = legendTop + index * 30
-      context.fillStyle = palette[(index + 1) % palette.length]
-      roundedRect(context, legendLeft, top - 10, 8, 8, 2)
-      context.fill()
-      context.fillStyle = 'rgba(255, 255, 255, 0.85)'
-      context.font = `600 14px ${fontFamily}`
-      let name = entry.name
-      while (name.length > 10 && context.measureText(name).width > 150) name = `${name.slice(0, -2)}…`
-      context.fillText(name, legendLeft + 16, top)
-      context.fillStyle = 'rgba(255, 255, 255, 0.5)'
-      context.font = `500 13px ${fontFamily}`
-      context.textAlign = 'right'
-      context.fillText(`${formatTokenCount(entry.totalTokens)} · ${entry.tokenShare}%`, width - 56, top)
-      context.textAlign = 'left'
+  if (providerEntries.length > 1) {
+    const legendEntries = providerEntries.slice(0, 4)
+    context.font = `500 12px ${fontFamily}`
+    const itemGap = 18
+    const items = legendEntries.map((entry, index) => {
+      const name = fitText(context, entry.name, 84, 12, fontFamily, '500').label
+      return { name, share: entry.tokenShare, color: palette[index % palette.length], width: 16 + context.measureText(`${name} ${entry.tokenShare}%`).width }
     })
-  } else {
-    context.fillStyle = 'rgba(255, 255, 255, 0.55)'
-    context.font = `500 14px ${fontFamily}`
-    context.fillText('今天还没有供应商出战', legendLeft, legendTop + 20)
+    const totalWidth = items.reduce((sum, item) => sum + item.width, 0) + itemGap * (items.length - 1)
+    let left = centerX - totalWidth / 2
+    items.forEach(item => {
+      context.fillStyle = item.color
+      context.beginPath()
+      context.arc(left + 4, 893, 4, 0, Math.PI * 2)
+      context.fill()
+      context.fillStyle = 'rgba(255, 255, 255, 0.75)'
+      context.textAlign = 'left'
+      context.fillText(`${item.name} ${item.share}%`, left + 14, 897)
+      context.textAlign = 'center'
+      left += item.width + itemGap
+    })
+  } else if (providerEntries.length === 1) {
+    context.fillStyle = 'rgba(255, 255, 255, 0.75)'
+    context.font = `600 14px ${fontFamily}`
+    context.fillText('独挑今日全部用量', centerX, 898)
   }
 
   if (card.latestBattle) {
-    context.fillStyle = 'rgba(255, 255, 255, 0.5)'
-    context.font = `500 15px ${fontFamily}`
-    context.fillText(`最晚一战 ${card.latestBattle} · 你还在敲代码`, 56, 888)
+    context.fillStyle = 'rgba(255, 255, 255, 0.55)'
+    context.font = `500 14px ${fontFamily}`
+    context.fillText(`最晚一战 ${card.latestBattle} · 你还在敲代码`, centerX, 934)
   }
 
   const footerLine = context.createLinearGradient(56, 0, width - 56, 0)
@@ -330,13 +374,10 @@ function drawCard() {
   footerLine.addColorStop(0.5, 'rgba(255,255,255,0.28)')
   footerLine.addColorStop(1, 'rgba(255,255,255,0.05)')
   context.fillStyle = footerLine
-  context.fillRect(56, 906, width - 112, 1)
-  context.fillStyle = 'rgba(255, 255, 255, 0.72)'
-  context.font = `700 14px ${fontFamily}`
-  context.fillText(`${card.displayName} · 本地中转战报`, 56, 900 - 8)
-  context.fillStyle = 'rgba(255, 255, 255, 0.45)'
-  context.font = `400 12px ${fontFamily}`
-  context.fillText('数据仅保存在本机 · 成功率与请求统计详见控制台', 56, 930)
+  context.fillRect(56, 950, width - 112, 1)
+  context.fillStyle = 'rgba(255, 255, 255, 0.5)'
+  context.font = `600 13px ${fontFamily}`
+  context.fillText(`${card.displayName} · 数据仅保存在本机`, centerX, 976)
 
   canvas.toBlob(blob => { canvasBlob = blob }, 'image/png')
 }
