@@ -78,3 +78,59 @@ export function shareCardFileName(now) {
   const compact = dateLabel ? dateLabel.replace(/\//g, '') : 'unknown'
   return `token-card-${compact}.png`
 }
+
+const BADGE_TIERS = [
+  { minTokens: 10_000_000, title: 'Token 吞天巨兽' },
+  { minTokens: 1_000_000, title: 'Token 大户' },
+  { minTokens: 100_000, title: 'Token 渐入佳境' },
+  { minTokens: 10_000, title: 'Token 操练生' },
+  { minTokens: 1, title: 'Token 初出茅庐' }
+]
+
+export function shareBadgeTitle(totalTokens) {
+  const count = toCount(totalTokens)
+  return BADGE_TIERS.find(tier => count >= tier.minTokens)?.title || '今日蓄力中'
+}
+
+export function yesterdayCompare(todayTokens, yesterdayTokens) {
+  const today = toCount(todayTokens)
+  const yesterday = toCount(yesterdayTokens)
+  if (yesterday <= 0) {
+    return today > 0
+      ? { direction: 'up', percent: 0, label: '首日作战 · 明日开启对比' }
+      : { direction: null, percent: 0, label: '' }
+  }
+  const percent = Math.round(((today - yesterday) / yesterday) * 1000) / 10
+  if (percent === 0) return { direction: 'flat', percent: 0, label: '与昨日持平' }
+  if (percent > 0) return { direction: 'up', percent, label: `较昨日多 ${Math.abs(percent)}%` }
+  return { direction: 'down', percent, label: `较昨日少 ${Math.abs(percent)}%` }
+}
+
+export function latestBattleLabel(lastRequestAt) {
+  const number = Number(lastRequestAt)
+  if (!Number.isFinite(number) || number <= 0) return ''
+  const date = new Date(number < 10_000_000_000 ? number * 1000 : number)
+  if (Number.isNaN(date.getTime())) return ''
+  const hour = String(date.getHours()).padStart(2, '0')
+  const minute = String(date.getMinutes()).padStart(2, '0')
+  return `${hour}:${minute}`
+}
+
+export function posterStars({ count, width, height, seed = 20260901 }) {
+  const points = []
+  let state = Math.floor(Math.abs(seed)) % 2147483647 || 1
+  const next = () => {
+    state = (state * 48271) % 2147483647
+    return state / 2147483647
+  }
+  for (let index = 0; index < count; index += 1) {
+    points.push({
+      x: Math.round(next() * width),
+      y: Math.round(next() * height),
+      radius: 0.8 + next() * 1.8,
+      alpha: 0.25 + next() * 0.65,
+      sparkle: index % 7 === 0
+    })
+  }
+  return points
+}
