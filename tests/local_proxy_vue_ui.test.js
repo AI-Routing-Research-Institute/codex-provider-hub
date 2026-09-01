@@ -194,8 +194,14 @@ test("Vue runtime settings switch between classic and modern consoles", () => {
   assert.match(runtime, /v-model="settings\.console_ui"[^>]*value="classic"/);
   assert.match(runtime, /v-model="settings\.console_ui"[^>]*value="modern"/);
   assert.match(runtime, /console_ui: settings\.value\.console_ui \|\| 'modern'/);
+  assert.match(runtime, /const activeConsoleUi = 'modern'/);
+  assert.match(runtime, /settings\.value\.console_ui !== activeConsoleUi/);
+  assert.doesNotMatch(runtime, /previousConsoleUi = settings\.value\.console_ui/);
+  assert.doesNotMatch(runtime, /setTimeout\(\(\) => \{[\s\S]*searchParams\.delete\('ui'\)/);
   assert.match(runtime, /searchParams\.delete\('ui'\)/);
-  assert.match(runtime, /window\.location\.replace\(nextUrl\.toString\(\)\)/);
+  assert.match(runtime, /window\.location\.href = nextUrl\.toString\(\)/);
+  assert.match(runtime, /nextUrl\.toString\(\) === window\.location\.href/);
+  assert.match(runtime, /window\.location\.reload\(\)/);
   assert.match(styles, /\.setting-segmented/);
 });
 
@@ -330,4 +336,115 @@ test("Vue request view preserves upstream phase and timeout labels", () => {
   assert.match(requests, /receiving: '接收中'/);
   assert.match(requests, /connection_timeout: '等待上游响应超时'/);
   assert.match(requests, /stream_idle_timeout: '上游长时间无数据'/);
+});
+
+test("Vue Token values use the classic compact formatter and labeled units", () => {
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  const requests = fs.readFileSync(path.join(root, "components", "RequestsView.vue"), "utf8");
+
+  assert.match(providers, /import \{ formatTokenCount \} from '\.\.\/token-format\.js'/);
+  assert.match(requests, /import \{ formatTokenCount \} from '\.\.\/token-format\.js'/);
+  assert.match(providers, /Token 总量<\/span><strong>\{\{ formatTokenCount\(usage\.total_tokens\) \}\}/);
+  assert.match(providers, /输入 Token<\/span><strong>\{\{ formatTokenCount\(usage\.input_tokens\) \}\}/);
+  assert.match(providers, /输出 Token<\/span><strong>\{\{ formatTokenCount\(usage\.output_tokens\) \}\}/);
+  assert.match(providers, /缓存 Token<\/span><strong>\{\{ formatTokenCount\(usage\.cached_tokens\) \}\}/);
+  assert.match(providers, /formatTokenCount\(providerUsage\(provider\.provider_id\)\.total_tokens\)/);
+  assert.match(providers, /Token \{\{ formatTokenCount\(usageHistoryTotals\?\.total_tokens/);
+  assert.match(requests, /'—' : formatTokenCount\(item\.total_tokens\)/);
+  assert.doesNotMatch(providers, /function formatNumber/);
+  assert.doesNotMatch(requests, /function formatNumber/);
+});
+
+test("Vue provider usage opens request details and positions the popover from its anchor", () => {
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  assert.match(providers, /openUsageHistory\(provider, \$event\.currentTarget\)/);
+  assert.match(providers, /\/api\/usage-history\?/);
+  assert.match(providers, /getBoundingClientRect\(\)/);
+  assert.match(providers, /addEventListener\('resize', positionUsageHistory\)/);
+  assert.doesNotMatch(providers, /详细请求请在“请求”页面查看/);
+});
+
+test("Vue session routing uses session titles and anchor-based dynamic positioning", () => {
+  const requests = fs.readFileSync(path.join(root, "components", "RequestsView.vue"), "utf8");
+  assert.match(requests, /ref="routeAnchor"/);
+  assert.match(requests, /openSessionRoutes\(\$event\.currentTarget\)/);
+  assert.match(requests, /String\(session\.name \|\| '未知会话'\)/);
+  assert.match(requests, /value: session\.session_key/);
+  assert.match(requests, /getBoundingClientRect\(\)/);
+  assert.match(requests, /addEventListener\('resize', positionRoutePopover\)/);
+  assert.doesNotMatch(requests, /top: 120px/);
+  assert.doesNotMatch(requests, /session\.session_name \|\| session\.thread_name \|\| session\.session_key/);
+});
+
+test("Vue active provider requests navigate with a provider filter", () => {
+  const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  const requests = fs.readFileSync(path.join(root, "components", "RequestsView.vue"), "utf8");
+  assert.match(providers, /@click\.stop=\"\$emit\('navigate-requests', provider\.provider_id\)\"/);
+  assert.match(providers, /:disabled=\"manageMode\"[^>]*:title=\"sessionNames\(provider\)\"/);
+  assert.match(app, /@navigate-requests=\"navigateToProviderRequests\"/);
+  assert.match(app, /:navigation-provider-id=\"requestProviderId\"/);
+  assert.match(app, /activeView\.value = 'requests'/);
+  assert.match(requests, /navigationProviderId: \{ type: String, default: '' \}/);
+  assert.match(requests, /providerFilter\.value = providerId/);
+  assert.match(requests, /query\.value = ''/);
+  assert.match(requests, /statusFilter\.value = 'all'/);
+});
+
+test("Vue recovery details load history and use dynamic popover positioning", () => {
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  assert.match(providers, /v-if="hasRecoveryDetails" ref="recoveryDetailsButton"/);
+  assert.match(providers, /api\/recovery-history\?/);
+  assert.match(providers, /recoveryNextCursor/);
+  assert.match(providers, /item\.provider_id/);
+  assert.match(providers, /item\.summary/);
+  assert.match(providers, /getBoundingClientRect\(\)/);
+  assert.match(providers, /addEventListener\('resize', positionRecoveryDetails\)/);
+  assert.match(providers, /removeEventListener\('resize', positionRecoveryDetails\)/);
+});
+
+test("Vue provider health details use the clicked anchor and include model history", () => {
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  assert.match(providers, /openHealthDetails\(provider, \$event\.currentTarget\)/);
+  assert.match(providers, /healthLastChecked\(selectedHealth\)/);
+  assert.match(providers, /healthAvailabilityValue\(selectedHealth\.availability\)/);
+  assert.match(providers, /formatLatency\(selectedHealth\.latest_latency\)/);
+  assert.doesNotMatch(providers, /healthAvailability\(selectedHealth\)/);
+  assert.doesNotMatch(providers, /healthLatency\(selectedHealth\)/);
+  assert.match(providers, /healthModels\(selectedHealth\)/);
+  assert.match(providers, /historyEntries\(healthFor\(provider\)\?\.history, 16\)/);
+  assert.match(providers, /24h \{\{ healthAvailability\(provider\) \}\}/);
+  assert.match(providers, /<div class="provider-health-summary">/);
+  assert.match(providers, /function isHealthDetailsOpen\(provider\)/);
+  assert.match(providers, /const prefixMatches = candidates\.filter/);
+  assert.match(providers, /prefixMatches\.length === 1 \? prefixMatches\[0\] : null/);
+  assert.match(providers, /function historyEntries\(history, limit\)/);
+  assert.match(providers, /while \(items\.length < limit\)/);
+  assert.match(providers, /:title="historyTitle\(entry\)"/);
+  assert.match(providers, /function historyTitle\(entry\)/);
+  assert.match(providers, /handleHistoryPointerMove/);
+  assert.match(providers, /handleHistoryPointerLeave/);
+  assert.match(providers, /handleHistoryClick/);
+  assert.match(providers, /history-detail-popover show/);
+  assert.match(providers, /function positionHistoryDetail\(\)/);
+  assert.match(providers, /hideHistoryDetail\(\{ force: true \}\)/);
+  assert.match(providers, /history: model\.history/);
+  assert.match(providers, /historyEntries\(model\.history, 60\)/);
+  assert.match(providers, /`\$\{model\.model\} 最近检测历史`/);
+  assert.match(providers, /historyMeta\(historyDetail\)/);
+  assert.match(providers, /historyReason\(historyDetail\)/);
+  assert.match(providers, /healthStateTone\(entry\?\.state\)/);
+  assert.match(providers, /\['healthy', 'degraded', 'recovering', 'down'\]\.includes\(state\) \? state : 'unknown'/);
+  assert.match(providers, /function formatLatency\(value\)/);
+  assert.match(providers, /new Date\(value\)/);
+  assert.match(providers, /return formatLatency\(health\?\.latest_latency/);
+  assert.match(providers, /health\?\.latest_latency \?\? health\?\.latency_ms/);
+  assert.match(providers, /healthFor\(provider\)\?\.last_checked/);
+  assert.match(providers, /最近 60 次/);
+  assert.match(providers, /positionHealthDetails/);
+  assert.match(providers, /window\.addEventListener\('resize', positionHealthDetails\)/);
+  assert.match(providers, /window\.removeEventListener\('resize', positionHealthDetails\)/);
+  assert.doesNotMatch(providers, /style="top: 96px/);
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  assert.doesNotMatch(styles, /provider-health-history\.full \.provider-health-mark \{ flex: 0 0 4px;/);
 });

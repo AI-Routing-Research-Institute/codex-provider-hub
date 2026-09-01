@@ -4,8 +4,8 @@
       <Titlebar :config="config" />
       <ViewTabs :active-view="activeView" :request-count="requestCount" :requests-enabled="config.features?.usage_history !== false" @change-view="changeView" />
 
-      <ProvidersView v-show="activeView === 'providers'" :show-launch-command="showProviderLaunchCommand" :show-status-upload="showStatusUpload" />
-      <RequestsView v-if="config.features?.usage_history !== false" v-show="activeView === 'requests'" :config="config" @count="requestCount = $event" />
+      <ProvidersView v-show="activeView === 'providers'" :show-launch-command="showProviderLaunchCommand" :show-status-upload="showStatusUpload" @navigate-requests="navigateToProviderRequests" />
+      <RequestsView v-if="config.features?.usage_history !== false" v-show="activeView === 'requests'" :config="config" :navigation-provider-id="requestProviderId" @count="requestCount = $event" />
       <SettingsView v-show="activeView === 'settings'" />
       <RuntimeView v-show="activeView === 'runtime'" :config="config" @launch-command-visibility-change="showProviderLaunchCommand = $event" @status-upload-visibility-change="showStatusUpload = $event" />
       <MonitorView v-show="activeView === 'monitor'" />
@@ -44,6 +44,7 @@ import UiIcon from './components/ui/UiIcon.vue'
 
 const activeView = ref('providers')
 const requestCount = ref(0)
+const requestProviderId = ref('')
 const toast = ref(null)
 const config = ref({ display_name: '本地中转', brand_mark: 'CX', protocol_label: '从 CC Switch 读取供应商，切换后无需重启客户端', features: {} })
 const showProviderLaunchCommand = ref(true)
@@ -56,6 +57,12 @@ function viewStorageKey() {
 function changeView(view) {
   activeView.value = view
   localStorage.setItem(viewStorageKey(), view)
+}
+
+function navigateToProviderRequests(providerId) {
+  requestProviderId.value = String(providerId || '')
+  activeView.value = 'requests'
+  localStorage.setItem(viewStorageKey(), 'requests')
 }
 
 function applyTheme(preference) {
