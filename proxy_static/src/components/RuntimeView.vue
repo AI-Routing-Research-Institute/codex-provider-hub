@@ -34,6 +34,7 @@ const update = ref({})
 const saving = ref(false)
 const message = ref('')
 const updateMessage = ref('')
+const activeConsoleUi = 'modern'
 const runtimeSummary = computed(() => Number(settings.value.configured_port) !== Number(settings.value.active_port) ? `当前使用 ${settings.value.active_port}，重启后切换到 ${settings.value.configured_port}` : '数据源和检测地址保存后即时生效')
 function syncButtonVisibility() { emit('launch-command-visibility-change', settings.value.show_provider_launch_command !== false); emit('status-upload-visibility-change', settings.value.show_status_upload !== false) }
 async function loadSettings() { try { settings.value = { ...settings.value, ...(await controlFetch('/api/runtime-settings')) }; settings.value.health_status_url ||= ''; syncButtonVisibility() } catch (error) { message.value = `读取失败：${error.message}` }; try { update.value = await controlFetch('/api/update') } catch {} }
@@ -42,7 +43,6 @@ async function testHealthUrl() { if (!settings.value.health_status_url) { messag
 async function saveSettings() {
   saving.value = true
   message.value = ''
-  const previousConsoleUi = settings.value.console_ui || 'modern'
   try {
     settings.value = await controlFetch('/api/runtime-settings', jsonOptions('POST', {
       port: Number(settings.value.configured_port),
@@ -54,13 +54,11 @@ async function saveSettings() {
     }))
     settings.value.health_status_url ||= ''
     syncButtonVisibility()
-    if (settings.value.console_ui !== previousConsoleUi) {
-      message.value = '控制台界面已保存，正在刷新页面。'
-      window.setTimeout(() => {
-        const nextUrl = new URL(window.location.href)
-        nextUrl.searchParams.delete('ui')
-        window.location.replace(nextUrl.toString())
-      }, 350)
+    if (settings.value.console_ui !== activeConsoleUi) {
+      const nextUrl = new URL(window.location.href)
+      nextUrl.searchParams.delete('ui')
+      if (nextUrl.toString() === window.location.href) window.location.reload()
+      else window.location.href = nextUrl.toString()
       return
     }
     message.value = settings.value.restart_required ? '设置已保存，重启后使用新端口。' : '运行设置已保存。'

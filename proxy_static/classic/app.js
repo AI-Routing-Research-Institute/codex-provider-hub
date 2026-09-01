@@ -3567,11 +3567,10 @@ async function saveRuntimeSettings(event) {
     renderRuntimeSettings(settings);
     if (settings.console_ui !== previousConsoleUi) {
       showToast("控制台界面已保存", "正在刷新页面应用新界面。");
-      window.setTimeout(() => {
-        const nextUrl = new URL(window.location.href);
-        nextUrl.searchParams.delete("ui");
-        window.location.replace(nextUrl.toString());
-      }, 350);
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("ui");
+      if (nextUrl.toString() === window.location.href) window.location.reload();
+      else window.location.href = nextUrl.toString();
       return;
     }
     renderedListSignature = null;

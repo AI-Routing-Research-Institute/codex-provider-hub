@@ -15,7 +15,10 @@ test("classic console saves the selected UI and reloads without an override", ()
   assert.match(html, /name="runtime-console-ui" value="modern"/);
   assert.match(source, /console_ui: selectedConsoleUi \|\| "modern"/);
   assert.match(source, /settings\.console_ui \|\| "modern"/);
+  assert.match(source, /window\.location\.href = nextUrl\.toString\(\)/);
+  assert.match(source, /nextUrl\.toString\(\) === window\.location\.href/);
+  assert.match(source, /window\.location\.reload\(\)/);
+  assert.doesNotMatch(source, /setTimeout\(\(\) => \{[\s\S]*searchParams\.delete\("ui"\)/);
   assert.match(source, /searchParams\.delete\("ui"\)/);
-  assert.match(source, /window\.location\.replace\(nextUrl\.toString\(\)\)/);
   assert.match(styles, /\.setting-segmented/);
 });
