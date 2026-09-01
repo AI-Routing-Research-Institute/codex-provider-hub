@@ -723,10 +723,11 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 }
 .provider-health-model-copy { min-width: 0; }
 .provider-health-model-copy > span { display: block; margin-top: 3px; }
-.provider-health-model-history { min-width: 0; }
+.provider-health-model-history { min-width: 0; overflow: hidden; }
 .provider-health-history-label { margin-bottom: 4px; color: var(--muted); font-size: var(--font-meta); }
 .provider-health-history.full { margin-top: 0; }
 .provider-health-history.full .provider-health-mark { height: 11px; }
+.provider-health-popover { overflow-x: hidden; }
 .history-detail-popover {
   position: fixed;
   top: 0;
