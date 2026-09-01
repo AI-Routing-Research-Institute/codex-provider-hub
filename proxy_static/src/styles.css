@@ -469,8 +469,10 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .usage-metric span { color: var(--muted); font-size: var(--font-meta); }
 .usage-metric strong { margin-top: 3px; color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
 .usage-metric.total strong { color: var(--teal); font-size: 20px; }
-.usage-estimate-wrap { display: flex; justify-content: flex-end; }
+.usage-estimate-wrap { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 #usage-estimated-note { color: var(--amber); font-size: var(--font-meta); text-align: right; }
+.usage-share-button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--surface); color: var(--text); font-size: var(--font-meta); font-weight: 600; cursor: pointer; white-space: nowrap; }
+.usage-share-button:hover, .usage-share-button:focus-visible { border-color: var(--teal); color: var(--teal); outline: none; }
 .provider-list-shell {
   --provider-grid-columns: 82px minmax(160px, 240px) minmax(220px, 1fr) 112px 92px 128px;
   --provider-scroll-reserve: 14px;
@@ -593,6 +595,19 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .status-upload-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .status-upload-error { margin: 12px 0 0; color: var(--red); font-size: 12px; }
 .status-upload-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.share-card-modal { position: fixed; inset: 0; z-index: 45; display: grid; place-items: center; padding: 20px; background: rgb(15 23 29 / .52); }
+.share-card-dialog { display: grid; gap: 12px; width: min(460px, 100%); max-height: calc(100vh - 40px); overflow: auto; padding: 18px; border: 1px solid var(--line-strong); border-radius: var(--panel-radius); background: var(--surface); box-shadow: 0 20px 60px rgb(0 0 0 / .28); }
+.share-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.share-card-heading strong { display: block; font-size: 16px; }
+.share-card-heading span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.share-card-error { margin: 0; color: var(--red); font-size: 12px; }
+.share-card-stage { display: grid; place-items: center; }
+.share-card-placeholder { padding: 60px 0; color: var(--muted); font-size: 13px; }
+.share-card-canvas { display: block; width: 100%; height: auto; border-radius: 14px; box-shadow: 0 12px 32px rgb(0 0 0 / .25); }
+.share-card-empty { margin: 0; color: var(--amber); font-size: 12px; }
+.share-card-notice { margin: 0; color: var(--teal); font-size: 12px; }
+.share-card-notice.error { color: var(--red); }
+.share-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .monitor-list { display: grid; gap: 8px; margin-top: 16px; }
 .monitor-order-hint { margin-top: 10px; color: var(--muted); font-size: var(--font-meta); }
 .monitor-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface-soft); }
