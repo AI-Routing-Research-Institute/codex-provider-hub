@@ -448,3 +448,10 @@ test("Vue provider health details use the clicked anchor and include model histo
   const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
   assert.doesNotMatch(styles, /provider-health-history\.full \.provider-health-mark \{ flex: 0 0 4px;/);
 });
+
+test("provider editor round-trips the model rewrite field", () => {
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  assert.match(providers, /v-model\.trim="form\.model"/);
+  assert.match(providers, /model: detail\.model \|\| ''/);
+  assert.match(providers, /model: form\.value\.model/);
+});

@@ -129,6 +129,72 @@ class ProviderCatalogTests(unittest.TestCase):
         self.assertTrue(preserved.has_credentials)
         self.assertFalse(cleared.has_credentials)
 
+    def test_create_update_preserve_change_and_clear_model_rewrite(self) -> None:
+        self.catalog.initialize()
+        created = self.catalog.create_from_payload(
+            {
+                "name": "Model Provider",
+                "base_url": "https://model.example.test/v1",
+                "api_key": "fixture-local-key",
+                "model": "glm-5.3",
+            }
+        )
+
+        record = self.catalog.get_record(created.provider_id)
+        self.assertIn('model = "glm-5.3"', record.raw_config)
+        self.assertEqual(self.catalog.editable_fields(record)["model"], "glm-5.3")
+        loaded = load_local_proxy_providers(self.catalog)[0]
+        self.assertEqual(loaded.model, "glm-5.3")
+
+        self.catalog.update_from_payload(
+            created.provider_id,
+            {
+                "name": "Model Provider",
+                "base_url": "https://model.example.test/v1",
+                "headers": {},
+                "query_params": {},
+            },
+        )
+        preserved = load_local_proxy_providers(self.catalog)[0]
+        self.assertEqual(preserved.model, "glm-5.3")
+
+        self.catalog.update_from_payload(
+            created.provider_id,
+            {
+                "name": "Model Provider",
+                "base_url": "https://model.example.test/v1",
+                "headers": {},
+                "query_params": {},
+                "model": "deepseek-v4-pro",
+            },
+        )
+        changed = load_local_proxy_providers(self.catalog)[0]
+        self.assertEqual(changed.model, "deepseek-v4-pro")
+
+        self.catalog.update_from_payload(
+            created.provider_id,
+            {
+                "name": "Model Provider",
+                "base_url": "https://model.example.test/v1",
+                "headers": {},
+                "query_params": {},
+                "model": "",
+            },
+        )
+        cleared = load_local_proxy_providers(self.catalog)[0]
+        self.assertIsNone(cleared.model)
+
+    def test_invalid_model_type_is_rejected(self) -> None:
+        self.catalog.initialize()
+        with self.assertRaises(ValueError):
+            self.catalog.create_from_payload(
+                {
+                    "name": "Model Provider",
+                    "base_url": "https://model.example.test/v1",
+                    "model": 123,
+                }
+            )
+
     def test_transport_defaults_to_httpx_and_persists_curl_compatibility(self) -> None:
         self.catalog.initialize()
         created = self.catalog.create_from_payload(

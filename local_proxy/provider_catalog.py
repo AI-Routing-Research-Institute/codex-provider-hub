@@ -150,7 +150,8 @@ class ProviderCatalog:
         if existing is None:
             raise KeyError(provider_id)
         values = self._validated_payload(payload)
-        current_config = self._effective_config(existing)
+        current_root = self._effective_root(existing)
+        current_config = self._select_provider_table(current_root)
         record = self._record_from_values(
             provider_id=provider_id,
             values=values,
@@ -159,6 +160,7 @@ class ProviderCatalog:
             existing_env_key=str(current_config.get("env_key") or "OPENAI_API_KEY"),
             existing_record=existing,
             existing_config=current_config,
+            existing_model=str(current_root.get("model") or "") or None,
         )
         with self._lock, closing(self._connect()) as connection, connection:
             self._replace_record(
@@ -199,7 +201,8 @@ class ProviderCatalog:
         return result
 
     def editable_fields(self, provider: CatalogProvider) -> dict[str, Any]:
-        config = self._effective_config(provider)
+        root = self._effective_root(provider)
+        config = self._select_provider_table(root)
         return {
             "provider_id": provider.provider_id,
             "name": provider.name,
@@ -212,6 +215,7 @@ class ProviderCatalog:
             ),
             "headers": _redact_mapping(_string_mapping(config.get("http_headers"))),
             "query_params": _redact_mapping(_string_mapping(config.get("query_params"))),
+            "model": str(root.get("model") or ""),
             "has_api_key": bool(self._api_key(provider, str(config.get("env_key") or "OPENAI_API_KEY"))),
             "managed_locally": True,
         }
@@ -290,6 +294,7 @@ class ProviderCatalog:
         existing_env_key: str,
         existing_record: CatalogProvider | None = None,
         existing_config: Mapping[str, Any] | None = None,
+        existing_model: str | None = None,
     ) -> CatalogProvider:
         api_key = values.get("api_key")
         clear_api_key = bool(values.get("clear_api_key"))
@@ -311,6 +316,10 @@ class ProviderCatalog:
             for key, value in previous_query.items():
                 if query_params.get(key) == "***":
                     query_params[key] = value
+        raw_model = values.get("model")
+        model = str(raw_model).strip()[:240] if isinstance(raw_model, str) and raw_model.strip() else None
+        if raw_model is None and existing_model:
+            model = existing_model[:240]
         raw_config = _build_raw_config(
             name=str(values["name"]),
             base_url=str(values["base_url"]),
@@ -319,6 +328,7 @@ class ProviderCatalog:
             headers=headers,
             query_params=query_params,
             env_key=env_key if auth else None,
+            model=model,
         )
         meta = dict(existing_record.meta) if existing_record is not None else {}
         meta.update({"managedLocally": True, "commonConfigEnabled": False})
@@ -354,6 +364,9 @@ class ProviderCatalog:
         api_key = payload.get("api_key")
         if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()):
             api_key = None
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ValueError("model must be a string")
         return {
             "name": name.strip()[:240],
             "base_url": normalized_url,
@@ -363,22 +376,30 @@ class ProviderCatalog:
             "query_params": query_params,
             "api_key": api_key.strip() if isinstance(api_key, str) else None,
             "clear_api_key": payload.get("clear_api_key") is True,
+            "model": model.strip()[:240] if isinstance(model, str) else None,
         }
 
     def _effective_config(self, provider: CatalogProvider) -> dict[str, Any]:
+        return self._select_provider_table(self._effective_root(provider))
+
+    def _effective_root(self, provider: CatalogProvider) -> dict[str, Any]:
         try:
             effective = cc_switch.build_effective_config(
                 provider.as_probe_record(), self.common_config()
             )
             config = tomllib.loads(effective) if effective.strip() else {}
-            providers = config.get("model_providers")
-            selected = config.get("model_provider")
-            selected_config = providers.get(selected) if isinstance(providers, dict) else None
-            if not isinstance(selected_config, dict) and isinstance(providers, dict) and len(providers) == 1:
-                selected_config = next(iter(providers.values()))
-            return dict(selected_config) if isinstance(selected_config, dict) else {}
+            return dict(config) if isinstance(config, dict) else {}
         except (tomllib.TOMLDecodeError, TypeError, ValueError):
             return {}
+
+    @staticmethod
+    def _select_provider_table(root: Mapping[str, Any]) -> dict[str, Any]:
+        providers = root.get("model_providers")
+        selected = root.get("model_provider")
+        selected_config = providers.get(selected) if isinstance(providers, dict) else None
+        if not isinstance(selected_config, dict) and isinstance(providers, dict) and len(providers) == 1:
+            selected_config = next(iter(providers.values()))
+        return dict(selected_config) if isinstance(selected_config, dict) else {}
 
     @staticmethod
     def _api_key(provider: CatalogProvider, env_key: str) -> str | None:
@@ -541,16 +562,23 @@ def _build_raw_config(
     headers: Mapping[str, str],
     query_params: Mapping[str, str],
     env_key: str | None,
+    model: str | None = None,
 ) -> str:
     lines = [
         'model_provider = "custom"',
-        "",
-        "[model_providers.custom]",
-        f"name = {_toml_string(name)}",
-        f"base_url = {_toml_string(base_url)}",
-        f"wire_api = {_toml_string(wire_api)}",
-        f"transport = {_toml_string(transport)}",
     ]
+    if model:
+        lines.append(f"model = {_toml_string(model)}")
+    lines.append("")
+    lines.extend(
+        (
+            "[model_providers.custom]",
+            f"name = {_toml_string(name)}",
+            f"base_url = {_toml_string(base_url)}",
+            f"wire_api = {_toml_string(wire_api)}",
+            f"transport = {_toml_string(transport)}",
+        )
+    )
     if env_key:
         lines.append(f"env_key = {_toml_string(env_key)}")
     if headers:

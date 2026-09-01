@@ -397,6 +397,7 @@
       <label class="provider-editor-field"><span>Base URL</span><input id="provider-editor-base-url" type="url" required spellcheck="false" autocomplete="off" placeholder="https://api.example.com/v1"></label>
       <label class="provider-editor-field"><span>Wire API</span><select id="provider-editor-wire-api"><option value="responses">responses</option></select></label>
       <label class="provider-editor-field"><span>请求传输方式</span><select id="provider-editor-transport"><option value="httpx">标准模式（httpx）</option><option value="curl_cffi">兼容模式（curl_cffi）</option></select></label>
+      <label class="provider-editor-field"><span>模型重写 <small>留空则透传客户端模型名</small></span><input id="provider-editor-model" type="text" maxlength="240" spellcheck="false" autocomplete="off" placeholder="例如 deepseek-v4-pro"></label>
       <label class="provider-editor-field"><span>API Key</span><input id="provider-editor-api-key" type="password" autocomplete="new-password" placeholder="新增时填写，编辑时留空表示保留"></label>
       <label class="provider-editor-check"><input id="provider-editor-clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
       <label class="provider-editor-field"><span>HTTP Headers <small>JSON 对象</small></span><textarea id="provider-editor-headers" rows="3" spellcheck="false">{}</textarea></label>

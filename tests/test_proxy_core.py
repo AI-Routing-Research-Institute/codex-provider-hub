@@ -36,6 +36,7 @@ from local_proxy.core import (
     _input_item_id_error_index,
     _sse_preflight_decision,
     _strip_input_item_ids,
+    _rewrite_request_model,
     _public_control_status,
     _public_requests,
     _request_reasoning_effort,
@@ -56,6 +57,7 @@ def provider(
     *,
     current: bool = False,
     api_key: str | None = "test-upstream-credential",
+    model: str | None = None,
 ) -> ProxyProvider:
     return ProxyProvider(
         provider_id=provider_id,
@@ -63,6 +65,7 @@ def provider(
         base_url=f"https://{provider_id}.example.test/v1",
         is_cc_switch_current=current,
         api_key=api_key,
+        model=model,
     )
 
 
@@ -1381,6 +1384,33 @@ class InputItemIdCompatibilityTests(unittest.TestCase):
         self.assertEqual(root["input"][2]["call_id"], "call_1")
         self.assertEqual(root["input"][3]["id"], "msg_reference")
 
+    def test_rewrite_request_model_replaces_only_model(self) -> None:
+        payload = json.dumps(
+            {
+                "model": "gpt-5.6-sol",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+            },
+            ensure_ascii=False,
+        ).encode()
+
+        rewritten = _rewrite_request_model(payload, "deepseek-v4-pro")
+
+        self.assertIsNotNone(rewritten)
+        root = json.loads(rewritten)
+        self.assertEqual(root["model"], "deepseek-v4-pro")
+        self.assertEqual(root["input"][0]["content"], "hi")
+
+    def test_rewrite_request_model_skips_same_missing_and_invalid(self) -> None:
+        same_model = json.dumps({"model": "same"}).encode()
+        self.assertIsNone(_rewrite_request_model(same_model, "same"))
+        without_model = json.dumps({"input": []}).encode()
+        self.assertIsNone(_rewrite_request_model(without_model, "other"))
+        blank_model = json.dumps({"model": "   "}).encode()
+        self.assertIsNone(_rewrite_request_model(blank_model, "other"))
+        self.assertIsNone(_rewrite_request_model(b"not-json", "other"))
+        self.assertIsNone(_rewrite_request_model(json.dumps({"model": "x"}).encode(), "  "))
+        self.assertIsNone(_rewrite_request_model(json.dumps([1, 2]).encode(), "other"))
+
     def test_error_index_requires_exact_invalid_input_id_shape(self) -> None:
         self.assertEqual(
             _input_item_id_error_index(
@@ -1529,6 +1559,99 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("id", attempts[1]["input"][1])
         self.assertEqual(attempts[1]["previous_response_id"], "resp_old")
         self.assertEqual(attempts[1]["input"][1]["call_id"], "call_1")
+
+    async def test_provider_model_is_rewritten_for_upstream(self) -> None:
+        attempts: list[dict] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            attempts.append(json.loads(request.content))
+            return httpx.Response(200, content=b"ok")
+
+        router = ProviderRouter(
+            (provider("selected", current=True, model="deepseek-v4-pro"),)
+        )
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.6-sol", "input": []},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"ok")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["model"], "deepseek-v4-pro")
+
+    async def test_provider_model_rewrite_follows_rerouted_provider(self) -> None:
+        attempts: list[dict] = []
+        router = ProviderRouter(
+            (
+                provider("primary", current=True, model="gpt-5.6-sol"),
+                provider("fallback", model="glm-5.3"),
+            )
+        )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            parsed = json.loads(request.content)
+            attempts.append({"url": str(request.url), "model": parsed["model"]})
+            if "primary" in str(request.url):
+                router.select("fallback")
+                return httpx.Response(503, text="temporary")
+            return httpx.Response(200, content=b"recovered")
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            retry_policy=RetryPolicy(enabled=True, max_attempts=3, delay_seconds=0.0),
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "codex-default", "input": []},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0]["model"], "gpt-5.6-sol")
+        self.assertEqual(attempts[1]["model"], "glm-5.3")
+        self.assertIn("primary", attempts[0]["url"])
+        self.assertIn("fallback", attempts[1]["url"])
+
+    async def test_provider_without_model_keeps_passthrough(self) -> None:
+        attempts: list[dict] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            attempts.append(json.loads(request.content))
+            return httpx.Response(200, content=b"ok")
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.6-sol", "input": []},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts[0]["model"], "gpt-5.6-sol")
 
     async def test_input_item_id_compatibility_applies_to_following_request(self) -> None:
         seen: list[dict] = []

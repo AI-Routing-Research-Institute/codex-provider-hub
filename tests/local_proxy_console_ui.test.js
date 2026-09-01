@@ -22,3 +22,10 @@ test("classic console saves the selected UI and reloads without an override", ()
   assert.match(source, /searchParams\.delete\("ui"\)/);
   assert.match(styles, /\.setting-segmented/);
 });
+
+test("classic provider editor round-trips the model rewrite field", () => {
+  assert.match(html, /id="provider-editor-model"/);
+  assert.match(source, /querySelector\("#provider-editor-model"\)/);
+  assert.match(source, /providerEditorModel\.value = provider\.model \|\| ""/);
+  assert.match(source, /model: providerEditorModel\.value\.trim\(\)/);
+});

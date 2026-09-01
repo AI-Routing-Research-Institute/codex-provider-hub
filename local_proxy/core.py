@@ -362,6 +362,7 @@ class ProxyProvider:
     api_key: str | None = field(default=None, repr=False)
     configured_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     default_query: Mapping[str, str] = field(default_factory=dict)
+    model: str | None = None
 
     @property
     def has_credentials(self) -> bool:
@@ -1615,6 +1616,23 @@ def _strip_input_item_ids(
         return json.dumps(root, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed
     except (TypeError, ValueError):
         return None, 0
+
+
+def _rewrite_request_model(payload: bytes, model: str) -> bytes | None:
+    """Rewrite the request model when the provider pins a specific model name."""
+    if not model.strip():
+        return None
+    root = _decode_json(payload)
+    if not isinstance(root, dict):
+        return None
+    current = root.get("model")
+    if not isinstance(current, str) or not current.strip() or current == model:
+        return None
+    root["model"] = model
+    try:
+        return json.dumps(root, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_reasoning_effort(value: Any) -> str | None:
@@ -3923,6 +3941,7 @@ async def _forward_request(
     repaired_item_indexes_by_provider: dict[str, set[int]] = {}
     responses_request = upstream_path.strip("/").casefold() == "responses"
     reroute_before_attempt = True
+    recorded_model = model
     while True:
         response_body_decoded = False
         if attempt > 1 and reroute_before_attempt:
@@ -3966,6 +3985,29 @@ async def _forward_request(
             if key not in existing_keys
         )
         request_body_for_attempt = request_body
+        attempt_model = model
+        if provider.model:
+            rewritten_body = await asyncio.to_thread(
+                _rewrite_request_model,
+                request_body,
+                provider.model,
+            )
+            if rewritten_body is not None:
+                request_body_for_attempt = rewritten_body
+                attempt_model = provider.model
+        if attempt_model != recorded_model:
+            recorded_model = attempt_model
+            router.update_request_model(
+                snapshot,
+                attempt_model,
+                reasoning_effort,
+            )
+            await _update_inflight_request_async(
+                usage_store,
+                snapshot.request_id,
+                model=attempt_model,
+                reasoning_effort=reasoning_effort,
+            )
         repaired_indexes = repaired_item_indexes_by_provider.get(provider.provider_id, set())
         strip_all_input_item_ids = (
             responses_request
@@ -3979,7 +4021,7 @@ async def _forward_request(
         if strip_all_input_item_ids or repaired_indexes:
             transformed_body, _ = await asyncio.to_thread(
                 _strip_input_item_ids,
-                request_body,
+                request_body_for_attempt,
                 only_indexes=None if strip_all_input_item_ids else repaired_indexes,
             )
             if transformed_body is not None:
@@ -4080,7 +4122,7 @@ async def _forward_request(
                     ):
                         transformed_body, changed = await asyncio.to_thread(
                             _strip_input_item_ids,
-                            request_body,
+                            request_body_for_attempt,
                             only_indexes=(repair_index,),
                         )
                         if transformed_body is not None and changed == 1:
