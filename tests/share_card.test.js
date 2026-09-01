@@ -125,3 +125,51 @@ test("shareCardFileName uses compact date and png extension", async () => {
 
   assert.equal(shareCardFileName(new Date("2026-09-01T12:00:00")), "token-card-20260901.png")
 })
+
+test("shareBadgeTitle maps token tiers", async () => {
+  const { shareBadgeTitle } = await import(sourceUrl)
+
+  assert.equal(shareBadgeTitle(0), "今日蓄力中")
+  assert.equal(shareBadgeTitle(1), "Token 初出茅庐")
+  assert.equal(shareBadgeTitle(10_000), "Token 操练生")
+  assert.equal(shareBadgeTitle(100_000), "Token 渐入佳境")
+  assert.equal(shareBadgeTitle(1_000_000), "Token 大户")
+  assert.equal(shareBadgeTitle(10_000_000), "Token 吞天巨兽")
+  assert.equal(shareBadgeTitle(999_999_999), "Token 吞天巨兽")
+})
+
+test("yesterdayCompare handles up, down, flat, and missing baselines", async () => {
+  const { yesterdayCompare } = await import(sourceUrl)
+
+  assert.deepEqual(yesterdayCompare(0, 0), { direction: null, percent: 0, label: "" })
+  assert.deepEqual(yesterdayCompare(500, 0), { direction: "up", percent: 0, label: "首日作战 · 明日开启对比" })
+  assert.deepEqual(yesterdayCompare(100, 100), { direction: "flat", percent: 0, label: "与昨日持平" })
+  assert.deepEqual(yesterdayCompare(250, 200), { direction: "up", percent: 25, label: "较昨日多 25%" })
+  assert.deepEqual(yesterdayCompare(100, 400), { direction: "down", percent: -75, label: "较昨日少 75%" })
+})
+
+test("latestBattleLabel formats millisecond timestamps", async () => {
+  const { latestBattleLabel } = await import(sourceUrl)
+
+  assert.equal(latestBattleLabel(new Date("2026-09-01T23:47:12").getTime()), "23:47")
+  assert.equal(latestBattleLabel(0), "")
+  assert.equal(latestBattleLabel(null), "")
+  assert.equal(latestBattleLabel(Number.NaN), "")
+})
+
+test("posterStars is deterministic for the same seed", async () => {
+  const { posterStars } = await import(sourceUrl)
+
+  const first = posterStars({ count: 8, width: 600, height: 940, seed: 42 })
+  const second = posterStars({ count: 8, width: 600, height: 940, seed: 42 })
+  const other = posterStars({ count: 8, width: 600, height: 940, seed: 43 })
+
+  assert.deepEqual(first, second)
+  assert.notDeepEqual(first, other)
+  assert.equal(first.length, 8)
+  for (const star of first) {
+    assert.ok(star.x >= 0 && star.x <= 600)
+    assert.ok(star.y >= 0 && star.y <= 940)
+    assert.ok(star.radius >= 0.8)
+  }
+})

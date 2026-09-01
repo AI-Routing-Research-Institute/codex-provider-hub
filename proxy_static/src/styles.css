@@ -603,7 +603,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .share-card-error { margin: 0; color: var(--red); font-size: 12px; }
 .share-card-stage { display: grid; place-items: center; }
 .share-card-placeholder { padding: 60px 0; color: var(--muted); font-size: 13px; }
-.share-card-canvas { display: block; width: 100%; height: auto; border-radius: 14px; box-shadow: 0 12px 32px rgb(0 0 0 / .25); }
+.share-card-canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: min(66vh, 720px); border-radius: 14px; box-shadow: 0 12px 32px rgb(0 0 0 / .25); }
 .share-card-empty { margin: 0; color: var(--amber); font-size: 12px; }
 .share-card-notice { margin: 0; color: var(--teal); font-size: 12px; }
 .share-card-notice.error { color: var(--red); }
