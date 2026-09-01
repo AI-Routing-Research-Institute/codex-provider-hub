@@ -97,6 +97,7 @@
         <label class="provider-editor-field"><span>Base URL</span><input v-model.trim="form.base_url" type="url" required spellcheck="false" autocomplete="off" placeholder="https://api.example.com/v1" /></label>
         <label class="provider-editor-field"><span>Wire API</span><UiSelect v-model="form.wire_api" aria-label="Wire API" :options="wireApiOptions" /></label>
         <label class="provider-editor-field"><span>请求传输方式</span><UiSelect v-model="form.transport" aria-label="请求传输方式" :options="transportOptions" /></label>
+        <label class="provider-editor-field"><span>模型重写 <small>留空则透传客户端模型名</small></span><input v-model.trim="form.model" type="text" maxlength="240" spellcheck="false" autocomplete="off" placeholder="例如 deepseek-v4-pro" /></label>
         <label class="provider-editor-field"><span>API Key</span><input v-model="form.api_key" type="password" autocomplete="new-password" placeholder="新增时填写，编辑时留空表示保留" /></label>
         <label v-if="editingId" class="provider-editor-check"><input v-model="form.clear_api_key" type="checkbox" /><span>清除已保存的 API Key</span></label>
         <label class="provider-editor-field"><span>HTTP Headers <small>JSON 对象</small></span><textarea v-model="form.headers" rows="3" spellcheck="false" /></label>
@@ -204,7 +205,7 @@ const customRange = ref(null)
 const shareCardOpen = ref(false)
 let timer
 
-const emptyForm = () => ({ name: '', base_url: '', api_key: '', clear_api_key: false, transport: 'httpx', wire_api: 'responses', headers: '{}', query_params: '{}' })
+const emptyForm = () => ({ name: '', base_url: '', api_key: '', clear_api_key: false, transport: 'httpx', wire_api: 'responses', model: '', headers: '{}', query_params: '{}' })
 const form = ref(emptyForm())
 const providers = computed(() => status.value.providers || [])
 const catalogEnabled = computed(() => uiConfig.value.features?.provider_catalog === true)
@@ -328,10 +329,10 @@ async function dropProvider(target) {
 }
 async function importProviders() { await controlFetch('/api/providers/import/cc-switch', jsonOptions('POST', { overwrite: importMode.value === 'overwrite' })); await loadStatus() }
 function openCreate() { editingId.value = ''; form.value = emptyForm(); formError.value = ''; editorOpen.value = true }
-async function openEdit(provider) { const detail = await controlFetch(`/api/providers/${encodeURIComponent(provider.provider_id)}`); editingId.value = provider.provider_id; form.value = { name: detail.name || '', base_url: detail.base_url || '', api_key: '', clear_api_key: false, transport: detail.transport || 'httpx', wire_api: detail.wire_api || 'responses', headers: JSON.stringify(detail.headers || {}, null, 2), query_params: JSON.stringify(detail.query_params || {}, null, 2) }; editorOpen.value = true }
+async function openEdit(provider) { const detail = await controlFetch(`/api/providers/${encodeURIComponent(provider.provider_id)}`); editingId.value = provider.provider_id; form.value = { name: detail.name || '', base_url: detail.base_url || '', api_key: '', clear_api_key: false, transport: detail.transport || 'httpx', wire_api: detail.wire_api || 'responses', model: detail.model || '', headers: JSON.stringify(detail.headers || {}, null, 2), query_params: JSON.stringify(detail.query_params || {}, null, 2) }; editorOpen.value = true }
 function closeEditor() { if (!saving.value) editorOpen.value = false }
 function parseObject(value, label) { const parsed = JSON.parse(value || '{}'); if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error(`${label} 必须是 JSON 对象`); return parsed }
-async function saveProvider() { saving.value = true; formError.value = ''; try { const payload = { name: form.value.name, base_url: form.value.base_url, api_key: form.value.api_key || null, clear_api_key: form.value.clear_api_key, transport: form.value.transport, wire_api: form.value.wire_api, headers: parseObject(form.value.headers, 'Headers'), query_params: parseObject(form.value.query_params, 'Query Params') }; await controlFetch(editingId.value ? `/api/providers/${encodeURIComponent(editingId.value)}` : '/api/providers', jsonOptions(editingId.value ? 'PUT' : 'POST', payload)); editorOpen.value = false; await loadStatus() } catch (error) { formError.value = error.message } finally { saving.value = false } }
+async function saveProvider() { saving.value = true; formError.value = ''; try { const payload = { name: form.value.name, base_url: form.value.base_url, api_key: form.value.api_key || null, clear_api_key: form.value.clear_api_key, transport: form.value.transport, wire_api: form.value.wire_api, model: form.value.model, headers: parseObject(form.value.headers, 'Headers'), query_params: parseObject(form.value.query_params, 'Query Params') }; await controlFetch(editingId.value ? `/api/providers/${encodeURIComponent(editingId.value)}` : '/api/providers', jsonOptions(editingId.value ? 'PUT' : 'POST', payload)); editorOpen.value = false; await loadStatus() } catch (error) { formError.value = error.message } finally { saving.value = false } }
 async function deleteProvider() { await controlFetch(`/api/providers/${encodeURIComponent(editingId.value)}`, { method: 'DELETE' }); editorOpen.value = false; await loadStatus() }
 async function copyLaunchCommand(provider) { const payload = await controlFetch(`/api/providers/${encodeURIComponent(provider.provider_id)}/launch-command`, { method: 'POST' }); await navigator.clipboard.writeText(payload.command || payload.content || String(payload)) }
 async function openStatusUpload(provider) {

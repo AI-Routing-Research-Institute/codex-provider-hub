@@ -254,6 +254,8 @@ A 401 means the upstream rejected the authentication attached to the current req
 
 This is an upstream provider state. Switching between `httpx` and `curl_cffi` cannot fix a missing model, an empty provider group, exhausted quota, or provider maintenance. Manually switch to a provider that supports the model; the existing retry behavior will handle attempts that have not produced output.
 
+If the upstream rejects the model name itself (for example `The supported API model names are ... but you passed ...`), the client is sending a model name the current provider does not know. Edit the provider in the Codex console and fill in the model rewrite field; the local proxy then rewrites the request model to that value before forwarding. Providers imported from CC Switch carry the model name from their own configuration automatically. With a model configured, switching providers inside one Codex session needs no Codex restart.
+
 ### The control panel does not open
 
 1. Check whether the application is still running in the system tray or menu bar.

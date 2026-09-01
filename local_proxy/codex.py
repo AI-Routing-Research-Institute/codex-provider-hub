@@ -217,6 +217,9 @@ def _proxy_provider(
     transport = provider_config.get("transport", "httpx")
     if transport not in {"httpx", "curl_cffi"}:
         transport = "httpx"
+    model = _nonempty_string(config.get("model"))
+    if model is not None and len(model) > 240:
+        model = model[:240]
     return ProxyProvider(
         provider_id=record.provider_id,
         name=record.name,
@@ -227,6 +230,7 @@ def _proxy_provider(
         api_key=api_key,
         configured_headers=resolved_headers,
         default_query=query,
+        model=model,
     )
 
 
