@@ -1096,6 +1096,8 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .toast strong, .toast span { display: block; }
 .toast strong { font-size: 13px; }
 .toast span { margin-top: 3px; color: #b9ddcc; font-size: 11px; line-height: 1.45; }
+.toast .toast-icon { display: grid; place-items: center; align-self: center; justify-self: center; margin-top: 0; line-height: 1; text-align: center; }
+.toast-icon-graphic { width: 16px; height: 16px; display: block; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 .toast-close { width: 28px; height: 28px; border: 0; background: transparent; color: white; font-size: 18px; }
 
 @media (max-width: 860px) {

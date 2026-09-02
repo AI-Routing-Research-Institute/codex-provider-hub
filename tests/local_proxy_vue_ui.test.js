@@ -184,7 +184,7 @@ test("provider action visibility follows the saved runtime settings", () => {
   assert.match(runtime, /emit\('status-upload-visibility-change', settings\.value\.show_status_upload !== false\)/);
   assert.match(providers, /provider_launch_command !== false && props\.showLaunchCommand/);
   assert.match(providers, /status_upload !== false && props\.showStatusUpload/);
-  assert.match(providers, /showStatusUpload && provider\.status_upload_supported && !manageMode/);
+  assert.match(providers, /showStatusUpload && provider\.status_upload_supported/);
 });
 
 test("Vue runtime settings switch between classic and modern consoles", () => {
@@ -256,6 +256,24 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(providers, /class="routing-panel"/);
   assert.match(providers, /class="usage-summary"/);
   assert.match(providers, /class="provider-list-shell"/);
+  assert.match(providers, /<span>配置<\/span>/);
+  assert.doesNotMatch(providers, /'认证'/);
+  assert.match(providers, /<span v-if="manageMode">操作<\/span>/);
+  assert.match(providers, /<div class="provider-meta">\s*<button v-if="showLaunchCommand"[^>]*title="复制临时启动命令"[^>]*>临时启动<\/button>\s*<button v-if="showStatusUpload && provider\.status_upload_supported"/);
+  assert.match(providers, /<div v-if="manageMode" class="provider-management-cell">/);
+  assert.match(styles, /\.provider-meta\s*\{[^}]*justify-content:\s*center[^}]*flex-wrap:\s*nowrap/s);
+  assert.match(styles, /\.provider-list-shell\.managing\s*\{[^}]*--provider-grid-columns:[^}]*184px 92px/s);
+  assert.match(styles, /\.provider-editor\s*\{[^}]*position:\s*fixed[^}]*inset:\s*0[^}]*width:\s*min\(640px,[^}]*max-height:\s*min\(820px,[^}]*overflow-y:\s*auto[^}]*scrollbar-width:\s*none[^}]*margin:\s*auto/s);
+  assert.match(styles, /\.provider-editor::\-webkit-scrollbar\s*\{\s*display:\s*none;/);
+  assert.match(styles, /\.provider-editor form\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
+  assert.match(styles, /@media\s*\(max-width:\s*600px\)[\s\S]*\.provider-editor form\s*\{\s*grid-template-columns:\s*1fr;/s);
+  assert.match(styles, /@media\s*\(min-width:\s*601px\) and \(max-width:\s*1235px\)[\s\S]*\.provider-row\.managing \.provider-health-cell,[\s\S]*\.provider-row\.managing \.provider-request-cell\s*\{\s*display:\s*none;/s);
+  assert.match(styles, /grid-template-areas:\s*"state copy copy" "health health health" "request token token" "config config config"/);
+  assert.match(styles, /\.provider-row\.managing\s*\{[^}]*grid-template-areas:\s*"state copy management" "config config config" "health health health"/s);
+  const providerTitleStart = providers.indexOf('<div class="provider-title">');
+  const providerMetaStart = providers.indexOf('<div class="provider-meta">');
+  assert.ok(providerTitleStart >= 0 && providerMetaStart > providerTitleStart);
+  assert.doesNotMatch(providers.slice(providerTitleStart, providerMetaStart), /showStatusUpload/);
   assert.match(requests, /class="request-table-header"/);
   assert.match(requests, /class="request-row"/);
   assert.ok(providers.indexOf('class="search"') < providers.indexOf('class="time-window-control usage-window-wrap"'));
@@ -317,7 +335,6 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /\.time-range-heading span\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
   assert.match(styles, /\.time-range-fields legend\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
   assert.match(styles, /\.time-range-fields input\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
-  assert.match(styles, /\.auth-label\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
   assert.match(styles, /\.request-table-header\s*\{[^}]*font-size:\s*var\(--font-meta\)/s);
   assert.match(styles, /\.request-row\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
 
@@ -389,6 +406,44 @@ test("Vue active provider requests navigate with a provider filter", () => {
   assert.match(requests, /providerFilter\.value = providerId/);
   assert.match(requests, /query\.value = ''/);
   assert.match(requests, /statusFilter\.value = 'all'/);
+});
+
+test("Vue temporary launch copies the command and reports the result", () => {
+  const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
+  const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+
+  assert.match(providers, /navigator\.clipboard\.writeText/);
+  assert.match(providers, /emit\('notify', \{ title: '复制成功'/);
+  assert.match(providers, /emit\('notify', \{ title: '复制失败'/);
+  assert.match(app, /@notify="showProviderToast"/);
+  assert.match(app, /showToast\(message\.title, message\.detail, message\.tone\)/);
+});
+
+test("modern toasts open at the top center without moving classic toasts", () => {
+  const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
+  const modernStyles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+  const classicSource = fs.readFileSync(path.join(root, "..", "classic", "app.js"), "utf8");
+  const classicHtml = fs.readFileSync(path.join(root, "..", "classic", "index.html"), "utf8");
+  const classicStyles = fs.readFileSync(path.join(root, "..", "classic", "styles.css"), "utf8");
+
+  assert.doesNotMatch(app, /toast-icon|toast\.detail/);
+  assert.match(app, /<strong>\{\{ toast\.title \}\}<\/strong>/);
+  assert.match(modernStyles, /\.toast-region\s*\{[^}]*position:\s*fixed[^}]*top:[^}]*left:\s*50%[^}]*transform:\s*translateX\(-50%\)/s);
+  assert.match(modernStyles, /\.toast\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 28px[^}]*align-items:\s*center[^}]*transform:\s*translateY\(-8px\)/s);
+  assert.match(modernStyles, /\.toast-close\s*\{[^}]*align-self:\s*center/s);
+  assert.doesNotMatch(modernStyles, /\.toast-icon/);
+  assert.match(modernStyles, /@media\s*\(max-width:\s*600px\)[\s\S]*\.toast-region\s*\{[^}]*top:[^}]*right:\s*12px[^}]*left:\s*12px[^}]*transform:\s*none/s);
+  assert.match(classicStyles, /\.toast-region\s*\{[^}]*bottom:\s*24px/s);
+  assert.match(classicStyles, /\.toast-icon/);
+  assert.match(classicStyles, /\.toast \.toast-icon\s*\{[^}]*display:\s*grid[^}]*place-items:\s*center[^}]*align-self:\s*center[^}]*justify-self:\s*center[^}]*margin-top:\s*0/s);
+  assert.match(classicStyles, /\.toast-icon-graphic\s*\{[^}]*width:\s*16px[^}]*height:\s*16px[^}]*display:\s*block[^}]*stroke:\s*currentColor/s);
+  assert.doesNotMatch(classicStyles, /\.toast-icon-graphic\s*\{[^}]*transform:/s);
+  assert.match(classicSource, /createElementNS\("http:\/\/www\.w3\.org\/2000\/svg", "svg"\)/);
+  assert.match(classicSource, /tone === "error" \? "M12 7v6m0 4h\.01" : "m6\.5 12\.5 3\.5 3\.5 7\.5-8"/);
+  assert.doesNotMatch(classicSource, /icon\.textContent = tone === "error"/);
+  assert.match(classicHtml, /styles\.css\?v=32/);
+  assert.match(classicHtml, /app\.js\?v=36/);
+  assert.doesNotMatch(classicStyles, /\.toast-region\s*\{[^}]*top:/s);
 });
 
 test("Vue recovery details load history and use dynamic popover positioning", () => {

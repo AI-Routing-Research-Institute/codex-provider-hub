@@ -34,17 +34,15 @@
         <div class="usage-estimate-wrap"><span v-if="usage.estimated_requests" id="usage-estimated-note">含估算请求</span><button class="usage-share-button" type="button" title="生成今日 Token 分享卡片" aria-label="生成今日 Token 分享卡片" @click="shareCardOpen = true"><UiIcon name="share" />分享卡片</button></div>
       </div>
 
-      <div class="provider-list-shell">
+      <div class="provider-list-shell" :class="{ managing: manageMode }">
         <div v-if="manageMode" class="manage-hint">拖动左侧手柄调整顺序；搜索时暂停拖动。隐藏的供应商仅在管理模式显示。</div>
-        <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>服务器检测</span><span>Token 用量</span><span>请求次数</span><span>{{ manageMode ? '管理' : '认证' }}</span></div>
+        <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>服务器检测</span><span>Token 用量</span><span>请求次数</span><span>配置</span><span v-if="manageMode">操作</span></div>
         <div v-if="filteredProviders.length" class="provider-list" aria-live="polite">
           <article v-for="provider in filteredProviders" :key="provider.provider_id" class="provider-row" :class="{ current: provider.current, managing: manageMode, 'hidden-provider': provider.hidden, dragging: draggedId === provider.provider_id }" :draggable="manageMode && !query" @dragstart="startDrag(provider)" @dragend="draggedId = ''" @dragover.prevent @drop.prevent="dropProvider(provider)" @click="!manageMode && !provider.current && selectProvider(provider)">
             <div class="provider-state"><UiIcon v-if="manageMode" name="grip" class="drag-handle" /><span class="dot" /><span>{{ provider.current ? '当前' : (provider.hidden ? '隐藏' : '可用') }}</span></div>
             <div class="provider-copy">
               <div class="provider-title">
                 <button class="provider-select" type="button" :disabled="provider.current || manageMode || switchingId === provider.provider_id" @click.stop="selectProvider(provider)"><strong>{{ provider.name }}</strong></button>
-                <button v-if="showLaunchCommand && !manageMode" class="copy-command" type="button" @click.stop="copyLaunchCommand(provider)">复制临时启动命令</button>
-                <button v-if="showStatusUpload && provider.status_upload_supported && !manageMode" class="copy-command status-upload-button" type="button" @click.stop="openStatusUpload(provider)">上传检测</button>
               </div>
               <code>{{ provider.endpoint || '未提供地址' }}</code>
             </div>
@@ -62,8 +60,11 @@
             </button>
             <div class="provider-request-cell"><button v-if="provider.active_requests" class="active-badge" type="button" :disabled="manageMode" :title="sessionNames(provider)" @click.stop="$emit('navigate-requests', provider.provider_id)">{{ provider.active_requests }} 活动</button><span class="provider-request-count">{{ providerUsage(provider.provider_id).request_count || 0 }}</span></div>
             <div class="provider-meta">
-              <span class="auth-label" :class="{ missing: !provider.has_credentials }">{{ provider.has_credentials ? '已配置' : '缺少 Key' }}</span>
-              <div v-if="manageMode" class="provider-row-actions">
+              <button v-if="showLaunchCommand" class="copy-command" type="button" title="复制临时启动命令" @click.stop="copyLaunchCommand(provider)">临时启动</button>
+              <button v-if="showStatusUpload && provider.status_upload_supported" class="copy-command status-upload-button" type="button" @click.stop="openStatusUpload(provider)">上传检测</button>
+            </div>
+            <div v-if="manageMode" class="provider-management-cell">
+              <div class="provider-row-actions">
                 <button class="provider-action-button visibility-button" type="button" :disabled="provider.current" @click.stop="setProviderHidden(provider, !provider.hidden)">{{ provider.hidden ? '显示' : '隐藏' }}</button>
                 <button class="provider-action-button provider-edit-button" type="button" @click.stop="openEdit(provider)">编辑</button>
               </div>
@@ -141,7 +142,7 @@ import { formatTokenCount } from '../token-format.js'
 const status = ref({ providers: [], usage: { total: {}, by_provider: {} }, retry: {} })
 const uiConfig = ref({ features: {} })
 const props = defineProps({ showLaunchCommand: { type: Boolean, default: true }, showStatusUpload: { type: Boolean, default: true } })
-defineEmits(['navigate-requests'])
+const emit = defineEmits(['navigate-requests', 'notify'])
 const health = ref(null)
 const healthError = ref('')
 const loading = ref(true)
@@ -202,9 +203,9 @@ const recoveryTotalCount = ref(0)
 const recoveryLoading = ref(false)
 const recoveryError = ref('')
 const customRange = ref(null)
-const shareCardOpen = ref(false)
 let timer
 
+const shareCardOpen = ref(false)
 const emptyForm = () => ({ name: '', base_url: '', api_key: '', clear_api_key: false, transport: 'httpx', wire_api: 'responses', model: '', headers: '{}', query_params: '{}' })
 const form = ref(emptyForm())
 const providers = computed(() => status.value.providers || [])
@@ -334,7 +335,15 @@ function closeEditor() { if (!saving.value) editorOpen.value = false }
 function parseObject(value, label) { const parsed = JSON.parse(value || '{}'); if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error(`${label} 必须是 JSON 对象`); return parsed }
 async function saveProvider() { saving.value = true; formError.value = ''; try { const payload = { name: form.value.name, base_url: form.value.base_url, api_key: form.value.api_key || null, clear_api_key: form.value.clear_api_key, transport: form.value.transport, wire_api: form.value.wire_api, model: form.value.model, headers: parseObject(form.value.headers, 'Headers'), query_params: parseObject(form.value.query_params, 'Query Params') }; await controlFetch(editingId.value ? `/api/providers/${encodeURIComponent(editingId.value)}` : '/api/providers', jsonOptions(editingId.value ? 'PUT' : 'POST', payload)); editorOpen.value = false; await loadStatus() } catch (error) { formError.value = error.message } finally { saving.value = false } }
 async function deleteProvider() { await controlFetch(`/api/providers/${encodeURIComponent(editingId.value)}`, { method: 'DELETE' }); editorOpen.value = false; await loadStatus() }
-async function copyLaunchCommand(provider) { const payload = await controlFetch(`/api/providers/${encodeURIComponent(provider.provider_id)}/launch-command`, { method: 'POST' }); await navigator.clipboard.writeText(payload.command || payload.content || String(payload)) }
+async function copyLaunchCommand(provider) {
+  try {
+    const payload = await controlFetch(`/api/providers/${encodeURIComponent(provider.provider_id)}/launch-command`, { method: 'POST' })
+    await navigator.clipboard.writeText(payload.command || payload.content || String(payload))
+    emit('notify', { title: '复制成功', detail: `${provider.name} 的临时启动命令已复制到剪贴板。` })
+  } catch (error) {
+    emit('notify', { title: '复制失败', detail: error.message, tone: 'error' })
+  }
+}
 async function openStatusUpload(provider) {
   statusUploadProvider.value = provider
   uploadError.value = ''

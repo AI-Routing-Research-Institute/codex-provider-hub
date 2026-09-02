@@ -4,7 +4,7 @@
       <Titlebar :config="config" />
       <ViewTabs :active-view="activeView" :request-count="requestCount" :requests-enabled="config.features?.usage_history !== false" @change-view="changeView" />
 
-      <ProvidersView v-show="activeView === 'providers'" :show-launch-command="showProviderLaunchCommand" :show-status-upload="showStatusUpload" @navigate-requests="navigateToProviderRequests" />
+      <ProvidersView v-show="activeView === 'providers'" :show-launch-command="showProviderLaunchCommand" :show-status-upload="showStatusUpload" @navigate-requests="navigateToProviderRequests" @notify="showProviderToast" />
       <RequestsView v-if="config.features?.usage_history !== false" v-show="activeView === 'requests'" :config="config" :navigation-provider-id="requestProviderId" @count="requestCount = $event" />
       <SettingsView v-show="activeView === 'settings'" />
       <RuntimeView v-show="activeView === 'runtime'" :config="config" @launch-command-visibility-change="showProviderLaunchCommand = $event" @status-upload-visibility-change="showStatusUpload = $event" />
@@ -19,8 +19,7 @@
       </footer>
       <div class="toast-region" aria-live="polite" aria-atomic="true">
         <div v-if="toast" class="toast show" :class="{ error: toast.tone === 'error' }">
-          <span class="toast-icon" aria-hidden="true">{{ toast.tone === 'error' ? '!' : '✓' }}</span>
-          <div><strong>{{ toast.title }}</strong><span>{{ toast.detail }}</span></div>
+          <strong>{{ toast.title }}</strong>
           <button class="toast-close" type="button" aria-label="关闭通知" @click="toast = null"><UiIcon name="close" /></button>
         </div>
       </div>
@@ -71,9 +70,13 @@ function applyTheme(preference) {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
 }
 
-function showToast(title, detail, tone = 'success') {
-  toast.value = { title, detail, tone }
+function showToast(title, _detail, tone = 'success') {
+  toast.value = { title, tone }
   window.setTimeout(() => { toast.value = null }, 4200)
+}
+
+function showProviderToast(message) {
+  showToast(message.title, message.detail, message.tone)
 }
 
 function importToCcSwitch() {
