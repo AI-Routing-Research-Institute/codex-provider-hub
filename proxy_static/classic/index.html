@@ -18,7 +18,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();
   </script>
-  <link rel="stylesheet" href="./static/styles.css?v=28">
+  <link rel="stylesheet" href="./static/styles.css?v=29">
 </head>
 <body>
   <main class="stage">
@@ -178,7 +178,7 @@
           <label class="request-search"><span class="search-icon" aria-hidden="true">⌕</span><input id="request-query" type="search" placeholder="搜索会话、模型或错误" autocomplete="off"></label>
         </div>
         <div class="request-table-shell">
-          <div class="request-table-header" aria-hidden="true"><span class="request-column-status">状态</span><span class="request-column-time">开始时间</span><span>会话</span><span>供应商</span><span>模型</span><span class="request-column-reasoning">推理强度</span><span class="request-column-duration">耗时</span><span class="request-column-token">Token</span><span class="request-column-result">结果</span></div>
+          <div class="request-table-header" aria-hidden="true"><span class="request-column-status">状态</span><span class="request-column-time">开始时间</span><span>会话</span><span>供应商</span><span>模型</span><span>映射模型</span><span class="request-column-reasoning">推理强度</span><span class="request-column-duration">耗时</span><span class="request-column-token">Token</span><span class="request-column-result">结果</span></div>
           <div id="request-list" class="request-list" aria-live="polite"></div>
           <div id="requests-empty" class="requests-empty" hidden>当前筛选范围内没有请求记录</div>
         </div>
@@ -409,6 +409,23 @@
       </div>
     </form>
   </dialog>
+  <dialog id="model-mapping-editor" class="provider-editor model-mapping-editor" aria-labelledby="model-mapping-title">
+    <form id="model-mapping-form" method="dialog">
+      <div class="provider-editor-heading">
+        <div><strong id="model-mapping-title">模型映射</strong><span id="model-mapping-provider"></span></div>
+        <button id="model-mapping-close" class="usage-history-close" type="button" title="关闭模型映射" aria-label="关闭模型映射">×</button>
+      </div>
+      <div class="model-mapping-column-head" aria-hidden="true"><span>本地模型</span><span></span><span>远端模型</span><span></span></div>
+      <div id="model-mapping-list" class="model-mapping-list"></div>
+      <div id="model-mapping-empty" class="model-mapping-empty">暂无模型映射</div>
+      <button id="model-mapping-add" class="secondary-button model-mapping-add" type="button">添加映射</button>
+      <p id="model-mapping-error" class="provider-editor-error" role="alert" hidden></p>
+      <div class="provider-editor-actions">
+        <span></span>
+        <div class="provider-editor-primary-actions"><button id="model-mapping-cancel" class="secondary-button" type="button">取消</button><button id="model-mapping-save" class="primary-button" type="submit">保存</button></div>
+      </div>
+    </form>
+  </dialog>
   <div id="status-upload-modal" class="status-upload-modal" role="dialog" aria-modal="true" aria-labelledby="status-upload-title" hidden>
     <div class="status-upload-dialog">
       <div class="status-upload-heading"><div><strong id="status-upload-title">上传到服务器检测</strong><span id="status-upload-provider"></span></div><button id="status-upload-close" class="usage-history-close" type="button" title="关闭上传窗口" aria-label="关闭上传窗口">×</button></div>
@@ -427,6 +444,6 @@
     </div>
   </div>
 
-  <script src="./static/app.js?v=35" defer></script>
+  <script src="./static/app.js?v=37" defer></script>
 </body>
 </html>

@@ -331,6 +331,7 @@ def build_codex_profile(
                 "没有可上传的标准 API Key" if not provider.api_key else ""
             ),
             "credential_kind": str(getattr(provider, "credential_kind", "api_key")),
+            "model_mapping_count": len(provider.model_mappings),
         },
         session_name_resolver=session_name_index.resolve,
         session_catalog=session_catalog,
