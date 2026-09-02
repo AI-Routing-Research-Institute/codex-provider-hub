@@ -73,6 +73,10 @@ class ProviderCatalogTests(unittest.TestCase):
         create_ccs_database(self.source)
 
         initial = self.catalog.initialize(self.source)
+        self.catalog.replace_model_mappings(
+            "ccs-provider",
+            {"gpt-local": "gpt-upstream"},
+        )
         with closing(sqlite3.connect(self.source)) as connection, connection:
             connection.execute(
                 "UPDATE providers SET name = 'Changed in CCS' WHERE id = 'ccs-provider'"
@@ -86,6 +90,10 @@ class ProviderCatalogTests(unittest.TestCase):
         self.assertEqual(skipped, {"added": 0, "skipped": 1, "overwritten": 0})
         self.assertEqual(overwritten, {"added": 0, "skipped": 0, "overwritten": 1})
         self.assertEqual(self.catalog.get_record("ccs-provider").name, "Changed in CCS")
+        self.assertEqual(
+            self.catalog.model_mappings("ccs-provider"),
+            {"gpt-local": "gpt-upstream"},
+        )
         moved = self.source.with_name("cc-switch-moved.db")
         self.source.rename(moved)
         self.assertTrue(moved.is_file())
@@ -291,17 +299,85 @@ class ProviderCatalogTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.catalog.delete_record(created.provider_id)
 
+    def test_model_mappings_save_replace_clear_load_and_delete(self) -> None:
+        self.catalog.initialize()
+        created = self.catalog.create_from_payload(
+            {
+                "name": "Mapped Provider",
+                "base_url": "https://mapped.example.test/v1",
+                "headers": {},
+                "query_params": {},
+            }
+        )
+
+        saved = self.catalog.replace_model_mappings(
+            created.provider_id,
+            {
+                " gpt-5.6 ": " gpt-5.6-sol ",
+                "gpt-5": "gpt-5-upstream",
+            },
+        )
+        loaded = load_local_proxy_providers(self.catalog)[0]
+        replaced = self.catalog.replace_model_mappings(
+            created.provider_id,
+            {"gpt-5.6": "gpt-5.6-next"},
+        )
+        cleared = self.catalog.replace_model_mappings(created.provider_id, {})
+        self.catalog.replace_model_mappings(
+            created.provider_id,
+            {"gpt-5.6": "gpt-5.6-final"},
+        )
+        self.catalog.delete_record(created.provider_id)
+        with closing(sqlite3.connect(self.catalog.path)) as connection:
+            remaining_rows = connection.execute(
+                "SELECT COUNT(*) FROM provider_model_mappings WHERE provider_id = ?",
+                (created.provider_id,),
+            ).fetchone()[0]
+
+        self.assertEqual(
+            saved,
+            {"gpt-5.6": "gpt-5.6-sol", "gpt-5": "gpt-5-upstream"},
+        )
+        self.assertEqual(loaded.model_mappings, saved)
+        self.assertEqual(replaced, {"gpt-5.6": "gpt-5.6-next"})
+        self.assertEqual(cleared, {})
+        self.assertEqual(remaining_rows, 0)
+        with self.assertRaises(KeyError):
+            self.catalog.model_mappings(created.provider_id)
+
+    def test_model_mappings_reject_invalid_values_and_missing_provider(self) -> None:
+        self.catalog.initialize()
+
+        with self.assertRaises(KeyError):
+            self.catalog.replace_model_mappings("missing", {"gpt-5": "upstream"})
+        with self.assertRaisesRegex(ValueError, "local model"):
+            self.catalog.replace_model_mappings("missing", {" ": "upstream"})
+        with self.assertRaisesRegex(ValueError, "upstream model"):
+            self.catalog.replace_model_mappings("missing", {"gpt-5": " "})
+
     def test_missing_ccs_database_creates_empty_catalog_with_indexes(self) -> None:
         result = self.catalog.initialize(self.source)
         create_ccs_database(self.source)
         repeated = self.catalog.initialize(self.source)
         with closing(sqlite3.connect(self.catalog.path)) as connection, connection:
             indexes = {row[1] for row in connection.execute("PRAGMA index_list(providers)")}
+            mapping_indexes = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA index_list(provider_model_mappings)"
+                )
+            }
+            mapping_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'provider_model_mappings'"
+            ).fetchone()
 
         self.assertEqual(result["added"], 0)
         self.assertEqual(repeated["added"], 0)
         self.assertEqual(self.catalog.list_records(), ())
         self.assertIn("providers_sort", indexes)
+        self.assertIsNotNone(mapping_table)
+        self.assertIn("provider_model_mappings_order", mapping_indexes)
 
 
 class ProviderCatalogApiTests(unittest.IsolatedAsyncioTestCase):
@@ -333,6 +409,7 @@ class ProviderCatalogApiTests(unittest.IsolatedAsyncioTestCase):
             provider_catalog=self.catalog,
             provider_catalog_import=self._record_import,
         )
+        self.codex = codex
         claude = ProxyProfile(
             service_id="claude",
             service_name="claude-local-proxy",
@@ -415,6 +492,76 @@ class ProviderCatalogApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([provider["name"] for provider in deleted.json()["providers"]], ["Initial"])
         self.assertNotIn("fixture-created-key", deleted.text)
         self.assertEqual(missing_delete.status_code, 404)
+
+    async def test_model_mapping_api_validates_and_hot_reloads_router(self) -> None:
+        endpoint = f"/control/codex/api/providers/{self.provider_id}/model-mappings"
+        control_headers = {"X-Local-Proxy-Control": "1"}
+
+        initial = await self.client.get(endpoint)
+        forbidden = await self.client.put(
+            endpoint,
+            json={"mappings": []},
+        )
+        invalid_payload = await self.client.put(
+            endpoint,
+            headers=control_headers,
+            json={"mappings": "invalid"},
+        )
+        empty_model = await self.client.put(
+            endpoint,
+            headers=control_headers,
+            json={
+                "mappings": [
+                    {"local_model": "", "upstream_model": "gpt-upstream"},
+                ]
+            },
+        )
+        duplicate = await self.client.put(
+            endpoint,
+            headers=control_headers,
+            json={
+                "mappings": [
+                    {"local_model": "gpt-local", "upstream_model": "first"},
+                    {"local_model": " gpt-local ", "upstream_model": "second"},
+                ]
+            },
+        )
+        saved = await self.client.put(
+            endpoint,
+            headers=control_headers,
+            json={
+                "mappings": [
+                    {
+                        "local_model": "gpt-5.6",
+                        "upstream_model": "gpt-5.6-sol",
+                    },
+                ]
+            },
+        )
+        loaded = await self.client.get(endpoint)
+        missing = await self.client.put(
+            "/control/codex/api/providers/missing/model-mappings",
+            headers=control_headers,
+            json={"mappings": []},
+        )
+
+        self.assertEqual(initial.status_code, 200)
+        self.assertEqual(initial.json()["mappings"], [])
+        self.assertEqual(forbidden.status_code, 403)
+        self.assertEqual(invalid_payload.status_code, 422)
+        self.assertEqual(empty_model.status_code, 422)
+        self.assertEqual(duplicate.status_code, 422)
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(
+            saved.json()["mappings"],
+            [{"local_model": "gpt-5.6", "upstream_model": "gpt-5.6-sol"}],
+        )
+        self.assertEqual(loaded.json(), saved.json())
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(
+            self.codex.router.providers()[0].model_mappings,
+            {"gpt-5.6": "gpt-5.6-sol"},
+        )
 
 
 if __name__ == "__main__":

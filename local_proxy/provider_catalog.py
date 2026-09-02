@@ -20,7 +20,7 @@ import probe_codex_cc_switch as cc_switch
 from local_proxy.core import ProviderConfigurationError, _normalize_base_url
 
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 INITIAL_IMPORT_KEY = "initial_import_done"
 COMMON_CONFIG_KEY = "common_config_codex"
 
@@ -186,8 +186,65 @@ class ProviderCatalog:
             if row is None:
                 raise KeyError(provider_id)
             deleted = self._row_to_record(row)
+            connection.execute(
+                "DELETE FROM provider_model_mappings WHERE provider_id = ?",
+                (provider_id,),
+            )
             connection.execute("DELETE FROM providers WHERE provider_id = ?", (provider_id,))
         return deleted
+
+    def model_mappings(self, provider_id: str) -> dict[str, str]:
+        self._ensure_schema()
+        with self._lock, closing(self._connect()) as connection:
+            if connection.execute(
+                "SELECT 1 FROM providers WHERE provider_id = ?",
+                (provider_id,),
+            ).fetchone() is None:
+                raise KeyError(provider_id)
+            rows = connection.execute(
+                """
+                SELECT local_model, upstream_model
+                FROM provider_model_mappings
+                WHERE provider_id = ?
+                ORDER BY sort_index, local_model
+                """,
+                (provider_id,),
+            ).fetchall()
+        return {str(row["local_model"]): str(row["upstream_model"]) for row in rows}
+
+    def replace_model_mappings(
+        self,
+        provider_id: str,
+        mappings: Mapping[str, Any],
+    ) -> dict[str, str]:
+        self._ensure_schema()
+        normalized = _validate_model_mappings(mappings)
+        now = time.time()
+        with self._lock, closing(self._connect()) as connection, connection:
+            if connection.execute(
+                "SELECT 1 FROM providers WHERE provider_id = ?",
+                (provider_id,),
+            ).fetchone() is None:
+                raise KeyError(provider_id)
+            connection.execute(
+                "DELETE FROM provider_model_mappings WHERE provider_id = ?",
+                (provider_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO provider_model_mappings(
+                    provider_id, local_model, upstream_model,
+                    sort_index, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (provider_id, local_model, upstream_model, index, now, now)
+                    for index, (local_model, upstream_model) in enumerate(
+                        normalized.items()
+                    )
+                ),
+            )
+        return normalized
 
     def import_from_cc_switch(self, source: Path, *, overwrite: bool = False) -> dict[str, int | str]:
         source_path = Path(source).expanduser().resolve()
@@ -440,7 +497,25 @@ class ProviderCatalog:
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS provider_model_mappings (
+                        provider_id TEXT NOT NULL,
+                        local_model TEXT NOT NULL,
+                        upstream_model TEXT NOT NULL,
+                        sort_index INTEGER NOT NULL,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (provider_id, local_model),
+                        FOREIGN KEY (provider_id) REFERENCES providers(provider_id)
+                            ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS provider_model_mappings_order
+                        ON provider_model_mappings(provider_id, sort_index);
                     """
+                )
+                self._set_meta(
+                    connection,
+                    "schema_version",
+                    str(CATALOG_SCHEMA_VERSION),
                 )
             try:
                 os.chmod(self.path, 0o600)
@@ -452,6 +527,7 @@ class ProviderCatalog:
         connection = sqlite3.connect(self.path, timeout=5.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     @staticmethod
@@ -672,6 +748,25 @@ def _string_mapping(value: Any, *, strict: bool = False) -> dict[str, str]:
             continue
         result[key.strip()[:160]] = item[:2000]
     return result
+
+
+def _validate_model_mappings(value: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError("model mappings must be an object")
+    mappings: dict[str, str] = {}
+    for raw_local_model, raw_upstream_model in value.items():
+        if not isinstance(raw_local_model, str) or not raw_local_model.strip():
+            raise ValueError("local model must be a non-empty string")
+        if not isinstance(raw_upstream_model, str) or not raw_upstream_model.strip():
+            raise ValueError("upstream model must be a non-empty string")
+        local_model = raw_local_model.strip()
+        upstream_model = raw_upstream_model.strip()
+        if len(local_model) > 240 or len(upstream_model) > 240:
+            raise ValueError("model names must not exceed 240 characters")
+        if local_model in mappings:
+            raise ValueError(f"duplicate local model: {local_model}")
+        mappings[local_model] = upstream_model
+    return mappings
 
 
 def _redact_mapping(values: Mapping[str, str]) -> dict[str, str]:
