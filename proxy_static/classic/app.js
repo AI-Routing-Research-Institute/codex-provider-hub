@@ -1910,7 +1910,14 @@ function showToast(title, message, tone = "success") {
   toast.setAttribute("role", tone === "error" ? "alert" : "status");
   const icon = document.createElement("span");
   icon.className = "toast-icon";
-  icon.textContent = tone === "error" ? "!" : "✓";
+  const iconGraphic = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  iconGraphic.classList.add("toast-icon-graphic");
+  iconGraphic.setAttribute("viewBox", "0 0 24 24");
+  iconGraphic.setAttribute("aria-hidden", "true");
+  const iconPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  iconPath.setAttribute("d", tone === "error" ? "M12 7v6m0 4h.01" : "m6.5 12.5 3.5 3.5 7.5-8");
+  iconGraphic.append(iconPath);
+  icon.append(iconGraphic);
   const copy = document.createElement("div");
   const heading = document.createElement("strong");
   heading.textContent = title;
