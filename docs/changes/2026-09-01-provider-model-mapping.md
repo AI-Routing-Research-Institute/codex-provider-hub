@@ -61,11 +61,11 @@ status = "verified"
 
 ## 验证结果
 
-- `.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：通过，520 项测试，耗时 75.771 秒；仅出现既有 Starlette 依赖弃用警告。
-- `Get-ChildItem -Path tests -File -Filter *.test.js | Sort-Object Name | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }`：通过，16 个 JavaScript 测试文件全部成功。
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：通过，532 项测试；仅出现既有 Starlette 依赖弃用警告。
+- `Get-ChildItem -Path tests -File -Filter *.test.js | Sort-Object Name | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }`：通过，16 个 JavaScript 测试文件、34 个测试全部成功。
 - `node --check proxy_static/classic/app.js`，并对 `proxy_static/src`、`provider_status/static` 下 JavaScript 文件逐个执行 `node --check`：通过。
 - `.\.venv\Scripts\python.exe -m compileall -q provider_status local_proxy scripts tests`：通过。
-- `npm run build --prefix proxy_static`：通过，Vite 转换 26 个模块；本地 `dist` 构建产物保留用于手动重启测试，后续交付时不提交。
+- `npm run build --prefix proxy_static`：通过，Vite 转换 29 个模块；本地 `dist` 构建产物保留用于手动重启测试，后续交付时不提交。
 - `git diff --check`：通过；新增行乱码和敏感信息扫描无命中。
 
 ## PR

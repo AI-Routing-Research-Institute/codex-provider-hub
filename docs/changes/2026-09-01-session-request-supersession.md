@@ -61,11 +61,11 @@ status = "verified"
 ## 验证结果
 
 - `python -m unittest -v` 定向执行 5 个同会话接管用例：通过，覆盖接收中、SSE 预检、不同线程、无线程和协议终止竞态。
-- `.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：通过，525 项测试全部成功。
-- 对 `tests/*.test.js` 逐文件执行 `node --test`：通过，16 个 JavaScript 测试文件全部成功。
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`：通过，532 项测试全部成功。
+- 对 `tests/*.test.js` 逐文件执行 `node --test`：通过，16 个 JavaScript 测试文件、34 个测试全部成功。
 - `.\.venv\Scripts\python.exe -m compileall -q provider_status local_proxy scripts tests`：通过。
 - `node --check` 检查状态页、经典控制台和共享前端 JavaScript：通过。
-- `npm run build --prefix proxy_static`：通过，Vite 转换 26 个模块并生成包含接管状态展示的新生产资源。
+- `npm run build --prefix proxy_static`：通过，Vite 转换 29 个模块并生成包含接管状态展示的新生产资源。
 - `git diff --check`：通过，仅有仓库现有的 LF/CRLF 转换提示；冲突标记、常见乱码和新增凭据扫描无命中。
 
 ## PR
