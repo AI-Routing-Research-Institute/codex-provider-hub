@@ -62,6 +62,7 @@ REQUEST_HISTORY_HOURS = 7 * 24
 REQUEST_HISTORY_CLEANUP_INTERVAL_SECONDS = 3600
 REQUEST_HISTORY_PAGE_LIMIT = 50
 REQUEST_HISTORY_WINDOWS = {"1h", "6h", "24h", "7d", "custom"}
+_UNSET = object()
 UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS = 120.0
 SSE_RETRY_EVENT_PARSE_BYTES = 256 * 1024
@@ -291,6 +292,15 @@ def _feed_stream_captures(
 class DisconnectAwareStreamingResponse(StreamingResponse):
     """Stop a stalled upstream iterator as soon as the ASGI client disconnects."""
 
+    def __init__(
+        self,
+        *args: Any,
+        session_request_lease: "SessionRequestLease | None" = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._session_request_lease = session_request_lease
+
     async def __call__(self, scope: dict[str, Any], receive, send) -> None:
         if scope["type"] == "websocket":
             await super().__call__(scope, receive, send)
@@ -314,11 +324,15 @@ class DisconnectAwareStreamingResponse(StreamingResponse):
             else:
                 await disconnect_task
         finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await self._close_body_iterator()
+            try:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await self._close_body_iterator()
+            finally:
+                if self._session_request_lease is not None:
+                    await self._session_request_lease.release()
 
         if self.background is not None:
             await self.background()
@@ -334,6 +348,75 @@ class DisconnectAwareStreamingResponse(StreamingResponse):
             with suppress(asyncio.CancelledError, Exception):
                 await close_task
             raise
+
+
+class SessionRequestLease:
+    def __init__(
+        self,
+        coordinator: "SessionRequestCoordinator",
+        thread_id: str | None,
+        task: asyncio.Task[Any],
+    ) -> None:
+        self._coordinator = coordinator
+        self.thread_id = thread_id
+        self.task = task
+        self.superseded = False
+        self._released = False
+        self._superseded_cleanup: Callable[[], Awaitable[None]] | None = None
+
+    def set_superseded_cleanup(
+        self,
+        cleanup: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._superseded_cleanup = cleanup
+
+    async def cleanup_superseded(self) -> None:
+        if self._superseded_cleanup is not None:
+            await self._superseded_cleanup()
+
+    async def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        await self._coordinator.release(self)
+
+
+class SessionRequestCoordinator:
+    """Keep one live ASGI request for each real Codex thread id."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._active: dict[str, SessionRequestLease] = {}
+
+    async def acquire(self, thread_id: str | None) -> SessionRequestLease:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("同会话请求协调必须运行在 asyncio 任务中")
+        lease = SessionRequestLease(self, thread_id, task)
+        previous: SessionRequestLease | None = None
+        if thread_id:
+            async with self._lock:
+                previous = self._active.get(thread_id)
+                self._active[thread_id] = lease
+                if previous is not None and previous.task is not task:
+                    previous.superseded = True
+        try:
+            if previous is not None and previous.task is not task:
+                if not previous.task.done():
+                    previous.task.cancel()
+                await asyncio.gather(previous.task, return_exceptions=True)
+                await previous.cleanup_superseded()
+            return lease
+        except BaseException:
+            await lease.release()
+            raise
+
+    async def release(self, lease: SessionRequestLease) -> None:
+        if not lease.thread_id:
+            return
+        async with self._lock:
+            if self._active.get(lease.thread_id) is lease:
+                self._active.pop(lease.thread_id, None)
 
 
 SSE_MODEL_CAPACITY_CODE_RE = re.compile(
@@ -363,6 +446,7 @@ class ProxyProvider:
     configured_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     default_query: Mapping[str, str] = field(default_factory=dict)
     model: str | None = None
+    model_mappings: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def has_credentials(self) -> bool:
@@ -443,6 +527,7 @@ class UsageStore:
                     session_key TEXT,
                     session_name TEXT NOT NULL,
                     model TEXT NOT NULL,
+                    upstream_model TEXT,
                     reasoning_effort TEXT,
                     status_code INTEGER,
                     succeeded INTEGER NOT NULL,
@@ -478,6 +563,7 @@ class UsageStore:
                     session_key TEXT,
                     session_name TEXT NOT NULL,
                     model TEXT NOT NULL,
+                    upstream_model TEXT,
                     reasoning_effort TEXT,
                     phase TEXT NOT NULL,
                     request_body_bytes INTEGER NOT NULL DEFAULT 0,
@@ -502,6 +588,18 @@ class UsageStore:
                 connection.execute(
                     "ALTER TABLE request_history ADD COLUMN reasoning_effort TEXT"
                 )
+            if "upstream_model" not in history_columns:
+                connection.execute(
+                    "ALTER TABLE request_history ADD COLUMN upstream_model TEXT"
+                )
+            inflight_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(inflight_requests)")
+            }
+            if "upstream_model" not in inflight_columns:
+                connection.execute(
+                    "ALTER TABLE inflight_requests ADD COLUMN upstream_model TEXT"
+                )
             connection.execute(
                 """
                 UPDATE request_usage
@@ -517,14 +615,15 @@ class UsageStore:
             """
             INSERT INTO request_history (
                 started_at, finished_at, provider_id, thread_id, session_key,
-                session_name, model, reasoning_effort, status_code, succeeded,
+                session_name, model, upstream_model, reasoning_effort,
+                status_code, succeeded,
                 outcome, duration_ms, retry_count, error_kind, error_summary,
                 usage_id, input_tokens, output_tokens, total_tokens,
                 cached_tokens, reasoning_tokens, usage_source, estimate_method
             )
             SELECT
                 started_at, ?, provider_id, thread_id, session_key,
-                session_name, model, reasoning_effort, NULL, 0,
+                session_name, model, upstream_model, reasoning_effort, NULL, 0,
                 'interrupted',
                 CAST(MAX(0, (? - started_at) * 1000) AS INTEGER),
                 retry_count, 'process_restarted',
@@ -546,6 +645,7 @@ class UsageStore:
         thread_id: str | None,
         session_name: str = "未知会话",
         model: str = "unknown",
+        upstream_model: str | None = None,
         reasoning_effort: str | None = None,
         phase: str = "accepted",
         request_body_bytes: int = 0,
@@ -563,6 +663,7 @@ class UsageStore:
             _session_key(safe_thread_id),
             str(session_name or "未知会话")[:240],
             str(model or "unknown")[:240],
+            None if not upstream_model else str(upstream_model)[:240],
             _normalize_reasoning_effort(reasoning_effort),
             str(phase or "accepted")[:40],
             max(0, int(request_body_bytes)),
@@ -578,8 +679,9 @@ class UsageStore:
                 INSERT OR REPLACE INTO inflight_requests (
                     run_id, request_id, started_at, updated_at, provider_id,
                     thread_id, session_key, session_name, model,
-                    reasoning_effort, phase, request_body_bytes, retry_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    upstream_model, reasoning_effort, phase, request_body_bytes,
+                    retry_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -590,6 +692,7 @@ class UsageStore:
         *,
         provider_id: str | None = None,
         model: str | None = None,
+        upstream_model: str | None | object = _UNSET,
         reasoning_effort: str | None = None,
         phase: str | None = None,
         request_body_bytes: int | None = None,
@@ -616,6 +719,11 @@ class UsageStore:
                 continue
             assignments.append(f"{column} = ?")
             values.append(value)
+        if upstream_model is not _UNSET:
+            assignments.append("upstream_model = ?")
+            values.append(
+                None if not upstream_model else str(upstream_model)[:240]
+            )
         values.extend((self.run_id, int(request_id)))
         with (
             self._inflight_lock,
@@ -680,6 +788,7 @@ class UsageStore:
         successful: bool,
         outcome: str,
         retry_count: int,
+        upstream_model: str | None = None,
         error_kind: str | None = None,
         error_summary: str | None = None,
         usage: TokenUsage | None = None,
@@ -692,6 +801,11 @@ class UsageStore:
         safe_thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
         safe_session_name = str(session_name or "未知会话")[:240]
         safe_model = str(model or "unknown")[:240]
+        safe_upstream_model = (
+            None
+            if not upstream_model or str(upstream_model) == safe_model
+            else str(upstream_model)[:240]
+        )
         safe_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
         safe_summary = (
             _sanitize_retry_summary(error_summary) if error_summary else None
@@ -705,6 +819,7 @@ class UsageStore:
             _session_key(safe_thread_id),
             safe_session_name,
             safe_model,
+            safe_upstream_model,
             safe_reasoning_effort,
             None if status_code is None else int(status_code),
             int(bool(successful)),
@@ -727,11 +842,12 @@ class UsageStore:
                 """
                 INSERT INTO request_history (
                     started_at, finished_at, provider_id, thread_id, session_key,
-                    session_name, model, reasoning_effort, status_code, succeeded, outcome,
+                    session_name, model, upstream_model, reasoning_effort,
+                    status_code, succeeded, outcome,
                     duration_ms, retry_count, error_kind, error_summary, usage_id,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
                     reasoning_tokens, usage_source, estimate_method
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -793,11 +909,12 @@ class UsageStore:
         if normalized_query:
             clauses.append(
                 "(session_name LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' "
+                "OR COALESCE(upstream_model, '') LIKE ? ESCAPE '\\' "
                 "OR provider_id LIKE ? ESCAPE '\\' OR COALESCE(error_summary, '') LIKE ? ESCAPE '\\')"
             )
             escaped = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
-            params.extend((pattern, pattern, pattern, pattern))
+            params.extend((pattern, pattern, pattern, pattern, pattern))
         if cursor:
             try:
                 cursor_time_hex, cursor_id_text = cursor.rsplit("@", 1)
@@ -814,7 +931,8 @@ class UsageStore:
             WITH items AS (
                 SELECT finished_at AS sort_at, id * 2 AS cursor_id,
                        started_at, finished_at, provider_id, thread_id,
-                       session_key, session_name, model, reasoning_effort,
+                       session_key, session_name, model, upstream_model,
+                       reasoning_effort,
                        status_code, succeeded,
                        outcome, duration_ms, retry_count, error_kind, error_summary,
                        input_tokens, output_tokens, total_tokens, cached_tokens,
@@ -824,7 +942,8 @@ class UsageStore:
                 SELECT recorded_at AS sort_at, id * 2 + 1 AS cursor_id,
                        recorded_at AS started_at, recorded_at AS finished_at,
                        provider_id, NULL AS thread_id, NULL AS session_key,
-                       '未知会话' AS session_name, model, NULL AS reasoning_effort,
+                       '未知会话' AS session_name, model,
+                       NULL AS upstream_model, NULL AS reasoning_effort,
                        status_code, succeeded,
                        CASE WHEN succeeded = 1 THEN 'succeeded' ELSE 'failed' END AS outcome,
                        NULL AS duration_ms, 0 AS retry_count, NULL AS error_kind,
@@ -878,6 +997,7 @@ class UsageStore:
                     "session_key": row["session_key"],
                     "session_name": str(row["session_name"]),
                     "model": str(row["model"]),
+                    "upstream_model": row["upstream_model"],
                     "reasoning_effort": row["reasoning_effort"],
                     "status_code": None if row["status_code"] is None else int(row["status_code"]),
                     "succeeded": bool(row["succeeded"]),
@@ -1618,21 +1738,39 @@ def _strip_input_item_ids(
         return None, 0
 
 
-def _rewrite_request_model(payload: bytes, model: str) -> bytes | None:
-    """Rewrite the request model when the provider pins a specific model name."""
-    if not model.strip():
-        return None
-    root = _decode_json(payload)
-    if not isinstance(root, dict):
-        return None
-    current = root.get("model")
-    if not isinstance(current, str) or not current.strip() or current == model:
-        return None
-    root["model"] = model
+def _rewrite_request_model(
+    payload: bytes,
+    target: str | Mapping[str, str],
+) -> bytes | None:
+    """Rewrite the top-level model using either a fixed name or an exact mapping."""
+    if isinstance(target, str):
+        if not target.strip():
+            return None
+        root = _decode_json(payload)
+        if not isinstance(root, dict):
+            return None
+        current = root.get("model")
+        if not isinstance(current, str) or not current.strip() or current == target:
+            return None
+        root["model"] = target
+    else:
+        if not target:
+            return payload
+        root = _decode_json(payload)
+        if not isinstance(root, dict) or not isinstance(root.get("model"), str):
+            return payload
+        local_model = root["model"].strip()
+        upstream_model = target.get(local_model)
+        if not isinstance(upstream_model, str) or not upstream_model.strip():
+            return payload
+        upstream_model = upstream_model.strip()
+        if local_model == upstream_model:
+            return payload
+        root["model"] = upstream_model
     try:
         return json.dumps(root, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError):
-        return None
+        return None if isinstance(target, str) else payload
 
 
 def _normalize_reasoning_effort(value: Any) -> str | None:
@@ -1866,10 +2004,65 @@ class ActiveRequest:
     thread_id: str | None
     started_wall_at: float
     model: str = "unknown"
+    upstream_model: str | None = None
     reasoning_effort: str | None = None
     request_body_bytes: int = 0
     phase: str = "requesting"
     last_activity_wall_at: float | None = None
+
+
+@dataclass
+class ForwardRequestLifecycle:
+    router: "ProviderRouter"
+    usage_store: UsageStore | None
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None
+    thread_id: str | None
+    snapshot: RouteSnapshot | None = None
+    model: str = "unknown"
+    upstream_model: str | None = None
+    reasoning_effort: str | None = None
+    retry_count: int = 0
+    upstream_response: httpx.Response | None = None
+    stream: AsyncIterator[bytes] | None = None
+    cleaned: bool = False
+
+    async def record_superseded(self) -> None:
+        if self.cleaned:
+            return
+        self.cleaned = True
+        response = self.upstream_response
+        try:
+            close_stream = getattr(self.stream, "aclose", None)
+            if close_stream is not None:
+                with suppress(Exception):
+                    await close_stream()
+        finally:
+            if response is not None:
+                with suppress(Exception):
+                    await response.aclose()
+        if self.snapshot is None:
+            return
+        status_code = None if response is None else response.status_code
+        self.router.finish_request(
+            self.snapshot,
+            status_code=status_code,
+            error="session_superseded",
+        )
+        await _record_request_event_async(
+            self.usage_store,
+            snapshot=self.snapshot,
+            thread_id=self.thread_id,
+            session_name_resolver=self.session_name_resolver,
+            model=self.model,
+            upstream_model=self.upstream_model,
+            reasoning_effort=self.reasoning_effort,
+            status_code=status_code,
+            successful=False,
+            outcome="cancelled",
+            retry_count=self.retry_count,
+            error_kind="session_superseded",
+            error_summary="已由同会话新请求接管",
+        )
 
 
 @dataclass(frozen=True)
@@ -2205,12 +2398,40 @@ class ProviderRouter:
                 thread_id=detail.thread_id,
                 started_wall_at=detail.started_wall_at,
                 model=str(model or "unknown")[:240],
+                upstream_model=detail.upstream_model,
                 reasoning_effort=_normalize_reasoning_effort(reasoning_effort),
                 request_body_bytes=(
                     detail.request_body_bytes
                     if request_body_bytes is None
                     else max(0, int(request_body_bytes))
                 ),
+                phase=detail.phase,
+                last_activity_wall_at=detail.last_activity_wall_at,
+            )
+
+    def update_request_upstream_model(
+        self,
+        snapshot: RouteSnapshot,
+        upstream_model: str | None,
+    ) -> None:
+        with self._lock:
+            detail = self._active_request_details.get(snapshot.request_id)
+            if detail is None:
+                return
+            normalized = (
+                str(upstream_model)[:240]
+                if isinstance(upstream_model, str) and upstream_model
+                else None
+            )
+            self._active_request_details[snapshot.request_id] = ActiveRequest(
+                request_id=detail.request_id,
+                provider_id=detail.provider_id,
+                thread_id=detail.thread_id,
+                started_wall_at=detail.started_wall_at,
+                model=detail.model,
+                upstream_model=normalized,
+                reasoning_effort=detail.reasoning_effort,
+                request_body_bytes=detail.request_body_bytes,
                 phase=detail.phase,
                 last_activity_wall_at=detail.last_activity_wall_at,
             )
@@ -2232,6 +2453,7 @@ class ProviderRouter:
                 thread_id=detail.thread_id,
                 started_wall_at=detail.started_wall_at,
                 model=detail.model,
+                upstream_model=detail.upstream_model,
                 reasoning_effort=detail.reasoning_effort,
                 request_body_bytes=detail.request_body_bytes,
                 phase=str(phase or "requesting")[:40],
@@ -2316,6 +2538,7 @@ class ProviderRouter:
                     thread_id=detail.thread_id,
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
+                    upstream_model=detail.upstream_model,
                     reasoning_effort=detail.reasoning_effort,
                     request_body_bytes=detail.request_body_bytes,
                     phase=detail.phase,
@@ -2395,6 +2618,7 @@ class ProviderRouter:
                     thread_id=detail.thread_id,
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
+                    upstream_model=detail.upstream_model,
                     reasoning_effort=detail.reasoning_effort,
                     request_body_bytes=detail.request_body_bytes,
                     phase="retrying",
@@ -2536,6 +2760,7 @@ def _diagnostic_active_requests(
             "request_id": detail.request_id,
             "provider_id": detail.provider_id,
             "model": detail.model,
+            "upstream_model": detail.upstream_model,
             "phase": detail.phase,
             "request_body_bytes": detail.request_body_bytes,
             "age_ms": max(0, round((now - detail.started_wall_at) * 1000)),
@@ -2635,6 +2860,7 @@ def create_proxy_app(
         health_status_url
     )
     active_input_item_id_compatibility_store = input_item_id_compatibility_store
+    session_request_coordinator = SessionRequestCoordinator()
     runtime_diagnostics = RuntimeDiagnostics(
         diagnostic_log_path=(diagnostic_log.path if diagnostic_log is not None else None)
     )
@@ -3154,6 +3380,7 @@ def create_proxy_app(
             protocol_adapter=protocol_adapter,
             session_name_resolver=session_name_resolver,
             input_item_id_compatibility_store=active_input_item_id_compatibility_store,
+            session_request_coordinator=session_request_coordinator,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
             upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
         )
@@ -3266,6 +3493,7 @@ def _public_control_status(
             "request_id": detail.request_id,
             "provider_id": detail.provider_id,
             "model": detail.model,
+            "upstream_model": detail.upstream_model,
             "phase": detail.phase,
             "request_body_bytes": detail.request_body_bytes,
             "started_at": round(detail.started_wall_at * 1000),
@@ -3387,7 +3615,13 @@ def _public_requests(
             )
             provider = providers.get(detail.provider_id)
             searchable = " ".join(
-                (session_name, detail.model, detail.provider_id, provider.name if provider else "")
+                (
+                    session_name,
+                    detail.model,
+                    detail.upstream_model or "",
+                    detail.provider_id,
+                    provider.name if provider else "",
+                )
             ).casefold()
             if normalized_query and normalized_query not in searchable:
                 continue
@@ -3404,6 +3638,7 @@ def _public_requests(
                     "session_name": session_name,
                     "route_provider_id": route_provider_id,
                     "model": detail.model,
+                    "upstream_model": detail.upstream_model,
                     "reasoning_effort": detail.reasoning_effort,
                     "phase": detail.phase,
                     "last_activity_at": (
@@ -3657,6 +3892,7 @@ def _record_request_event(
     successful: bool,
     outcome: str,
     retry_count: int,
+    upstream_model: str | None = None,
     error_kind: str | None = None,
     error_summary: str | None = None,
     usage: TokenUsage | None = None,
@@ -3682,6 +3918,7 @@ def _record_request_event(
             thread_id=thread_id,
             session_name=session_name,
             model=model,
+            upstream_model=upstream_model,
             reasoning_effort=reasoning_effort,
             status_code=status_code,
             successful=successful,
@@ -3711,7 +3948,15 @@ async def _start_inflight_request_async(
 ) -> None:
     if store is None:
         return
-    await asyncio.to_thread(_start_inflight_request, store, **event)
+    task = asyncio.create_task(
+        asyncio.to_thread(_start_inflight_request, store, **event)
+    )
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await task
+        raise
 
 
 async def _update_inflight_request_async(
@@ -3746,6 +3991,7 @@ def _record_stream_completion(
     thread_id: str | None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None,
     model: str,
+    upstream_model: str | None,
     reasoning_effort: str | None,
     usage: TokenUsage | None,
     status_code: int,
@@ -3789,10 +4035,17 @@ def _record_stream_completion(
         thread_id=thread_id,
         session_name_resolver=session_name_resolver,
         model=model,
+        upstream_model=upstream_model,
         reasoning_effort=reasoning_effort,
         status_code=status_code,
         successful=successful,
-        outcome="succeeded" if successful else "failed",
+        outcome=(
+            "succeeded"
+            if successful
+            else "cancelled"
+            if error_kind in {"client_disconnected", "session_superseded"}
+            else "failed"
+        ),
         retry_count=retry_count,
         error_kind=error_kind,
         error_summary=error_summary,
@@ -3830,10 +4083,73 @@ async def _forward_request(
     protocol_adapter: Any | None = None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
+    session_request_coordinator: SessionRequestCoordinator | None = None,
     stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
     upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
 ):
     thread_id = _codex_thread_id(request.headers)
+    coordinator = session_request_coordinator or SessionRequestCoordinator()
+    lease = await coordinator.acquire(thread_id)
+    lifecycle = ForwardRequestLifecycle(
+        router=router,
+        usage_store=usage_store,
+        session_name_resolver=session_name_resolver,
+        thread_id=thread_id,
+    )
+    lease.set_superseded_cleanup(lifecycle.record_superseded)
+    try:
+        response = await _forward_request_with_lease(
+            router,
+            client,
+            request,
+            upstream_path,
+            thread_id=thread_id,
+            lease=lease,
+            lifecycle=lifecycle,
+            client_selector=client_selector,
+            retry_policy=retry_policy,
+            retry_sleep=retry_sleep,
+            usage_store=usage_store,
+            recovery_history_store=recovery_history_store,
+            protocol_adapter=protocol_adapter,
+            session_name_resolver=session_name_resolver,
+            input_item_id_compatibility_store=input_item_id_compatibility_store,
+            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
+        )
+    except asyncio.CancelledError:
+        if lease.superseded:
+            await lifecycle.record_superseded()
+        await lease.release()
+        raise
+    except BaseException:
+        await lease.release()
+        raise
+    if not isinstance(response, DisconnectAwareStreamingResponse):
+        await lease.release()
+    return response
+
+
+async def _forward_request_with_lease(
+    router: ProviderRouter,
+    client: Any,
+    request: Request,
+    upstream_path: str,
+    *,
+    thread_id: str | None,
+    lease: SessionRequestLease,
+    lifecycle: ForwardRequestLifecycle,
+    client_selector: Callable[[ProxyProvider], Any] | None = None,
+    retry_policy: RetryPolicy,
+    retry_sleep: Callable[[float], Awaitable[None]],
+    usage_store: UsageStore | None = None,
+    recovery_history_store: RecoveryHistoryStore | None = None,
+    protocol_adapter: Any | None = None,
+    session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
+    input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
+    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+):
     try:
         snapshot = router.begin_request(thread_id=thread_id)
     except ProviderCircuitOpenError as exc:
@@ -3847,6 +4163,7 @@ async def _forward_request(
             status_code=503,
             content={"error": {"message": "本地中转尚未配置可用供应商"}},
         )
+    lifecycle.snapshot = snapshot
     provider = snapshot.provider
     await _start_inflight_request_async(
         usage_store,
@@ -3916,6 +4233,8 @@ async def _forward_request(
             content={"error": {"message": "请求体超过本地中转允许的大小"}},
         )
     model, reasoning_effort = await asyncio.to_thread(_request_metadata, request_body)
+    lifecycle.model = model
+    lifecycle.reasoning_effort = reasoning_effort
     router.update_request_model(
         snapshot,
         model,
@@ -3935,6 +4254,7 @@ async def _forward_request(
     stream: AsyncIterator[bytes] | None = None
     final_error = "upstream_unavailable"
     final_summary: str | None = None
+    upstream_model: str | None = None
     response_body_decoded = False
     attempt = 1
     item_id_repairs = 0
@@ -3943,9 +4263,11 @@ async def _forward_request(
     reroute_before_attempt = True
     recorded_model = model
     while True:
+        lifecycle.retry_count = max(0, attempt - 1)
         response_body_decoded = False
         if attempt > 1 and reroute_before_attempt:
             snapshot, _ = router.route_retry_to_current(snapshot)
+            lifecycle.snapshot = snapshot
         reroute_before_attempt = True
         provider = snapshot.provider
         router.update_request_phase(snapshot, "connecting")
@@ -3986,7 +4308,21 @@ async def _forward_request(
         )
         request_body_for_attempt = request_body
         attempt_model = model
-        if provider.model:
+        mapping_applied = False
+        if responses_request and provider.model_mappings:
+            mapped_body = await asyncio.to_thread(
+                _rewrite_request_model,
+                request_body,
+                provider.model_mappings,
+            )
+            if mapped_body is not None and mapped_body != request_body:
+                request_body_for_attempt = mapped_body
+                attempt_model, _ = await asyncio.to_thread(
+                    _request_metadata,
+                    mapped_body,
+                )
+                mapping_applied = True
+        if not mapping_applied and provider.model:
             rewritten_body = await asyncio.to_thread(
                 _rewrite_request_model,
                 request_body,
@@ -3995,19 +4331,41 @@ async def _forward_request(
             if rewritten_body is not None:
                 request_body_for_attempt = rewritten_body
                 attempt_model = provider.model
-        if attempt_model != recorded_model:
-            recorded_model = attempt_model
-            router.update_request_model(
-                snapshot,
-                attempt_model,
-                reasoning_effort,
-            )
+        if mapping_applied:
+            upstream_model = attempt_model if attempt_model != model else None
+            lifecycle.upstream_model = upstream_model
+            router.update_request_upstream_model(snapshot, upstream_model)
+            if recorded_model != model:
+                recorded_model = model
+                router.update_request_model(snapshot, model, reasoning_effort)
+                await _update_inflight_request_async(
+                    usage_store,
+                    snapshot.request_id,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
             await _update_inflight_request_async(
                 usage_store,
                 snapshot.request_id,
-                model=attempt_model,
-                reasoning_effort=reasoning_effort,
+                upstream_model=upstream_model,
             )
+        else:
+            upstream_model = None
+            lifecycle.upstream_model = None
+            router.update_request_upstream_model(snapshot, None)
+            if attempt_model != recorded_model:
+                recorded_model = attempt_model
+                router.update_request_model(
+                    snapshot,
+                    attempt_model,
+                    reasoning_effort,
+                )
+                await _update_inflight_request_async(
+                    usage_store,
+                    snapshot.request_id,
+                    model=attempt_model,
+                    reasoning_effort=reasoning_effort,
+                )
         repaired_indexes = repaired_item_indexes_by_provider.get(provider.provider_id, set())
         strip_all_input_item_ids = (
             responses_request
@@ -4042,6 +4400,7 @@ async def _forward_request(
                 upstream_request,
                 timeout_seconds=upstream_response_headers_timeout_seconds,
             )
+            lifecycle.upstream_response = upstream_response
             router.update_request_phase(snapshot, "waiting_first_chunk")
             await _update_inflight_request_async(
                 usage_store,
@@ -4059,6 +4418,7 @@ async def _forward_request(
                 if upstream_response.is_stream_consumed:
                     first_chunk = upstream_response.content or None
                     stream = _empty_async_iterator()
+                    lifecycle.stream = stream
                     response_body_decoded = "content-encoding" in upstream_response.headers
                 else:
                     response_body_decoded = "content-encoding" in upstream_response.headers
@@ -4070,6 +4430,7 @@ async def _forward_request(
                         stream,
                         timeout_seconds=stream_idle_timeout_seconds,
                     )
+                    lifecycle.stream = stream
                     try:
                         first_chunk = await anext(stream)
                     except StopAsyncIteration:
@@ -4113,6 +4474,7 @@ async def _forward_request(
                             detect_retryable=retry_policy.enabled,
                         )
                     )
+                    lifecycle.stream = stream
                     repair_applied = False
                     if (
                         responses_request
@@ -4172,6 +4534,7 @@ async def _forward_request(
                             ),
                         )
                     )
+                    lifecycle.stream = stream
                     if retry_kind is not None:
                         final_error = retry_kind
                 if (
@@ -4188,6 +4551,7 @@ async def _forward_request(
                             stream,
                         )
                     )
+                    lifecycle.stream = stream
                     if retry_kind is not None:
                         final_error = retry_kind
                 if retry_kind is None:
@@ -4232,6 +4596,8 @@ async def _forward_request(
         if upstream_response is not None:
             await upstream_response.aclose()
             upstream_response = None
+            lifecycle.upstream_response = None
+            lifecycle.stream = None
         if not can_retry:
             if retry_kind is not None:
                 await _record_recovery_event_async(
@@ -4255,6 +4621,7 @@ async def _forward_request(
         rerouted = False
         if retry_kind != "request_item_id_repair":
             snapshot, rerouted = router.route_retry_to_current(snapshot)
+            lifecycle.snapshot = snapshot
             if rerouted:
                 retry_delay = 0.0
             router.record_retry(
@@ -4304,6 +4671,7 @@ async def _forward_request(
             thread_id=thread_id,
             session_name_resolver=session_name_resolver,
             model=model,
+            upstream_model=upstream_model,
             reasoning_effort=reasoning_effort,
             status_code=502,
             successful=False,
@@ -4334,7 +4702,7 @@ async def _forward_request(
             protocol_adapter.usage_capture
             if protocol_adapter is not None
             else UsageCapture,
-            request_body_for_attempt,
+            request_body,
             upstream_path,
         )
     failure_capture = None
@@ -4436,8 +4804,12 @@ async def _forward_request(
                 history_summary = stream_failure[1] if stream_failure else None
                 if not successful and history_kind is None:
                     if not stream_completed:
-                        history_kind = "client_disconnected"
-                        history_summary = "客户端取消"
+                        if lease.superseded:
+                            history_kind = "session_superseded"
+                            history_summary = "已由同会话新请求接管"
+                        else:
+                            history_kind = "client_disconnected"
+                            history_summary = "客户端取消"
                     else:
                         history_kind = f"http_{upstream_response.status_code}"
                         history_summary = f"HTTP {upstream_response.status_code}"
@@ -4457,33 +4829,38 @@ async def _forward_request(
                             error=history_kind,
                         )
                         if persistence_ready:
-                            await _record_stream_completion_async(
-                                usage_store,
-                                recovery_history_store,
-                                snapshot=snapshot,
-                                thread_id=thread_id,
-                                session_name_resolver=session_name_resolver,
-                                model=(
-                                    usage_capture.model
-                                    if usage_capture is not None
-                                    else model
-                                ),
-                                reasoning_effort=reasoning_effort,
-                                usage=usage,
-                                status_code=upstream_response.status_code,
-                                successful=successful,
-                                retry_count=max(0, attempt - 1),
-                                error_kind=history_kind,
-                                error_summary=history_summary,
-                                stream_failure=stream_failure,
-                                attempt=attempt,
-                                max_attempts=retry_policy.max_attempts,
-                            )
+                            try:
+                                await _record_stream_completion_async(
+                                    usage_store,
+                                    recovery_history_store,
+                                    snapshot=snapshot,
+                                    thread_id=thread_id,
+                                    session_name_resolver=session_name_resolver,
+                                    model=(
+                                        usage_capture.model
+                                        if usage_capture is not None
+                                        else model
+                                    ),
+                                    upstream_model=upstream_model,
+                                    reasoning_effort=reasoning_effort,
+                                    usage=usage,
+                                    status_code=upstream_response.status_code,
+                                    successful=successful,
+                                    retry_count=max(0, attempt - 1),
+                                    error_kind=history_kind,
+                                    error_summary=history_summary,
+                                    stream_failure=stream_failure,
+                                    attempt=attempt,
+                                    max_attempts=retry_policy.max_attempts,
+                                )
+                            finally:
+                                lifecycle.cleaned = True
 
     return DisconnectAwareStreamingResponse(
         response_body(),
         status_code=upstream_response.status_code,
         headers=response_headers,
+        session_request_lease=lease,
     )
 
 

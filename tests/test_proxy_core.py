@@ -58,6 +58,7 @@ def provider(
     current: bool = False,
     api_key: str | None = "test-upstream-credential",
     model: str | None = None,
+    model_mappings: dict[str, str] | None = None,
 ) -> ProxyProvider:
     return ProxyProvider(
         provider_id=provider_id,
@@ -66,10 +67,27 @@ def provider(
         is_cc_switch_current=current,
         api_key=api_key,
         model=model,
+        model_mappings=model_mappings or {},
     )
 
 
 class ProviderRouterTests(unittest.TestCase):
+    def test_request_model_rewrite_only_changes_a_matching_string_model(self) -> None:
+        mappings = {"gpt-5.6": "gpt-5.6-sol"}
+
+        self.assertEqual(
+            json.loads(_rewrite_request_model(b'{"model":"gpt-5.6","input":"hello"}', mappings)),
+            {"model": "gpt-5.6-sol", "input": "hello"},
+        )
+        for payload in (
+            b'{"model":"gpt-5","input":"hello"}',
+            b'{"input":"hello"}',
+            b'{"model":42}',
+            b'not-json',
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(_rewrite_request_model(payload, mappings), payload)
+
     def test_active_request_exposes_resolved_name_without_thread_id(self) -> None:
         router = ProviderRouter((provider("first", current=True),))
         thread_id = "019fa83f-2a11-73b0-a862-4d51679219ef"
@@ -105,6 +123,7 @@ class ProviderRouterTests(unittest.TestCase):
         router = ProviderRouter((provider("first", current=True),))
         request = router.begin_request()
         router.update_request_model(request, "gpt-5", "high")
+        router.update_request_upstream_model(request, "gpt-5-upstream")
         with tempfile.TemporaryDirectory() as temp_dir:
             payload = _public_requests(
                 router,
@@ -112,6 +131,7 @@ class ProviderRouterTests(unittest.TestCase):
             )
 
         self.assertEqual(payload["active"][0]["model"], "gpt-5")
+        self.assertEqual(payload["active"][0]["upstream_model"], "gpt-5-upstream")
         self.assertEqual(payload["active"][0]["reasoning_effort"], "high")
         router.finish_request(request, status_code=200)
 
@@ -380,7 +400,7 @@ class UsageTests(unittest.TestCase):
             query_plan,
         )
 
-    def test_existing_database_adds_request_history_reasoning_effort(self) -> None:
+    def test_existing_database_adds_request_model_tracking_columns(self) -> None:
         old_path = Path(self.temp_context.name) / "old-request-history.sqlite3"
         with closing(sqlite3.connect(old_path)) as connection, connection:
             connection.executescript(
@@ -416,11 +436,17 @@ class UsageTests(unittest.TestCase):
         UsageStore(old_path)
 
         with closing(sqlite3.connect(old_path)) as connection:
-            columns = {
+            history_columns = {
                 row[1]
                 for row in connection.execute("PRAGMA table_info(request_history)")
             }
-        self.assertIn("reasoning_effort", columns)
+            inflight_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(inflight_requests)")
+            }
+        self.assertIn("reasoning_effort", history_columns)
+        self.assertIn("upstream_model", history_columns)
+        self.assertIn("upstream_model", inflight_columns)
 
     def test_inflight_request_is_updated_and_removed_on_completion(self) -> None:
         started_at = time.time() - 2
@@ -434,6 +460,7 @@ class UsageTests(unittest.TestCase):
             17,
             provider_id="provider-b",
             model="gpt-test",
+            upstream_model="gpt-upstream",
             reasoning_effort="high",
             phase="receiving",
             request_body_bytes=321,
@@ -443,7 +470,7 @@ class UsageTests(unittest.TestCase):
         with closing(sqlite3.connect(self.store.path)) as connection:
             inflight = connection.execute(
                 """
-                SELECT provider_id, model, reasoning_effort, phase,
+                SELECT provider_id, model, upstream_model, reasoning_effort, phase,
                        request_body_bytes, retry_count
                 FROM inflight_requests
                 """
@@ -451,7 +478,15 @@ class UsageTests(unittest.TestCase):
 
         self.assertEqual(
             inflight,
-            ("provider-b", "gpt-test", "high", "receiving", 321, 2),
+            (
+                "provider-b",
+                "gpt-test",
+                "gpt-upstream",
+                "high",
+                "receiving",
+                321,
+                2,
+            ),
         )
 
         self.store.record_request(
@@ -462,6 +497,7 @@ class UsageTests(unittest.TestCase):
             thread_id="thread-a",
             session_name="测试会话",
             model="gpt-test",
+            upstream_model="gpt-upstream",
             reasoning_effort="high",
             status_code=200,
             successful=True,
@@ -474,6 +510,8 @@ class UsageTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM inflight_requests"
             ).fetchone()[0]
         self.assertEqual(count, 0)
+        history = self.store.request_history(query="gpt-upstream")
+        self.assertEqual(history["items"][0]["upstream_model"], "gpt-upstream")
 
     def test_reopens_database_and_recovers_inflight_request(self) -> None:
         started_at = time.time() - 3
@@ -484,6 +522,7 @@ class UsageTests(unittest.TestCase):
             thread_id="thread-a",
             session_name="中断会话",
             model="gpt-test",
+            upstream_model="gpt-upstream",
             phase="waiting_first_chunk",
             request_body_bytes=456,
             retry_count=1,
@@ -496,6 +535,7 @@ class UsageTests(unittest.TestCase):
         item = history["items"][0]
         self.assertEqual(item["outcome"], "interrupted")
         self.assertEqual(item["error_kind"], "process_restarted")
+        self.assertEqual(item["upstream_model"], "gpt-upstream")
         self.assertIn("waiting_first_chunk", item["error_summary"])
         self.assertIn("456", item["error_summary"])
         with closing(sqlite3.connect(self.store.path)) as connection:
@@ -1918,9 +1958,11 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_request_api_hides_thread_id_and_persists_session_route(self) -> None:
         seen_hosts: list[str] = []
+        seen_models: list[str] = []
 
         async def upstream(request: httpx.Request) -> httpx.Response:
             seen_hosts.append(request.url.host)
+            seen_models.append(json.loads(await request.aread())["model"])
             return httpx.Response(
                 200,
                 json={
@@ -1934,7 +1976,19 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         metadata = json.dumps({"thread_id": thread_id})
         with tempfile.TemporaryDirectory() as temp_dir:
             usage_store = UsageStore(Path(temp_dir) / "usage.sqlite3")
-            router = ProviderRouter((provider("first", current=True), provider("second")))
+            router = ProviderRouter(
+                (
+                    provider(
+                        "first",
+                        current=True,
+                        model_mappings={"gpt-test": "first-upstream"},
+                    ),
+                    provider(
+                        "second",
+                        model_mappings={"gpt-test": "second-upstream"},
+                    ),
+                )
+            )
             upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
             app = create_proxy_app(
                 router,
@@ -1975,13 +2029,23 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(routed.status_code, 200)
         self.assertEqual(seen_hosts, ["first.example.test", "second.example.test"])
+        self.assertEqual(seen_models, ["first-upstream", "second-upstream"])
         self.assertEqual(item["session_name"], "请求列表测试")
         self.assertEqual(item["model"], "gpt-test")
+        self.assertEqual(item["upstream_model"], "first-upstream")
         self.assertEqual(item["total_tokens"], 6)
         self.assertNotIn(thread_id, requests.text)
         self.assertEqual(
             [entry["provider_name"] for entry in history.json()["items"]],
             ["Second", "First"],
+        )
+        self.assertEqual(
+            {entry["model"] for entry in history.json()["items"]},
+            {"gpt-test"},
+        )
+        self.assertEqual(
+            [entry["upstream_model"] for entry in history.json()["items"]],
+            ["second-upstream", "first-upstream"],
         )
         self.assertEqual(
             {entry["route_provider_id"] for entry in history.json()["items"]},
@@ -2333,10 +2397,12 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_infinite_retry_mode_recovers_without_fixed_attempt_limit(self) -> None:
         attempts = 0
+        observed_models: list[str] = []
 
         async def upstream(request: httpx.Request) -> httpx.Response:
             nonlocal attempts
             attempts += 1
+            observed_models.append(json.loads(await request.aread())["model"])
             if attempts <= 6:
                 return httpx.Response(503, content=b"temporary")
             return httpx.Response(200, content=b"recovered")
@@ -2346,7 +2412,15 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
         upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
         app = create_proxy_app(
-            ProviderRouter((provider("selected", current=True),)),
+            ProviderRouter(
+                (
+                    provider(
+                        "selected",
+                        current=True,
+                        model_mappings={"test": "upstream-test"},
+                    ),
+                )
+            ),
             client=upstream_client,
             retry_policy=RetryPolicy(max_attempts=-1),
             retry_sleep=no_wait,
@@ -2362,6 +2436,42 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"recovered")
         self.assertEqual(attempts, 7)
+        self.assertEqual(observed_models, ["upstream-test"] * 7)
+
+    async def test_model_mapping_is_not_applied_outside_responses_requests(self) -> None:
+        observed_body = b""
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal observed_body
+            observed_body = await request.aread()
+            return httpx.Response(200, content=b"ok")
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            ProviderRouter(
+                (
+                    provider(
+                        "selected",
+                        current=True,
+                        model_mappings={"test": "upstream-test"},
+                    ),
+                )
+            ),
+            client=upstream_client,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.post(
+            "/v1/chat/completions",
+            content=b'{"model":"test"}',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed_body, b'{"model":"test"}')
 
     async def test_failed_retry_is_transparently_taken_over_by_new_provider(self) -> None:
         observed: list[dict[str, object]] = []
@@ -2373,6 +2483,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
             api_key="first-upstream-key",
             configured_headers={"X-Provider-Route": "first"},
             default_query={"provider": "first"},
+            model_mappings={"test": "first-upstream"},
         )
         second = ProxyProvider(
             provider_id="second",
@@ -2382,6 +2493,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
             api_key="second-upstream-key",
             configured_headers={"X-Provider-Route": "second"},
             default_query={"provider": "second"},
+            model_mappings={"test": "second-upstream"},
         )
         router = ProviderRouter((first, second))
 
@@ -2443,11 +2555,91 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["route"] for item in observed], ["first", "second"])
         self.assertEqual(
             [item["body"] for item in observed],
-            [b'{"model":"test"}', b'{"model":"test"}'],
+            [b'{"model":"first-upstream"}', b'{"model":"second-upstream"}'],
         )
         status = router.status()
         self.assertEqual(status.active_by_provider, {})
         self.assertEqual(status.recent_retry_errors[0].provider_id, "first")
+
+    async def test_retry_to_unmapped_provider_clears_upstream_model(self) -> None:
+        observed_models: list[str] = []
+        second_upstream_started = asyncio.Event()
+        release_second_upstream = asyncio.Event()
+        router = ProviderRouter(
+            (
+                provider(
+                    "first",
+                    current=True,
+                    model_mappings={"test": "first-upstream"},
+                ),
+                provider("second"),
+            )
+        )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            observed_models.append(json.loads(await request.aread())["model"])
+            if request.url.host == "first.example.test":
+                router.select("second")
+                return httpx.Response(
+                    503,
+                    json={"error": {"message": "no available channel"}},
+                )
+            second_upstream_started.set()
+            await release_second_upstream.wait()
+            return httpx.Response(
+                200,
+                json={
+                    "id": "response-fixture",
+                    "output": [],
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                },
+            )
+
+        async def no_wait(_: float) -> None:
+            return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            usage_store = UsageStore(Path(temp_dir) / "usage.sqlite3")
+            upstream_client = httpx.AsyncClient(
+                transport=httpx.MockTransport(upstream)
+            )
+            app = create_proxy_app(
+                router,
+                client=upstream_client,
+                usage_store=usage_store,
+                retry_policy=RetryPolicy(max_attempts=2),
+                retry_sleep=no_wait,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            )
+            request_task = asyncio.create_task(
+                client.post("/v1/responses", json={"model": "test"})
+            )
+            try:
+                await asyncio.wait_for(second_upstream_started.wait(), timeout=2)
+                running = await client.get(
+                    "/control/api/requests",
+                    params={"status": "running"},
+                )
+                running_item = running.json()["active"][0]
+                self.assertEqual(running_item["provider_id"], "second")
+                self.assertIsNone(running_item["upstream_model"])
+
+                release_second_upstream.set()
+                response = await request_task
+                history = await client.get("/control/api/requests")
+            finally:
+                release_second_upstream.set()
+                await asyncio.gather(request_task, return_exceptions=True)
+                await client.aclose()
+                await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed_models, ["first-upstream", "test"])
+        self.assertEqual(history.json()["items"][0]["provider_id"], "second")
+        self.assertIsNone(history.json()["items"][0]["upstream_model"])
 
     async def test_disabled_retry_passes_upstream_error_through(self) -> None:
         attempts = 0
@@ -4510,6 +4702,386 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(history["items"][0]["succeeded"])
         self.assertEqual(history["items"][0]["error_kind"], "client_disconnected")
         self.assertEqual(history["items"][0]["error_summary"], "客户端取消")
+
+    async def test_new_same_thread_request_supersedes_streaming_request(self) -> None:
+        first_stream_started = asyncio.Event()
+        first_stream_closed = asyncio.Event()
+        never_continue = asyncio.Event()
+        attempts = 0
+
+        class StalledStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    first_stream_started.set()
+                    yield (
+                        b'data: {"type":"response.output_text.delta",'
+                        b'"delta":"partial"}\n\n'
+                    )
+                    await never_continue.wait()
+                finally:
+                    first_stream_closed.set()
+
+            async def aclose(self) -> None:
+                first_stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=StalledStream(),
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'data: {"type":"response.completed",'
+                    b'"response":{"status":"completed"}}\n\n'
+                ),
+            )
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client, usage_store=usage_store)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        metadata = json.dumps({"thread_id": "thread-superseded-stream"})
+
+        first_request = asyncio.create_task(
+            client.post(
+                "/v1/responses",
+                headers={"x-codex-turn-metadata": metadata},
+                json={"model": "test", "input": "first"},
+            )
+        )
+        try:
+            await asyncio.wait_for(first_stream_started.wait(), timeout=1)
+            second_response = await asyncio.wait_for(
+                client.post(
+                    "/v1/responses",
+                    headers={"x-codex-turn-metadata": metadata},
+                    json={"model": "test", "input": "second"},
+                ),
+                timeout=1,
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                await first_request
+            await asyncio.wait_for(first_stream_closed.wait(), timeout=1)
+        finally:
+            never_continue.set()
+            if not first_request.done():
+                first_request.cancel()
+            await asyncio.gather(first_request, return_exceptions=True)
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(router.status().active_request_details, ())
+        history = usage_store.request_history(window="24h", status="all")
+        self.assertEqual(history["total_count"], 2)
+        superseded = next(
+            item for item in history["items"]
+            if item["error_kind"] == "session_superseded"
+        )
+        self.assertFalse(superseded["succeeded"])
+        self.assertEqual(superseded["outcome"], "cancelled")
+        self.assertEqual(superseded["error_summary"], "已由同会话新请求接管")
+        self.assertTrue(any(item["succeeded"] for item in history["items"]))
+        with closing(sqlite3.connect(usage_store.path)) as connection:
+            inflight_count = connection.execute(
+                "SELECT COUNT(*) FROM inflight_requests"
+            ).fetchone()[0]
+        self.assertEqual(inflight_count, 0)
+
+    async def test_new_same_thread_request_supersedes_sse_preflight(self) -> None:
+        preflight_started = asyncio.Event()
+        first_stream_closed = asyncio.Event()
+        never_continue = asyncio.Event()
+        attempts = 0
+
+        class StalledPreflight(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    preflight_started.set()
+                    yield b'data: {"type":"response.created"}\n\n'
+                    await never_continue.wait()
+                finally:
+                    first_stream_closed.set()
+
+            async def aclose(self) -> None:
+                first_stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=StalledPreflight(),
+                )
+            return httpx.Response(200, content=b"recovered")
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client, usage_store=usage_store)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        metadata = json.dumps({"thread_id": "thread-superseded-preflight"})
+
+        first_request = asyncio.create_task(
+            client.post(
+                "/v1/responses",
+                headers={"x-codex-turn-metadata": metadata},
+                json={"model": "test", "input": "first"},
+            )
+        )
+        try:
+            await asyncio.wait_for(preflight_started.wait(), timeout=1)
+            for _ in range(100):
+                active = router.status().active_request_details
+                if active and active[0].phase == "preflighting_sse":
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(router.status().active_request_details[0].phase, "preflighting_sse")
+
+            second_response = await asyncio.wait_for(
+                client.post(
+                    "/v1/responses",
+                    headers={"x-codex-turn-metadata": metadata},
+                    json={"model": "test", "input": "second"},
+                ),
+                timeout=1,
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                await first_request
+            await asyncio.wait_for(first_stream_closed.wait(), timeout=1)
+        finally:
+            never_continue.set()
+            if not first_request.done():
+                first_request.cancel()
+            await asyncio.gather(first_request, return_exceptions=True)
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(second_response.status_code, 200)
+        history = usage_store.request_history(window="24h", status="all")
+        self.assertEqual(history["total_count"], 2)
+        self.assertEqual(
+            sum(item["error_kind"] == "session_superseded" for item in history["items"]),
+            1,
+        )
+        self.assertEqual(router.status().active_request_details, ())
+
+    async def test_different_threads_with_same_name_remain_concurrent(self) -> None:
+        first_stream_started = asyncio.Event()
+        release_first_stream = asyncio.Event()
+        first_stream_closed = asyncio.Event()
+        attempts = 0
+
+        class StalledStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    first_stream_started.set()
+                    yield (
+                        b'data: {"type":"response.output_text.delta",'
+                        b'"delta":"partial"}\n\n'
+                    )
+                    await release_first_stream.wait()
+                finally:
+                    first_stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=StalledStream(),
+                )
+            return httpx.Response(200, content=b"second")
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(
+            router,
+            client=upstream_client,
+            session_name_resolver=lambda thread_ids: {
+                thread_id: "相同显示名称" for thread_id in thread_ids
+            },
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        first_request = asyncio.create_task(
+            client.post(
+                "/v1/responses",
+                headers={
+                    "x-codex-turn-metadata": json.dumps({"thread_id": "thread-a"})
+                },
+                json={"model": "test"},
+            )
+        )
+        try:
+            await asyncio.wait_for(first_stream_started.wait(), timeout=1)
+            second_response = await asyncio.wait_for(
+                client.post(
+                    "/v1/responses",
+                    headers={
+                        "x-codex-turn-metadata": json.dumps({"thread_id": "thread-b"})
+                    },
+                    json={"model": "test"},
+                ),
+                timeout=1,
+            )
+            self.assertEqual(second_response.status_code, 200)
+            self.assertFalse(first_stream_closed.is_set())
+            self.assertEqual(len(router.status().active_request_details), 1)
+        finally:
+            release_first_stream.set()
+            await asyncio.wait_for(first_request, timeout=1)
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(router.status().active_request_details, ())
+
+    async def test_requests_without_thread_ids_remain_concurrent(self) -> None:
+        first_stream_started = asyncio.Event()
+        release_first_stream = asyncio.Event()
+        first_stream_closed = asyncio.Event()
+        attempts = 0
+
+        class StalledStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    first_stream_started.set()
+                    yield (
+                        b'data: {"type":"response.output_text.delta",'
+                        b'"delta":"partial"}\n\n'
+                    )
+                    await release_first_stream.wait()
+                finally:
+                    first_stream_closed.set()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=StalledStream(),
+                )
+            return httpx.Response(200, content=b"second")
+
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        first_request = asyncio.create_task(
+            client.post("/v1/responses", json={"model": "test"})
+        )
+        try:
+            await asyncio.wait_for(first_stream_started.wait(), timeout=1)
+            second_response = await asyncio.wait_for(
+                client.post("/v1/responses", json={"model": "test"}),
+                timeout=1,
+            )
+            self.assertEqual(second_response.status_code, 200)
+            self.assertFalse(first_stream_closed.is_set())
+            self.assertEqual(len(router.status().active_request_details), 1)
+        finally:
+            release_first_stream.set()
+            await asyncio.wait_for(first_request, timeout=1)
+            await client.aclose()
+            await upstream_client.aclose()
+
+        self.assertEqual(router.status().active_request_details, ())
+
+    async def test_completed_same_thread_request_is_not_downgraded_by_racing_request(self) -> None:
+        first_close_started = asyncio.Event()
+        keep_first_close_open = asyncio.Event()
+        attempts = 0
+
+        class CompletedThenSlowClose(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (
+                    b'data: {"type":"response.completed",'
+                    b'"response":{"status":"completed"}}\n\n'
+                )
+
+            async def aclose(self) -> None:
+                first_close_started.set()
+                await keep_first_close_open.wait()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=CompletedThenSlowClose(),
+                )
+            return httpx.Response(200, content=b"second")
+
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        router = ProviderRouter((provider("selected", current=True),))
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = create_proxy_app(router, client=upstream_client, usage_store=usage_store)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        metadata = json.dumps({"thread_id": "thread-terminal-race"})
+        first_request = asyncio.create_task(
+            client.post(
+                "/v1/responses",
+                headers={"x-codex-turn-metadata": metadata},
+                json={"model": "test", "input": "first"},
+            )
+        )
+        try:
+            await asyncio.wait_for(first_close_started.wait(), timeout=1)
+            second_response = await asyncio.wait_for(
+                client.post(
+                    "/v1/responses",
+                    headers={"x-codex-turn-metadata": metadata},
+                    json={"model": "test", "input": "second"},
+                ),
+                timeout=1,
+            )
+            self.assertEqual(second_response.status_code, 200)
+            with self.assertRaises(asyncio.CancelledError):
+                await first_request
+        finally:
+            keep_first_close_open.set()
+            if not first_request.done():
+                first_request.cancel()
+            await asyncio.gather(first_request, return_exceptions=True)
+            await client.aclose()
+            await upstream_client.aclose()
+
+        history = usage_store.request_history(window="24h", status="all")
+        self.assertEqual(history["total_count"], 2)
+        self.assertEqual(sum(item["succeeded"] for item in history["items"]), 2)
+        self.assertFalse(
+            any(item["error_kind"] == "session_superseded" for item in history["items"])
+        )
 
     async def test_client_disconnect_cancels_a_stalled_upstream_stream(self) -> None:
         stream_closed = asyncio.Event()

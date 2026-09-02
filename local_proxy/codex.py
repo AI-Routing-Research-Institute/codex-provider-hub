@@ -67,7 +67,13 @@ def load_local_proxy_providers(catalog: ProviderCatalog) -> tuple[ProxyProvider,
         try:
             if not record.is_api_provider:
                 continue
-            providers.append(_proxy_provider(record, common_config))
+            providers.append(
+                _proxy_provider(
+                    record,
+                    common_config,
+                    model_mappings=catalog.model_mappings(record.provider_id),
+                )
+            )
         except (json.JSONDecodeError, tomllib.TOMLDecodeError, ProviderConfigurationError) as exc:
             errors.append(f"{record.name}: {exc}")
     if not providers and errors:
@@ -185,6 +191,8 @@ def _record_from_row(row: sqlite3.Row) -> cc_switch.ProviderRecord:
 def _proxy_provider(
     record: cc_switch.ProviderRecord,
     common_config: str,
+    *,
+    model_mappings: Mapping[str, str] | None = None,
 ) -> ProxyProvider:
     effective_text = cc_switch.build_effective_config(record, common_config)
     config = tomllib.loads(effective_text) if effective_text.strip() else {}
@@ -231,6 +239,7 @@ def _proxy_provider(
         configured_headers=resolved_headers,
         default_query=query,
         model=model,
+        model_mappings=dict(model_mappings or {}),
     )
 
 

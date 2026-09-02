@@ -38,6 +38,7 @@ from local_proxy.core import (
     RuntimeDiagnostics,
     RetryPolicy,
     RetryPolicyStore,
+    SessionRequestCoordinator,
     UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
     UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
     UsageStore,
@@ -170,6 +171,9 @@ def create_unified_proxy_app(
     diagnostic_log: DiagnosticLog | None = None,
 ) -> FastAPI:
     profiles = {"codex": codex, "claude": claude}
+    session_request_coordinators = {
+        service_id: SessionRequestCoordinator() for service_id in profiles
+    }
     runtime_diagnostics = RuntimeDiagnostics(
         diagnostic_log_path=(diagnostic_log.path if diagnostic_log is not None else None)
     )
@@ -313,6 +317,7 @@ def create_unified_proxy_app(
             protocol_adapter=profile.protocol_adapter,
             session_name_resolver=profile.session_name_resolver,
             input_item_id_compatibility_store=profile.input_item_id_compatibility_store,
+            session_request_coordinator=session_request_coordinators[profile.service_id],
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
             upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
         )
@@ -738,6 +743,79 @@ def _register_control_routes(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def control_provider_model_mappings(provider_id: str):
+        if profile.provider_catalog is None:
+            return JSONResponse(status_code=404, content={"detail": "Provider catalog unavailable"})
+        try:
+            mappings = await asyncio.to_thread(
+                profile.provider_catalog.model_mappings,
+                provider_id,
+            )
+        except KeyError:
+            return JSONResponse(status_code=404, content={"detail": "Provider not found"})
+        except (OSError, sqlite3.Error, ProviderConfigurationError) as exc:
+            return JSONResponse(status_code=503, content={"detail": str(exc)})
+        return JSONResponse(
+            content={
+                "provider_id": provider_id,
+                "mappings": [
+                    {"local_model": local_model, "upstream_model": upstream_model}
+                    for local_model, upstream_model in mappings.items()
+                ],
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def control_provider_model_mappings_update(
+        provider_id: str,
+        request: Request,
+    ):
+        if not _valid_control_request(request):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        if profile.provider_catalog is None:
+            return JSONResponse(status_code=503, content={"detail": "Provider catalog unavailable"})
+        try:
+            payload = await request.json()
+            rows = payload.get("mappings") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("mappings must be an array")
+            mappings: dict[str, str] = {}
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    raise ValueError(f"mappings[{index}] must be an object")
+                local_model = row.get("local_model")
+                upstream_model = row.get("upstream_model")
+                if not isinstance(local_model, str) or not local_model.strip():
+                    raise ValueError(f"mappings[{index}].local_model must not be empty")
+                if not isinstance(upstream_model, str) or not upstream_model.strip():
+                    raise ValueError(f"mappings[{index}].upstream_model must not be empty")
+                normalized_local_model = local_model.strip()
+                if normalized_local_model in mappings:
+                    raise ValueError(f"duplicate local model: {normalized_local_model}")
+                mappings[normalized_local_model] = upstream_model.strip()
+            saved = await asyncio.to_thread(
+                profile.provider_catalog.replace_model_mappings,
+                provider_id,
+                mappings,
+            )
+            await reload_catalog_providers()
+        except KeyError:
+            return JSONResponse(status_code=404, content={"detail": "Provider not found"})
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error, ProviderConfigurationError) as exc:
+            return JSONResponse(status_code=503, content={"detail": str(exc)})
+        return JSONResponse(
+            content={
+                "provider_id": provider_id,
+                "mappings": [
+                    {"local_model": local_model, "upstream_model": upstream_model}
+                    for local_model, upstream_model in saved.items()
+                ],
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def control_provider_create(request: Request):
         if not _valid_control_request(request):
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
@@ -1113,6 +1191,18 @@ def _register_control_routes(
         f"{prefix}/api/providers/{{provider_id}}",
         control_provider_detail,
         methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers/{{provider_id}}/model-mappings",
+        control_provider_model_mappings,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        f"{prefix}/api/providers/{{provider_id}}/model-mappings",
+        control_provider_model_mappings_update,
+        methods=["PUT"],
         include_in_schema=False,
     )
     app.add_api_route(
