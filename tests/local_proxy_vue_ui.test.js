@@ -276,6 +276,8 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.doesNotMatch(providers.slice(providerTitleStart, providerMetaStart), /showStatusUpload/);
   assert.match(requests, /class="request-table-header"/);
   assert.match(requests, /class="request-row"/);
+  assert.match(requests, />映射模型<\/span>/);
+  assert.match(requests, /item\.upstream_model \|\| '—'/);
   assert.ok(providers.indexOf('class="search"') < providers.indexOf('class="time-window-control usage-window-wrap"'));
   assert.ok(requests.indexOf('class="request-search"') < requests.indexOf('request-window-control'));
   assert.match(settings, /UiSelect/);
@@ -353,6 +355,8 @@ test("Vue request view preserves upstream phase and timeout labels", () => {
   assert.match(requests, /receiving: '接收中'/);
   assert.match(requests, /connection_timeout: '等待上游响应超时'/);
   assert.match(requests, /stream_idle_timeout: '上游长时间无数据'/);
+  assert.match(requests, /\['client_disconnected', 'session_superseded'\]/);
+  assert.match(requests, /session_superseded: '同会话新请求接管'/);
 });
 
 test("Vue Token values use the classic compact formatter and labeled units", () => {
@@ -442,7 +446,7 @@ test("modern toasts open at the top center without moving classic toasts", () =>
   assert.match(classicSource, /tone === "error" \? "M12 7v6m0 4h\.01" : "m6\.5 12\.5 3\.5 3\.5 7\.5-8"/);
   assert.doesNotMatch(classicSource, /icon\.textContent = tone === "error"/);
   assert.match(classicHtml, /styles\.css\?v=32/);
-  assert.match(classicHtml, /app\.js\?v=36/);
+  assert.match(classicHtml, /app\.js\?v=37/);
   assert.doesNotMatch(classicStyles, /\.toast-region\s*\{[^}]*top:/s);
 });
 

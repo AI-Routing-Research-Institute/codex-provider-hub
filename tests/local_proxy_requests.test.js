@@ -44,10 +44,13 @@ test("labels request reasoning effort", () => {
   assert.equal(context.api.requestReasoningEffortLabel("custom"), "custom");
 });
 
-test("uses nine aligned request columns without positional header rules", () => {
+test("uses ten aligned request columns including the mapped model", () => {
+  assert.match(htmlSource, />模型<\/span><span>映射模型<\/span>/);
   assert.match(htmlSource, /request-column-reasoning">推理强度/);
-  assert.match(source, /row\.append\(status, startedAt, session, route, model, reasoning, duration, token, result\)/);
+  assert.match(source, /upstreamModel\.textContent = item\.upstream_model \|\| "—"/);
+  assert.match(source, /row\.append\(status, startedAt, session, route, model, upstreamModel, reasoning, duration, token, result\)/);
   assert.match(stylesSource, /--request-columns:[^;]+;/);
+  assert.match(stylesSource, /\.request-upstream-model\.mapped \{ color: var\(--teal\); font-weight: 700; \}/);
   assert.match(stylesSource, /\.request-column-duration, \.request-column-token \{ text-align: right; \}/);
   assert.match(stylesSource, /\.request-column-status, \.request-column-time, \.request-column-reasoning, \.request-column-result \{ text-align: center; \}/);
   assert.doesNotMatch(stylesSource, /\.request-table-header span:nth-child/);
@@ -86,6 +89,15 @@ test("labels running, successful, and failed request results", () => {
     }),
     "客户端取消",
   );
+  assert.equal(
+    context.api.requestResultLabel({
+      succeeded: false,
+      error_kind: "session_superseded",
+      error_summary: "已由同会话新请求接管",
+    }),
+    "同会话新请求接管",
+  );
+  assert.match(source, /\["client_disconnected", "session_superseded"\]/);
   assert.match(source, /const CONTROL_REQUEST_TIMEOUT_MS = 8_000/);
   assert.match(source, /async function fetchControl\(/);
   assert.match(source, /本地中转响应超时，请检查服务是否卡住/);

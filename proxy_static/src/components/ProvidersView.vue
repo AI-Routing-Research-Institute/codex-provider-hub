@@ -66,6 +66,7 @@
             <div v-if="manageMode" class="provider-management-cell">
               <div class="provider-row-actions">
                 <button class="provider-action-button visibility-button" type="button" :disabled="provider.current" @click.stop="setProviderHidden(provider, !provider.hidden)">{{ provider.hidden ? '显示' : '隐藏' }}</button>
+                <button class="provider-action-button" type="button" :title="`模型映射${provider.model_mapping_count ? `（${provider.model_mapping_count}）` : ''}`" @click.stop="openModelMappings(provider)">映射</button>
                 <button class="provider-action-button provider-edit-button" type="button" @click.stop="openEdit(provider)">编辑</button>
               </div>
             </div>
@@ -105,6 +106,25 @@
         <label class="provider-editor-field"><span>Query Params <small>JSON 对象</small></span><textarea v-model="form.query_params" rows="3" spellcheck="false" /></label>
         <p v-if="formError" class="provider-editor-error" role="alert">{{ formError }}</p>
         <div class="provider-editor-actions"><button v-if="editingId" class="danger-button" type="button" :disabled="editingId === currentProvider?.provider_id" @click="deleteProvider">删除供应商</button><span v-else /><div class="provider-editor-primary-actions"><button class="secondary-button" type="button" @click="closeEditor">取消</button><button class="primary-button" type="submit" :disabled="saving">{{ saving ? '保存中...' : '保存' }}</button></div></div>
+      </form>
+    </dialog>
+
+    <dialog class="provider-editor model-mapping-editor" :open="Boolean(modelMappingProvider)" aria-labelledby="model-mapping-title">
+      <form method="dialog" @submit.prevent="saveModelMappings">
+        <div class="provider-editor-heading"><div><strong id="model-mapping-title">模型映射</strong><span>{{ modelMappingProvider?.name || '' }}</span></div><button class="usage-history-close" type="button" aria-label="关闭模型映射" @click="closeModelMappings"><UiIcon name="close" /></button></div>
+        <div class="model-mapping-column-head" aria-hidden="true"><span>本地模型</span><span /><span>远端模型</span><span /></div>
+        <div v-if="modelMappings.length" class="model-mapping-list">
+          <div v-for="(mapping, index) in modelMappings" :key="mapping.key" class="model-mapping-row">
+            <input v-model.trim="mapping.local_model" type="text" maxlength="240" aria-label="本地模型" placeholder="gpt-5.6" autocomplete="off" spellcheck="false" />
+            <UiIcon class="model-mapping-arrow" name="arrowRight" />
+            <input v-model.trim="mapping.upstream_model" type="text" maxlength="240" aria-label="远端模型" placeholder="gpt-5.6-sol" autocomplete="off" spellcheck="false" />
+            <button class="icon-button model-mapping-remove" type="button" title="删除映射" aria-label="删除映射" @click="modelMappings.splice(index, 1)"><UiIcon name="close" /></button>
+          </div>
+        </div>
+        <div v-else class="model-mapping-empty">暂无模型映射</div>
+        <button class="secondary-button model-mapping-add" type="button" @click="addModelMapping"><UiIcon name="plus" />添加映射</button>
+        <p v-if="modelMappingError" class="provider-editor-error" role="alert">{{ modelMappingError }}</p>
+        <div class="provider-editor-actions"><span /><div class="provider-editor-primary-actions"><button class="secondary-button" type="button" @click="closeModelMappings">取消</button><button class="primary-button" type="submit" :disabled="modelMappingSaving || !modelMappingLoaded">{{ modelMappingSaving ? '保存中...' : '保存' }}</button></div></div>
       </form>
     </dialog>
 
@@ -166,6 +186,12 @@ const editorOpen = ref(false)
 const editingId = ref('')
 const saving = ref(false)
 const formError = ref('')
+const modelMappingProvider = ref(null)
+const modelMappings = ref([])
+const modelMappingSaving = ref(false)
+const modelMappingLoaded = ref(false)
+const modelMappingError = ref('')
+let modelMappingKey = 0
 const statusUploadProvider = ref(null)
 const uploadModels = ref(['gpt-5'])
 const uploadInitialized = ref(false)
@@ -343,6 +369,35 @@ async function copyLaunchCommand(provider) {
   } catch (error) {
     emit('notify', { title: '复制失败', detail: error.message, tone: 'error' })
   }
+}
+function mappingRow(localModel = '', upstreamModel = '') { modelMappingKey += 1; return { key: modelMappingKey, local_model: localModel, upstream_model: upstreamModel } }
+function addModelMapping() { modelMappings.value.push(mappingRow()) }
+async function openModelMappings(provider) {
+  modelMappingError.value = ''
+  modelMappingProvider.value = provider
+  modelMappings.value = []
+  modelMappingLoaded.value = false
+  try {
+    const payload = await controlFetch(`/api/providers/${encodeURIComponent(provider.provider_id)}/model-mappings`)
+    modelMappings.value = (payload.mappings || []).map(item => mappingRow(item.local_model || '', item.upstream_model || ''))
+    modelMappingLoaded.value = true
+  } catch (error) {
+    modelMappingError.value = error.message
+  }
+}
+function closeModelMappings() { if (!modelMappingSaving.value) modelMappingProvider.value = null }
+async function saveModelMappings() {
+  if (!modelMappingLoaded.value) return
+  const rows = modelMappings.value.map(item => ({ local_model: item.local_model.trim(), upstream_model: item.upstream_model.trim() }))
+  if (rows.some(item => !item.local_model || !item.upstream_model)) { modelMappingError.value = '本地模型和远端模型都不能为空'; return }
+  if (new Set(rows.map(item => item.local_model)).size !== rows.length) { modelMappingError.value = '本地模型不能重复'; return }
+  modelMappingSaving.value = true
+  modelMappingError.value = ''
+  try {
+    await controlFetch(`/api/providers/${encodeURIComponent(modelMappingProvider.value.provider_id)}/model-mappings`, jsonOptions('PUT', { mappings: rows }))
+    modelMappingProvider.value = null
+    await loadStatus()
+  } catch (error) { modelMappingError.value = error.message } finally { modelMappingSaving.value = false }
 }
 async function openStatusUpload(provider) {
   statusUploadProvider.value = provider

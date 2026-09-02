@@ -197,6 +197,16 @@ const providerEditorSave = document.querySelector("#provider-editor-save");
 const providerEditorDelete = document.querySelector("#provider-editor-delete");
 const providerEditorClose = document.querySelector("#provider-editor-close");
 const providerEditorCancel = document.querySelector("#provider-editor-cancel");
+const modelMappingEditor = document.querySelector("#model-mapping-editor");
+const modelMappingForm = document.querySelector("#model-mapping-form");
+const modelMappingProvider = document.querySelector("#model-mapping-provider");
+const modelMappingList = document.querySelector("#model-mapping-list");
+const modelMappingEmpty = document.querySelector("#model-mapping-empty");
+const modelMappingAdd = document.querySelector("#model-mapping-add");
+const modelMappingError = document.querySelector("#model-mapping-error");
+const modelMappingSave = document.querySelector("#model-mapping-save");
+const modelMappingClose = document.querySelector("#model-mapping-close");
+const modelMappingCancel = document.querySelector("#model-mapping-cancel");
 const requestList = document.querySelector("#request-list");
 const requestTableShell = document.querySelector(".request-table-shell");
 const requestsEmpty = document.querySelector("#requests-empty");
@@ -1236,6 +1246,7 @@ function requestRecordKey(item) {
     item?.provider_id,
     item?.session_key,
     item?.model,
+    item?.upstream_model,
     item?.reasoning_effort,
     item?.duration_ms,
     item?.outcome,
@@ -1279,6 +1290,7 @@ function requestResultLabel(item) {
     return String(Number(item.status_code || 200));
   }
   if (item?.error_kind === "client_disconnected") return "客户端取消";
+  if (item?.error_kind === "session_superseded") return "同会话新请求接管";
   if (item?.error_summary) return item.error_summary;
   const statusCode = Number(item?.status_code || 0);
   return statusCode > 0 ? `HTTP ${statusCode} 失败` : "请求失败";
@@ -1521,7 +1533,7 @@ function renderRequests() {
   for (const item of combined) {
     const state = item.state === "running"
       ? "running"
-      : item.error_kind === "client_disconnected" ? "cancelled"
+      : ["client_disconnected", "session_superseded"].includes(item.error_kind) ? "cancelled"
       : item.succeeded === true ? "succeeded" : "failed";
     const row = document.createElement("div");
     row.className = `request-row ${state}`;
@@ -1554,6 +1566,13 @@ function renderRequests() {
     model.textContent = item.model || "unknown";
     model.title = model.textContent;
 
+    const upstreamModel = document.createElement("span");
+    upstreamModel.className = `request-upstream-model${item.upstream_model ? " mapped" : ""}`;
+    upstreamModel.textContent = item.upstream_model || "—";
+    upstreamModel.title = item.upstream_model
+      ? `实际发送模型：${item.upstream_model}`
+      : "未发生模型映射";
+
     const reasoning = document.createElement("span");
     reasoning.className = "request-reasoning";
     reasoning.textContent = requestReasoningEffortLabel(item.reasoning_effort);
@@ -1580,9 +1599,11 @@ function renderRequests() {
     result.title = state === "succeeded"
       ? `HTTP ${Number(item.status_code || 200)}`
       : state === "cancelled"
-        ? "客户端在响应完成前结束连接"
+        ? item.error_kind === "session_superseded"
+          ? "已由同会话新请求接管"
+          : "客户端在响应完成前结束连接"
         : result.textContent;
-    row.append(status, startedAt, session, route, model, reasoning, duration, token, result);
+    row.append(status, startedAt, session, route, model, upstreamModel, reasoning, duration, token, result);
     requestList.append(row);
   }
   if (requestTableShell) requestTableShell.scrollTop = previousScrollTop;
@@ -2652,6 +2673,7 @@ function renderProviderList() {
       provider.active_requests,
       (provider.active_sessions || []).map((session) => session.name),
       provider.hidden,
+      provider.model_mapping_count,
       providerUsage(provider.provider_id).request_count,
       providerUsage(provider.provider_id).total_tokens,
       providerUsage(provider.provider_id).estimated_requests,
@@ -2886,6 +2908,17 @@ function renderProviderList() {
       });
       actions.append(visibility);
       if (uiConfig.features.provider_catalog === true) {
+        const mappingButton = document.createElement("button");
+        mappingButton.type = "button";
+        mappingButton.className = "provider-action-button";
+        mappingButton.textContent = "映射";
+        mappingButton.title = `模型映射${provider.model_mapping_count ? `（${provider.model_mapping_count}）` : ""}`;
+        mappingButton.setAttribute("aria-label", `管理供应商 ${provider.name} 的模型映射`);
+        mappingButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          void openModelMappingEditor(provider);
+        });
+        actions.append(mappingButton);
         const editButton = document.createElement("button");
         editButton.type = "button";
         editButton.className = "provider-action-button provider-edit-button";
@@ -3629,6 +3662,126 @@ function importToCcSwitch() {
   }
 }
 
+function setModelMappingError(message = "") {
+  modelMappingError.textContent = message;
+  modelMappingError.hidden = !message;
+}
+
+function renderModelMappingRows(mappings = []) {
+  modelMappingList.replaceChildren();
+  for (const mapping of mappings) {
+    const row = document.createElement("div");
+    row.className = "model-mapping-row";
+    const localModel = document.createElement("input");
+    localModel.type = "text";
+    localModel.maxLength = 240;
+    localModel.value = mapping.local_model || "";
+    localModel.placeholder = "gpt-5.6";
+    localModel.setAttribute("aria-label", "本地模型");
+    localModel.spellcheck = false;
+    const arrow = document.createElement("span");
+    arrow.className = "model-mapping-arrow";
+    arrow.textContent = "→";
+    arrow.setAttribute("aria-hidden", "true");
+    const upstreamModel = document.createElement("input");
+    upstreamModel.type = "text";
+    upstreamModel.maxLength = 240;
+    upstreamModel.value = mapping.upstream_model || "";
+    upstreamModel.placeholder = "gpt-5.6-sol";
+    upstreamModel.setAttribute("aria-label", "远端模型");
+    upstreamModel.spellcheck = false;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button model-mapping-remove";
+    remove.textContent = "×";
+    remove.title = "删除映射";
+    remove.setAttribute("aria-label", "删除映射");
+    remove.addEventListener("click", () => {
+      row.remove();
+      modelMappingEmpty.hidden = modelMappingList.children.length > 0;
+    });
+    row.append(localModel, arrow, upstreamModel, remove);
+    modelMappingList.append(row);
+  }
+  modelMappingEmpty.hidden = modelMappingList.children.length > 0;
+}
+
+function closeModelMappingEditor() {
+  setModelMappingError();
+  if (modelMappingEditor.open && typeof modelMappingEditor.close === "function") {
+    modelMappingEditor.close();
+  } else {
+    modelMappingEditor.removeAttribute("open");
+  }
+}
+
+async function openModelMappingEditor(provider) {
+  if (!provider || uiConfig.features.provider_catalog !== true) return;
+  modelMappingEditor.dataset.providerId = provider.provider_id;
+  modelMappingProvider.textContent = provider.name;
+  renderModelMappingRows([]);
+  setModelMappingError();
+  modelMappingSave.disabled = true;
+  try {
+    const response = await fetch(
+      controlUrl(`/api/providers/${encodeURIComponent(provider.provider_id)}/model-mappings`),
+      { cache: "no-store" },
+    );
+    if (!response.ok) throw new Error(await responseDetail(response, "无法读取模型映射"));
+    const payload = await response.json();
+    renderModelMappingRows(payload.mappings || []);
+    modelMappingSave.disabled = false;
+  } catch (error) {
+    setModelMappingError(error?.message || "无法读取模型映射");
+  }
+  if (typeof modelMappingEditor.showModal === "function") {
+    modelMappingEditor.showModal();
+  } else {
+    modelMappingEditor.setAttribute("open", "");
+  }
+}
+
+async function saveModelMappingEditor(event) {
+  event.preventDefault();
+  const mappings = [...modelMappingList.querySelectorAll(".model-mapping-row")].map((row) => ({
+    local_model: row.querySelector('input[aria-label="本地模型"]').value.trim(),
+    upstream_model: row.querySelector('input[aria-label="远端模型"]').value.trim(),
+  }));
+  if (mappings.some((mapping) => !mapping.local_model || !mapping.upstream_model)) {
+    setModelMappingError("本地模型和远端模型都不能为空");
+    return;
+  }
+  if (new Set(mappings.map((mapping) => mapping.local_model)).size !== mappings.length) {
+    setModelMappingError("本地模型不能重复");
+    return;
+  }
+  const providerId = modelMappingEditor.dataset.providerId;
+  modelMappingSave.disabled = true;
+  setModelMappingError();
+  try {
+    const response = await fetch(
+      controlUrl(`/api/providers/${encodeURIComponent(providerId)}/model-mappings`),
+      {
+        method: "PUT",
+        headers: { ...CONTROL_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({ mappings }),
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) throw new Error(await responseDetail(response, "保存模型映射失败"));
+    const provider = latestStatus?.providers?.find((item) => item.provider_id === providerId);
+    if (provider) provider.model_mapping_count = mappings.length;
+    renderedListSignature = null;
+    renderProviderList();
+    closeModelMappingEditor();
+    showToast("模型映射已保存", `${modelMappingProvider.textContent} 的新请求将立即使用映射。`);
+  } catch (error) {
+    setModelMappingError(error?.message || "保存模型映射失败");
+  } finally {
+    modelMappingSave.disabled = false;
+  }
+}
+
 async function disableAutomaticMonitor(provider) {
   if (!window.confirm(`确定停止“${provider.name || provider.id}”的自动监控吗？之后仍可手动检测。`)) return;
   try {
@@ -3809,6 +3962,16 @@ providerEditorForm?.addEventListener("submit", saveProviderEditor);
 providerEditorDelete?.addEventListener("click", () => void deleteProviderEditor());
 providerEditorClose?.addEventListener("click", closeProviderEditor);
 providerEditorCancel?.addEventListener("click", closeProviderEditor);
+modelMappingForm?.addEventListener("submit", saveModelMappingEditor);
+modelMappingAdd?.addEventListener("click", () => renderModelMappingRows([
+  ...[...modelMappingList.querySelectorAll(".model-mapping-row")].map((row) => ({
+    local_model: row.querySelector('input[aria-label="本地模型"]').value,
+    upstream_model: row.querySelector('input[aria-label="远端模型"]').value,
+  })),
+  { local_model: "", upstream_model: "" },
+]));
+modelMappingClose?.addEventListener("click", closeModelMappingEditor);
+modelMappingCancel?.addEventListener("click", closeModelMappingEditor);
 healthRefreshButton.addEventListener("click", () => readHealthStatus());
 document.querySelector("#refresh-button").addEventListener("click", refreshProviders);
 document.querySelector("#copy-config").addEventListener("click", importToCcSwitch);
