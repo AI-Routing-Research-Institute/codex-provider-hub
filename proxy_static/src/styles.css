@@ -43,6 +43,12 @@
   --panel-radius: 12px;
   --font-body: 13px;
   --font-meta: 12px;
+  --usage-mono-1: #d7dee7;
+  --usage-mono-2: #b3bfcd;
+  --usage-mono-3: #8595a8;
+  --usage-mono-4: #56657a;
+  --usage-mono-ink: #243247;
+  --usage-heat-0: #eef2f6;
 }
 
 :root[data-theme="dark"] {
@@ -73,6 +79,12 @@
   --shadow: 0 18px 48px rgb(0 0 0 / 42%);
   --control-surface: #1b3047;
   --control-shadow: 0 1px 2px rgb(0 0 0 / 22%);
+  --usage-mono-1: #2c3f55;
+  --usage-mono-2: #47607d;
+  --usage-mono-3: #6d87a5;
+  --usage-mono-4: #9db3cc;
+  --usage-mono-ink: #e8eef6;
+  --usage-heat-0: #16283d;
 }
 
 * { box-sizing: border-box; }
@@ -1376,17 +1388,38 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .usage-chart-svg { display: block; width: 100%; height: auto; touch-action: none; }
 .usage-grid-line { stroke: var(--line); stroke-width: 1; }
 .usage-axis-text { fill: var(--muted); font-size: var(--font-meta); font-family: var(--font-sans); }
-.usage-area-input { fill: var(--teal); fill-opacity: 0.22; }
-.usage-area-output { fill: var(--amber); fill-opacity: 0.18; }
-.usage-line-total { fill: none; stroke: var(--teal); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.usage-area-input { fill: var(--usage-mono-2); fill-opacity: 0.45; }
+.usage-area-output { fill: var(--usage-mono-4); fill-opacity: 0.45; }
+.usage-line-total { fill: none; stroke: var(--usage-mono-ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.usage-mean-line { stroke: var(--usage-mono-3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.usage-bar-input { fill: var(--usage-mono-2); }
+.usage-bar-output { fill: var(--usage-mono-4); }
 .usage-hover-line { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 4 3; }
-.usage-hover-dot { fill: var(--teal); stroke: var(--surface); stroke-width: 2; }
+.usage-hover-dot { fill: var(--usage-mono-ink); stroke: var(--surface); stroke-width: 2; }
+.usage-heat-cell { stroke: var(--line); stroke-width: 0.5; }
+.usage-heat-0 { fill: var(--usage-heat-0); }
+.usage-heat-1 { fill: var(--usage-mono-1); }
+.usage-heat-2 { fill: var(--usage-mono-2); }
+.usage-heat-3 { fill: var(--usage-mono-3); }
+.usage-heat-4 { fill: var(--usage-mono-4); }
+.usage-heat-swatch-1 { background: var(--usage-mono-1); }
+.usage-heat-swatch-2 { background: var(--usage-mono-2); }
+.usage-heat-swatch-3 { background: var(--usage-mono-3); }
+.usage-heat-swatch-4 { background: var(--usage-mono-4); }
+.usage-chart-heat .usage-tooltip { top: auto; bottom: 46px; }
+.usage-chart-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--control-surface); overflow: hidden; }
+.usage-chart-toggle-button { border: none; background: transparent; color: var(--muted); font-size: var(--font-meta); padding: 6px 12px; cursor: pointer; }
+.usage-chart-toggle-button + .usage-chart-toggle-button { border-left: 1px solid var(--line); }
+.usage-chart-toggle-button.is-active { background: var(--usage-mono-ink); color: var(--surface); }
+.usage-conclusion span { color: var(--muted); }
+.usage-conclusion strong { font-size: 16px; color: var(--usage-mono-ink); }
 .usage-legend { display: flex; gap: 14px; padding: 8px 14px 10px; }
 .usage-legend-item { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--font-meta); }
 .usage-swatch { width: 10px; height: 10px; border-radius: 3px; }
-.usage-swatch-input { background: var(--teal); opacity: 0.45; }
-.usage-swatch-output { background: var(--amber); opacity: 0.5; }
-.usage-swatch-total { background: var(--teal); height: 3px; border-radius: 2px; }
+.usage-swatch-input { background: var(--usage-mono-2); }
+.usage-swatch-output { background: var(--usage-mono-4); }
+.usage-swatch-total { background: var(--usage-mono-ink); height: 3px; border-radius: 2px; }
+.usage-legend-note { color: var(--muted); }
 .usage-tooltip { position: absolute; top: 14px; display: flex; flex-direction: column; gap: 3px; margin-left: 10px; margin-right: 10px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--surface); box-shadow: 0 6px 18px rgba(22, 34, 56, 0.12); pointer-events: none; white-space: nowrap; z-index: 2; }
 .usage-tooltip strong { font-size: var(--font-meta); }
 .usage-tooltip span { color: var(--muted); font-size: var(--font-meta); }
