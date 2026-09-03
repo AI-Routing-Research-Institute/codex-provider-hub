@@ -205,8 +205,10 @@ async def _event_loop_heartbeat(diagnostics: RuntimeDiagnostics) -> None:
 async def _next_stream_chunk(
     stream: AsyncIterator[bytes],
     *,
-    timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
 ) -> bytes:
+    if timeout_seconds is None:
+        return await anext(stream)
     try:
         return await asyncio.wait_for(anext(stream), timeout=timeout_seconds)
     except TimeoutError as exc:
@@ -218,7 +220,7 @@ async def _next_stream_chunk(
 async def _stream_with_idle_timeout(
     stream: AsyncIterator[bytes],
     *,
-    timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
 ) -> AsyncIterator[bytes]:
     try:
         while True:
@@ -244,8 +246,10 @@ async def _send_upstream_response(
     client: Any,
     request: Any,
     *,
-    timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
 ) -> Any:
+    if timeout_seconds is None:
+        return await client.send(request, stream=True)
     try:
         return await asyncio.wait_for(
             client.send(request, stream=True),
@@ -255,6 +259,30 @@ async def _send_upstream_response(
         raise UpstreamResponseHeadersTimeout(
             f"上游响应头连续 {timeout_seconds:g} 秒没有返回"
         ) from exc
+
+
+def _resolve_upstream_timeouts(
+    settings: Mapping[str, Any] | None,
+    *,
+    stream_default: float | None,
+    response_headers_default: float | None,
+) -> tuple[float | None, float | None]:
+    """Read validated shared timeout settings while keeping direct app tests compatible."""
+    values: list[float | None] = []
+    for field_name, default in (
+        ("upstream_stream_idle_timeout_seconds", stream_default),
+        ("upstream_response_headers_timeout_seconds", response_headers_default),
+    ):
+        value = settings.get(field_name, default) if isinstance(settings, Mapping) else default
+        if value is None:
+            values.append(None)
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            values.append(default)
+            continue
+        numeric = float(value)
+        values.append(numeric if numeric > 0 else default)
+    return values[0], values[1]
 
 
 def _finalize_stream_captures(
@@ -522,6 +550,7 @@ class UsageStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     started_at REAL NOT NULL,
                     finished_at REAL NOT NULL,
+                    last_activity_at REAL,
                     provider_id TEXT NOT NULL,
                     thread_id TEXT,
                     session_key TEXT,
@@ -592,6 +621,10 @@ class UsageStore:
                 connection.execute(
                     "ALTER TABLE request_history ADD COLUMN upstream_model TEXT"
                 )
+            if "last_activity_at" not in history_columns:
+                connection.execute(
+                    "ALTER TABLE request_history ADD COLUMN last_activity_at REAL"
+                )
             inflight_columns = {
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(inflight_requests)")
@@ -614,7 +647,7 @@ class UsageStore:
         connection.execute(
             """
             INSERT INTO request_history (
-                started_at, finished_at, provider_id, thread_id, session_key,
+                started_at, finished_at, last_activity_at, provider_id, thread_id, session_key,
                 session_name, model, upstream_model, reasoning_effort,
                 status_code, succeeded,
                 outcome, duration_ms, retry_count, error_kind, error_summary,
@@ -622,17 +655,18 @@ class UsageStore:
                 cached_tokens, reasoning_tokens, usage_source, estimate_method
             )
             SELECT
-                started_at, ?, provider_id, thread_id, session_key,
+                started_at, ?, MIN(MAX(updated_at, started_at), ?), provider_id,
+                thread_id, session_key,
                 session_name, model, upstream_model, reasoning_effort, NULL, 0,
                 'interrupted',
-                CAST(MAX(0, (? - started_at) * 1000) AS INTEGER),
+                CAST(MAX(0, (MIN(MAX(updated_at, started_at), ?) - started_at) * 1000) AS INTEGER),
                 retry_count, 'process_restarted',
                 '本地中转在请求完成前退出或重启（阶段：' || phase ||
                     '，请求体：' || request_body_bytes || ' 字节）',
                 NULL, 0, 0, 0, 0, 0, NULL, NULL
             FROM inflight_requests
             """,
-            (recovered_at, recovered_at),
+            (recovered_at, recovered_at, recovered_at),
         )
         connection.execute("DELETE FROM inflight_requests")
 
@@ -795,9 +829,14 @@ class UsageStore:
         usage_id: int | None = None,
         finished_at: float | None = None,
         reasoning_effort: str | None = None,
+        last_activity_at: float | None = None,
     ) -> None:
         completed_at = time.time() if finished_at is None else float(finished_at)
         started = min(float(started_at), completed_at)
+        activity = completed_at if last_activity_at is None else min(
+            completed_at,
+            max(started, float(last_activity_at)),
+        )
         safe_thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
         safe_session_name = str(session_name or "未知会话")[:240]
         safe_model = str(model or "unknown")[:240]
@@ -814,6 +853,7 @@ class UsageStore:
         values = (
             started,
             completed_at,
+            activity,
             str(provider_id),
             safe_thread_id,
             _session_key(safe_thread_id),
@@ -841,13 +881,14 @@ class UsageStore:
             connection.execute(
                 """
                 INSERT INTO request_history (
-                    started_at, finished_at, provider_id, thread_id, session_key,
+                    started_at, finished_at, last_activity_at, provider_id,
+                    thread_id, session_key,
                     session_name, model, upstream_model, reasoning_effort,
                     status_code, succeeded, outcome,
                     duration_ms, retry_count, error_kind, error_summary, usage_id,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
                     reasoning_tokens, usage_source, estimate_method
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -930,7 +971,7 @@ class UsageStore:
         common_table = """
             WITH items AS (
                 SELECT finished_at AS sort_at, id * 2 AS cursor_id,
-                       started_at, finished_at, provider_id, thread_id,
+                       started_at, finished_at, last_activity_at, provider_id, thread_id,
                        session_key, session_name, model, upstream_model,
                        reasoning_effort,
                        status_code, succeeded,
@@ -941,6 +982,7 @@ class UsageStore:
                 UNION ALL
                 SELECT recorded_at AS sort_at, id * 2 + 1 AS cursor_id,
                        recorded_at AS started_at, recorded_at AS finished_at,
+                       NULL AS last_activity_at,
                        provider_id, NULL AS thread_id, NULL AS session_key,
                        '未知会话' AS session_name, model,
                        NULL AS upstream_model, NULL AS reasoning_effort,
@@ -992,6 +1034,11 @@ class UsageStore:
                 {
                     "started_at": round(float(row["started_at"]) * 1000),
                     "finished_at": round(float(row["finished_at"]) * 1000),
+                    "last_activity_at": (
+                        None
+                        if row["last_activity_at"] is None
+                        else round(float(row["last_activity_at"]) * 1000)
+                    ),
                     "provider_id": str(row["provider_id"]),
                     "_thread_id": row["thread_id"],
                     "session_key": row["session_key"],
@@ -1389,7 +1436,10 @@ class RecoveryHistoryStore:
         now: float | None = None,
         limit: int = RECOVERY_HISTORY_API_LIMIT,
         cursor: str | None = None,
+        grouped: bool = False,
     ) -> dict[str, Any]:
+        if grouped:
+            return self.grouped_history(now=now, limit=limit, cursor=cursor)
         timestamp = time.time() if now is None else float(now)
         cutoff = timestamp - RECOVERY_HISTORY_HOURS * 3600
         bounded_limit = max(1, min(int(limit), RECOVERY_HISTORY_API_LIMIT))
@@ -1457,6 +1507,127 @@ class RecoveryHistoryStore:
                         if row["request_started_at"] is None
                         else round(float(row["request_started_at"]) * 1000)
                     ),
+                }
+                for row in visible_rows
+            ],
+            "next_cursor": (
+                None
+                if last_row is None
+                else f"{float(last_row['recorded_at']).hex()}@{int(last_row['id'])}"
+            ),
+        }
+
+    def grouped_history(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = RECOVERY_HISTORY_API_LIMIT,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one latest summary for each retry request lifecycle."""
+        timestamp = time.time() if now is None else float(now)
+        cutoff = timestamp - RECOVERY_HISTORY_HOURS * 3600
+        bounded_limit = max(1, min(int(limit), RECOVERY_HISTORY_API_LIMIT))
+        cursor_clauses: list[str] = []
+        cursor_params: list[Any] = []
+        if cursor:
+            try:
+                cursor_time_hex, cursor_id_text = cursor.rsplit("@", 1)
+                cursor_time = float.fromhex(cursor_time_hex)
+                cursor_id = int(cursor_id_text)
+                if not math.isfinite(cursor_time) or cursor_id < 0:
+                    raise ValueError
+            except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+                raise ValueError("恢复记录游标无效") from exc
+            cursor_clauses.append(
+                "(recorded_at < ? OR (recorded_at = ? AND id < ?))"
+            )
+            cursor_params.extend((cursor_time, cursor_time, cursor_id))
+        cursor_where = "" if not cursor_clauses else " AND " + " AND ".join(cursor_clauses)
+        ranked = """
+            WITH ranked AS (
+                SELECT id, recorded_at, request_started_at, request_id,
+                       provider_id, attempt, max_attempts, delay_seconds,
+                       kind, summary, stage, outcome,
+                       MIN(recorded_at) OVER (
+                           PARTITION BY request_id, request_started_at
+                       ) AS first_recorded_at,
+                       COUNT(*) OVER (
+                           PARTITION BY request_id, request_started_at
+                       ) AS event_count,
+                       MAX(attempt) OVER (
+                           PARTITION BY request_id, request_started_at
+                       ) AS max_attempt,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY request_id, request_started_at
+                           ORDER BY recorded_at DESC, id DESC
+                       ) AS latest_rank
+                FROM recovery_events
+                WHERE recorded_at >= ?
+            )
+        """
+        with self._lock, closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            if self._cleanup_due(timestamp):
+                with connection:
+                    self._delete_expired(connection, timestamp)
+            total_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT request_id, request_started_at
+                        FROM recovery_events
+                        WHERE recorded_at >= ?
+                        GROUP BY request_id, request_started_at
+                    )
+                    """,
+                    (cutoff,),
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"""
+                {ranked}
+                SELECT * FROM ranked
+                WHERE latest_rank = 1{cursor_where}
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT ?
+                """,
+                (cutoff, *cursor_params, bounded_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > bounded_limit
+        visible_rows = rows[:bounded_limit]
+        last_row = visible_rows[-1] if has_more and visible_rows else None
+        return {
+            "window_hours": RECOVERY_HISTORY_HOURS,
+            "grouped": True,
+            "total_count": total_count,
+            "truncated": has_more,
+            "items": [
+                {
+                    "request_id": int(row["request_id"]),
+                    "provider_id": str(row["provider_id"]),
+                    "attempt": int(row["max_attempt"]),
+                    "max_attempts": int(row["max_attempts"]),
+                    "delay_seconds": (
+                        None
+                        if row["delay_seconds"] is None
+                        else round(float(row["delay_seconds"]), 1)
+                    ),
+                    "kind": str(row["kind"]),
+                    "summary": _sanitize_retry_summary(str(row["summary"])),
+                    "stage": str(row["stage"]),
+                    "outcome": str(row["outcome"]),
+                    "recorded_at": round(float(row["recorded_at"]) * 1000),
+                    "request_started_at": (
+                        None
+                        if row["request_started_at"] is None
+                        else round(float(row["request_started_at"]) * 1000)
+                    ),
+                    "first_recorded_at": round(float(row["first_recorded_at"]) * 1000),
+                    "last_recorded_at": round(float(row["recorded_at"]) * 1000),
+                    "event_count": int(row["event_count"]),
+                    "retry_count": max(0, int(row["max_attempt"]) - 1),
                 }
                 for row in visible_rows
             ],
@@ -2798,8 +2969,8 @@ def create_proxy_app(
     validate_runtime_database: Callable[[str], dict[str, Any]] | None = None,
     ui_config: Callable[[], Mapping[str, Any]] | None = None,
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
-    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    stream_idle_timeout_seconds: float | None = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float | None = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
     service_name: str = "codex-local-proxy",
     control_asset_dir: Path = CONTROL_ASSET_DIR,
     allowed_proxy_paths: frozenset[str] | None = None,
@@ -2965,7 +3136,10 @@ def create_proxy_app(
         recovery_history = None
         if recovery_history_store is not None:
             try:
-                recovery_history = recovery_history_store.history(limit=1)
+                recovery_history = recovery_history_store.history(
+                    limit=1,
+                    grouped=True,
+                )
             except (OSError, sqlite3.Error):
                 recovery_history = None
         return _public_control_status(
@@ -3013,6 +3187,9 @@ def create_proxy_app(
             history = status["retry"]["history"]
         else:
             try:
+                view = request.query_params.get("view", "raw").strip().lower()
+                if view not in {"raw", "summary"}:
+                    raise ValueError("恢复记录视图无效")
                 limit = int(
                     request.query_params.get("limit", str(RECOVERY_HISTORY_API_LIMIT))
                 )
@@ -3020,6 +3197,7 @@ def create_proxy_app(
                     recovery_history_store.history,
                     limit=limit,
                     cursor=request.query_params.get("cursor"),
+                    grouped=view == "summary",
                 )
             except ValueError as exc:
                 return JSONResponse(status_code=422, content={"detail": str(exc)})
@@ -3367,6 +3545,18 @@ def create_proxy_app(
                 status_code=503,
                 content={"error": {"message": "当前供应商与请求协议不兼容"}},
             )
+        runtime_timeouts = (
+            runtime_settings_snapshot()
+            if runtime_settings_snapshot is not None
+            else None
+        )
+        active_stream_idle_timeout, active_response_headers_timeout = (
+            _resolve_upstream_timeouts(
+                runtime_timeouts,
+                stream_default=stream_idle_timeout_seconds,
+                response_headers_default=upstream_response_headers_timeout_seconds,
+            )
+        )
         return await _forward_request(
             router,
             upstream_client,
@@ -3381,8 +3571,8 @@ def create_proxy_app(
             session_name_resolver=session_name_resolver,
             input_item_id_compatibility_store=active_input_item_id_compatibility_store,
             session_request_coordinator=session_request_coordinator,
-            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
-            upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
+            stream_idle_timeout_seconds=active_stream_idle_timeout,
+            upstream_response_headers_timeout_seconds=active_response_headers_timeout,
         )
 
     return app
@@ -4084,8 +4274,8 @@ async def _forward_request(
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
     session_request_coordinator: SessionRequestCoordinator | None = None,
-    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
-    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    stream_idle_timeout_seconds: float | None = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float | None = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
 ):
     thread_id = _codex_thread_id(request.headers)
     coordinator = session_request_coordinator or SessionRequestCoordinator()
@@ -4147,8 +4337,8 @@ async def _forward_request_with_lease(
     protocol_adapter: Any | None = None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
-    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
-    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    stream_idle_timeout_seconds: float | None = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float | None = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
 ):
     try:
         snapshot = router.begin_request(thread_id=thread_id)
@@ -4395,6 +4585,17 @@ async def _forward_request_with_lease(
                 headers=headers,
                 content=request_body_for_attempt,
             )
+            configure_upstream_request = getattr(
+                attempt_client,
+                "configure_upstream_request",
+                None,
+            )
+            if configure_upstream_request is not None:
+                upstream_request = configure_upstream_request(
+                    upstream_request,
+                    response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
+                    stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+                )
             upstream_response = await _send_upstream_response(
                 attempt_client,
                 upstream_request,

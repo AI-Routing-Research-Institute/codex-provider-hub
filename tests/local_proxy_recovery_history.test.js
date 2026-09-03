@@ -13,7 +13,10 @@ const end = source.indexOf("async function readRecoveryHistory");
 assert.notEqual(start, -1);
 assert.notEqual(end, -1);
 
-const context = vm.createContext({ RECOVERY_HISTORY_DISPLAY_LIMIT: 500 });
+const context = vm.createContext({
+  RECOVERY_HISTORY_DISPLAY_LIMIT: 500,
+  formatRetryKind: (kind) => String(kind || "上游临时错误"),
+});
 vm.runInContext(
   `${source.slice(start, end)}\n` +
     "this.api = { recoveryMetaText, sameRecoveryHistorySnapshot, recoveryHistoryNeedsDetail, shouldRequestRecoveryHistory, recoveryHistoryStatusText, mergeRecoveryHistoryPages, refreshRecoveryHistoryPages, recoveryHistoryForDisplay };",
@@ -222,4 +225,25 @@ test("labels failure and request start times while keeping old records compatibl
   assert.match(current, /^失败 .+ · 开始 .+ · Company · 第 2 次请求 · 已安排重试$/);
   assert.match(legacy, /^失败 .+ · Company · 第 1 次请求 · 已安排重试$/);
   assert.doesNotMatch(legacy, /开始/);
+});
+
+test("labels grouped recovery history as one retrying request", () => {
+  const grouped = context.api.recoveryMetaText({
+    recorded_at: Date.now(),
+    request_started_at: Date.now() - 60_000,
+    attempt: 283,
+    outcome: "retrying",
+    kind: "connection",
+    event_count: 456,
+  }, "Company");
+
+  assert.match(grouped, /重试中/);
+  assert.match(grouped, /第 283 次尝试/);
+  assert.match(grouped, /456 次错误事件/);
+  assert.doesNotMatch(grouped, /失败/);
+  assert.doesNotMatch(grouped, /次请求/);
+});
+
+test("loads grouped recovery history while retaining a raw detail path", () => {
+  assert.match(source, /view: "summary"/);
 });

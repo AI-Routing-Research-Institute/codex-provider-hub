@@ -50,6 +50,7 @@ from local_proxy.core import (
     _public_requests,
     _public_sessions,
     _query_time_range,
+    _resolve_upstream_timeouts,
     _valid_control_request,
     order_proxy_providers,
     retry_policy_from_mapping,
@@ -166,8 +167,8 @@ def create_unified_proxy_app(
     control_asset_dir: Path = CONTROL_ASSET_DIR,
     on_shutdown_requested: Callable[[], None] | None = None,
     update_controller: Any | None = None,
-    stream_idle_timeout_seconds: float = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
-    upstream_response_headers_timeout_seconds: float = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    stream_idle_timeout_seconds: float | None = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    upstream_response_headers_timeout_seconds: float | None = UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
     diagnostic_log: DiagnosticLog | None = None,
 ) -> FastAPI:
     profiles = {"codex": codex, "claude": claude}
@@ -304,6 +305,18 @@ def create_unified_proxy_app(
                 status_code=503,
                 content={"error": {"message": "当前供应商与请求协议不兼容"}},
             )
+        runtime_timeouts = (
+            profile.runtime_settings_snapshot()
+            if profile.runtime_settings_snapshot is not None
+            else None
+        )
+        active_stream_idle_timeout, active_response_headers_timeout = (
+            _resolve_upstream_timeouts(
+                runtime_timeouts,
+                stream_default=stream_idle_timeout_seconds,
+                response_headers_default=upstream_response_headers_timeout_seconds,
+            )
+        )
         return await _forward_request(
             profile.router,
             profile.upstream_client,
@@ -318,8 +331,8 @@ def create_unified_proxy_app(
             session_name_resolver=profile.session_name_resolver,
             input_item_id_compatibility_store=profile.input_item_id_compatibility_store,
             session_request_coordinator=session_request_coordinators[profile.service_id],
-            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
-            upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
+            stream_idle_timeout_seconds=active_stream_idle_timeout,
+            upstream_response_headers_timeout_seconds=active_response_headers_timeout,
         )
 
     return app

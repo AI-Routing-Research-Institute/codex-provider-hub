@@ -16,6 +16,8 @@ from local_proxy.core import (
     HealthStatusUrlStore,
     RetryPolicy,
     RetryPolicyStore,
+    UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
     normalize_health_status_url,
     retry_policy_from_mapping,
 )
@@ -23,9 +25,46 @@ from local_proxy.paths import display_path, resolve_user_path
 
 
 APP_DATA_DIRECTORY_NAME = ".codex-local-proxy"
-SHARED_SETTINGS_VERSION = 2
+SHARED_SETTINGS_VERSION = 3
 PROTOCOL_SETTINGS_VERSION = 1
 SERVICE_IDS = ("codex", "claude")
+UPSTREAM_TIMEOUT_MINUTES_MAX = 7 * 24 * 60
+
+
+def normalize_upstream_timeout_seconds(
+    value: Any,
+    *,
+    field_name: str,
+) -> int | None:
+    """Normalize minute-granularity timeout values stored as seconds."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name}必须是分钟对应的整数秒数或 null")
+    if not float(value).is_integer():
+        raise ValueError(f"{field_name}必须是分钟对应的整数秒数或 null")
+    seconds = int(value)
+    if seconds < 60 or seconds % 60:
+        raise ValueError(f"{field_name}必须至少为 1 分钟且按整分钟设置")
+    if seconds > UPSTREAM_TIMEOUT_MINUTES_MAX * 60:
+        raise ValueError(f"{field_name}不能超过 7 天")
+    return seconds
+
+
+def _load_upstream_timeout(
+    payload: dict[str, Any],
+    field_name: str,
+    default: float,
+) -> int | None:
+    if field_name not in payload:
+        return int(default)
+    try:
+        return normalize_upstream_timeout_seconds(
+            payload[field_name],
+            field_name=field_name,
+        )
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def data_directory() -> Path:
@@ -64,6 +103,12 @@ def default_shared_settings() -> dict[str, Any]:
         "retry": RetryPolicy().as_public_dict(),
         "health_status_url": None,
         "console_ui": CONTROL_UI_DEFAULT,
+        "upstream_stream_idle_timeout_seconds": int(
+            UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS
+        ),
+        "upstream_response_headers_timeout_seconds": int(
+            UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS
+        ),
     }
 
 
@@ -131,6 +176,16 @@ def load_shared_settings(path: Path | None = None) -> dict[str, Any]:
     except ValueError:
         pass
     settings["console_ui"] = normalize_control_ui(payload.get("console_ui"))
+    settings["upstream_stream_idle_timeout_seconds"] = _load_upstream_timeout(
+        payload,
+        "upstream_stream_idle_timeout_seconds",
+        UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    )
+    settings["upstream_response_headers_timeout_seconds"] = _load_upstream_timeout(
+        payload,
+        "upstream_response_headers_timeout_seconds",
+        UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    )
     return settings
 
 
@@ -155,6 +210,16 @@ def _shared_settings_from_mapping(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError:
         pass
     settings["console_ui"] = normalize_control_ui(payload.get("console_ui"))
+    settings["upstream_stream_idle_timeout_seconds"] = _load_upstream_timeout(
+        payload,
+        "upstream_stream_idle_timeout_seconds",
+        UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
+    )
+    settings["upstream_response_headers_timeout_seconds"] = _load_upstream_timeout(
+        payload,
+        "upstream_response_headers_timeout_seconds",
+        UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
+    )
     return settings
 
 
@@ -267,6 +332,8 @@ class SharedSettingsStore:
         database_path: Path,
         health_status_url: str | None,
         console_ui: str,
+        upstream_stream_idle_timeout_seconds: int | None,
+        upstream_response_headers_timeout_seconds: int | None,
     ) -> None:
         with self._lock:
             candidate = dict(self._settings)
@@ -275,6 +342,8 @@ class SharedSettingsStore:
                 database_path=display_path(database_path),
                 health_status_url=health_status_url,
                 console_ui=console_ui,
+                upstream_stream_idle_timeout_seconds=upstream_stream_idle_timeout_seconds,
+                upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
             )
             save_shared_settings(candidate, self.path)
             self._settings = _shared_settings_from_mapping(candidate)
@@ -346,6 +415,12 @@ class SharedRuntimeCoordinator:
             "database_path": settings["database_path"],
             "health_status_url": settings["health_status_url"],
             "console_ui": settings["console_ui"],
+            "upstream_stream_idle_timeout_seconds": settings[
+                "upstream_stream_idle_timeout_seconds"
+            ],
+            "upstream_response_headers_timeout_seconds": settings[
+                "upstream_response_headers_timeout_seconds"
+            ],
             **dict(profile.runtime_metadata()),
             "shared_settings_file": display_path(self.settings_store.path),
         }
@@ -399,9 +474,23 @@ class SharedRuntimeCoordinator:
         if not isinstance(database_value, str) or not database_value.strip():
             raise ValueError("数据来源不能为空")
         health_url = normalize_health_status_url(payload.get("health_status_url"))
+        current_settings = self.settings_store.snapshot()
+        stream_idle_timeout_seconds = normalize_upstream_timeout_seconds(
+            payload.get(
+                "upstream_stream_idle_timeout_seconds",
+                current_settings["upstream_stream_idle_timeout_seconds"],
+            ),
+            field_name="SSE 流空闲超时",
+        )
+        response_headers_timeout_seconds = normalize_upstream_timeout_seconds(
+            payload.get(
+                "upstream_response_headers_timeout_seconds",
+                current_settings["upstream_response_headers_timeout_seconds"],
+            ),
+            field_name="上游响应头超时",
+        )
         console_ui = payload.get(
-            "console_ui",
-            self.settings_store.snapshot()["console_ui"],
+            "console_ui", current_settings["console_ui"]
         )
         if not isinstance(console_ui, str) or console_ui not in CONTROL_UI_MODES:
             raise ValueError("控制台界面必须是 classic 或 modern")
@@ -424,6 +513,8 @@ class SharedRuntimeCoordinator:
                 database_path=source,
                 health_status_url=health_url,
                 console_ui=console_ui,
+                upstream_stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+                upstream_response_headers_timeout_seconds=response_headers_timeout_seconds,
             )
             for current_service_id, providers in loaded.items():
                 self.profiles[current_service_id].apply_runtime_database(source, providers)
