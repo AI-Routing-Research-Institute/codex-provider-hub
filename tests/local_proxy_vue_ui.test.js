@@ -441,19 +441,33 @@ test("Vue Token values use the classic compact formatter and labeled units", () 
   assert.doesNotMatch(requests, /function formatNumber/);
 });
 
-test("Token share poster uses the 600x1000 canvas and shared safe layout", () => {
+test("Token share poster redraws as the terminal-style card", () => {
   const shareCard = fs.readFileSync(path.join(root, "components", "ShareCardDialog.vue"), "utf8");
   const shareCardData = fs.readFileSync(path.join(root, "share-card.js"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 
-  assert.match(shareCard, /class="share-card-canvas" width="600" height="1000"/);
-  assert.match(shareCard, /const height = 1000/);
-  assert.match(shareCard, /posterLayout\(/);
-  assert.match(shareCard, /function legendRows\(/);
-  assert.match(shareCardData, /export function posterLayout\(/);
-  assert.match(shareCard, /layout\.legendTop/);
-  assert.match(shareCard, /layout\.latestBattleY/);
-  assert.match(shareCard, /layout\.dividerY/);
-  assert.match(shareCard, /layout\.footerY/);
+  assert.match(shareCard, /class="share-card-canvas share-card-canvas-terminal" width="436" height="509"/);
+  assert.match(shareCard, /terminalCardTheme\(\)/);
+  assert.match(shareCard, /document\.fonts\.ready/);
+  assert.match(shareCard, /today's-usage\.log/);
+  assert.match(shareCard, /dotR|drawTitlebar/);
+  assert.match(shareCard, /tokens 消耗 · \$\{card\.badgeTitle\}/);
+  assert.match(shareCard, /较昨日全天/);
+  assert.match(shareCard, /独揽今日全部用量/);
+  assert.match(shareCard, /最晚一战 \$\{card\.latestBattle\}/);
+  assert.match(shareCard, /你正在敲代码/);
+  assert.match(shareCard, /rgba\(255, 255, 255, 0\.012\)/);
+  assert.match(shareCard, /createLinearGradient\(bodyLeft, heroNumY - 40, bodyRight, heroNumY\)/);
+  assert.match(shareCardData, /export function terminalCardTheme\(/);
+  assert.match(shareCardData, /ember1: '#ff5f2e'/);
+  assert.match(shareCardData, /JetBrains Mono/);
+  assert.match(shareCardData, /Space Grotesk/);
+  assert.doesNotMatch(shareCardData, /posterStars/);
+  assert.doesNotMatch(shareCardData, /posterLayout/);
+  assert.match(styles, /family=JetBrains\+Mono/);
+  assert.match(styles, /family=Space\+Grotesk/);
+  assert.match(styles, /\.share-terminal-button\.primary/);
+  assert.match(styles, /\.share-card-canvas-terminal/);
 });
 
 test("Vue provider usage opens request details and positions the popover from its anchor", () => {

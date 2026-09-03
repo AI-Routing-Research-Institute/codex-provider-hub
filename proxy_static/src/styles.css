@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -617,10 +618,14 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .share-card-stage { display: grid; place-items: center; }
 .share-card-placeholder { padding: 60px 0; color: var(--muted); font-size: 13px; }
 .share-card-canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: min(66vh, 720px); border-radius: 14px; box-shadow: 0 12px 32px rgb(0 0 0 / .25); }
+.share-card-canvas-terminal { max-width: min(380px, 100%); border-radius: 10px; box-shadow: none; }
 .share-card-empty { margin: 0; color: var(--amber); font-size: 12px; }
 .share-card-notice { margin: 0; color: var(--teal); font-size: 12px; }
 .share-card-notice.error { color: var(--red); }
 .share-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.share-card-actions-terminal { display: flex; gap: 10px; }
+.share-terminal-button { flex: 1; font-family: var(--font-mono); font-size: 12.5px; padding: 10px 0; border-radius: 6px; border: 1px solid #262b33; background: #181c22; color: #e9e6e0; cursor: pointer; }
+.share-terminal-button.primary { background: linear-gradient(100deg, #ff5f2e, #ffb020); border: none; color: #1a0e05; font-weight: 600; }
 .monitor-list { display: grid; gap: 8px; margin-top: 16px; }
 .monitor-order-hint { margin-top: 10px; color: var(--muted); font-size: var(--font-meta); }
 .monitor-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface-soft); }
