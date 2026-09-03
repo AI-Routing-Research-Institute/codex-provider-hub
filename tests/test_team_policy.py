@@ -93,6 +93,7 @@ class ChangeRecordTests(unittest.TestCase):
         record = parse_change_record(self.write_record())
 
         self.assertEqual(record.metadata["release_bump"], "minor")
+        self.assertEqual(record.title, "Agent delivery")
         self.assertEqual(record.sections["目标"], "建立 Agent 自驱交付流水线。")
         validate_change_record(record, required_status="planned")
 
@@ -452,12 +453,16 @@ class VerificationBaselineTests(unittest.TestCase):
 
 
 class ReleasePlanningTests(unittest.TestCase):
-    def make_record(self, bump: str, title: str) -> ChangeRecord:
+    def make_record(self, bump: str, title: str, *, type: str = "feature", headline: str | None = None, goal: str | None = None) -> ChangeRecord:
+        metadata = {"id": title, "type": type, "release_bump": bump, "status": "verified"}
+        if headline is not None:
+            metadata["headline"] = headline
         return ChangeRecord(
             path=Path(f"docs/changes/{title}.md"),
-            metadata={"id": title, "type": "feature", "release_bump": bump, "status": "verified"},
+            metadata=metadata,
+            title=title,
             sections={
-                "目标": title,
+                "目标": goal if goal is not None else title,
                 "现状": "old",
                 "设计范围": "scope",
                 "非目标": "none",
@@ -478,14 +483,60 @@ class ReleasePlanningTests(unittest.TestCase):
         self.assertTrue(plan["release"])
         self.assertEqual(plan["tag"], "v0.2.0")
 
-    def test_none_records_do_not_release_and_notes_include_verified_changes(self) -> None:
+    def test_none_records_do_not_release_and_notes_stay_plain(self) -> None:
         record = self.make_record("none", "docs-only")
         plan = build_release_plan("v0.1.7", [record])
 
         self.assertFalse(plan["release"])
-        notes = render_release_notes("v0.1.8", [record])
+        notes = render_release_notes("v1.8.0", [record])
         self.assertIn("docs-only", notes)
-        self.assertIn("验证结果", notes)
+        self.assertIn("## 技术细节", notes)
+        self.assertIn("/blob/v1.8.0/docs/changes/", notes)
+        self.assertNotIn("验证结果", notes)
+        self.assertNotIn("实际改动", notes)
+
+    def test_release_notes_group_by_type_and_prefer_headline(self) -> None:
+        feature = self.make_record(
+            "minor",
+            "feature-x",
+            goal="在新版控制台新增“用量趋势”视图：以时间曲线展示 token 消耗（输入/输出/合计）随时间的变化，按小时或按天分桶",
+        )
+        fix = self.make_record(
+            "patch",
+            "fix-y",
+            type="fix",
+            headline="分享到微信不再出现白色边角",
+            goal="导出画布整幅填充 #0b0d10 深色底板（四周 12px），`context.translate(margin, margin)` 于卡片原点做既有圆角裁剪",
+        )
+        chore = self.make_record("patch", "chore-z", type="chore", goal="同步门禁描述。")
+
+        notes = render_release_notes("v1.10.2", [feature, fix, chore])
+
+        self.assertTrue(notes.startswith("# Codex 本地中转 v1.10.2"))
+        self.assertIn("本次更新 3 项改进。", notes)
+        self.assertIn("## ✨ 新功能", notes)
+        self.assertIn("## 🐞 问题修复", notes)
+        self.assertIn("## 🛠️ 其他改进", notes)
+        self.assertIn("**feature-x**：在新版控制台新增“用量趋势”视图", notes)
+        self.assertNotIn("以时间曲线展示", notes)
+        self.assertIn("**fix-y**：分享到微信不再出现白色边角", notes)
+        self.assertNotIn("translate", notes)
+        self.assertNotIn("`", notes)
+        self.assertIn("**chore-z**：同步门禁描述", notes)
+        self.assertEqual(notes.count("/blob/v1.10.2/docs/changes/"), 3)
+
+    def test_release_notes_truncate_long_titles_and_brackets(self) -> None:
+        long_record = self.make_record(
+            "minor",
+            "a-very-long-title" * 3,
+            goal="把图表升级为多种可切换的图型，视觉规范参考开源 Skill Lieflat Charts（手写 SVG 复刻，不复制其代码）",
+        )
+
+        notes = render_release_notes("v1.10.2", [long_record])
+
+        self.assertIn("…**：", notes)
+        bracketed = [line for line in notes.splitlines() if line.startswith("- **")][0]
+        self.assertFalse(bracketed.rstrip("…").endswith("（"), bracketed)
 
 
 if __name__ == "__main__":
