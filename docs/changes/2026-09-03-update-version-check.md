@@ -57,6 +57,7 @@ status = "verified"
 - `proxy_static/classic/index.html` + `proxy_static/classic/app.js`：同上口径，版本行改为 `当前 vX / 最新 vY`，`check` 兼容两字段并区分手动下载分支，更新按钮沿用 `has_update && supported`（兼容别名）。
 - `tests/test_updater.py`：新增无产物时 `newer_available=True` 断言、`newer_available` 跟踪用例、`UpdateController` 契约用例（别名/刷新/透传）。
 - `tests/test_server.py`：`FakeUpdateController` 对齐新契约，`check` 与无 controller 用例追加新字段断言。
+- `proxy_static/dist`：随 pre-push 门禁重新构建并同步提交，生产包包含本次界面修复。
 
 ## 验证结果
 
