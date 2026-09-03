@@ -1,3 +1,4 @@
+import os
 import json
 import sqlite3
 import subprocess
@@ -235,6 +236,7 @@ class CodexConfigTests(unittest.TestCase):
             frozen_command,
             subprocess.list2cmdline([executable, "--no-browser"]),
         )
+        self.assertIn("start_local_proxy_hidden.vbs", source_command)
         self.assertIn("local_proxy_app.py", source_command)
         self.assertIn("--tray", source_command)
         self.assertTrue(source_command.endswith("--no-browser"))
@@ -255,6 +257,12 @@ class CodexConfigTests(unittest.TestCase):
             command,
             subprocess.list2cmdline(
                 [
+                    str(Path(os.environ["WINDIR"]) / "System32" / "wscript.exe"),
+                    str(
+                        Path(local_proxy_app.__file__).resolve().parents[1]
+                        / "scripts"
+                        / "start_local_proxy_hidden.vbs"
+                    ),
                     str(pythonw.resolve()),
                     str(Path(local_proxy_app.__file__).resolve().parents[1] / "local_proxy_app.py"),
                     "--tray",
@@ -262,6 +270,21 @@ class CodexConfigTests(unittest.TestCase):
                 ]
             ),
         )
+
+    def test_legacy_source_auto_start_is_migrated_to_hidden_command(self) -> None:
+        with (
+            mock.patch.object(local_proxy_app, "auto_start_supported", return_value=True),
+            mock.patch.object(
+                local_proxy_app,
+                "_read_auto_start_value",
+                return_value=local_proxy_app._legacy_source_auto_start_command(),
+            ),
+            mock.patch.object(local_proxy_app, "auto_start_command", return_value="new command"),
+            mock.patch.object(local_proxy_app, "_write_auto_start_value") as write_value,
+        ):
+            self.assertTrue(local_proxy_app.is_auto_start_enabled())
+
+        write_value.assert_called_once_with("new command")
 
     def test_auto_start_state_and_changes_use_current_user_value(self) -> None:
         with (
@@ -328,8 +351,11 @@ class CodexConfigTests(unittest.TestCase):
             local_proxy_app.launch_replacement_process()
 
         command = popen.call_args.args[0]
-        self.assertEqual(command[0], sys.executable)
-        self.assertEqual(Path(command[1]).name, "local_proxy_app.py")
+        self.assertEqual(
+            command[0],
+            str(Path(os.environ["WINDIR"]) / "System32" / "wscript.exe"),
+        )
+        self.assertEqual(Path(command[1]).name, "start_local_proxy_hidden.vbs")
         self.assertEqual(command[-2:], ["--tray", "--no-browser"])
 
     def test_tray_restart_stops_server_and_returns_restart_request(self) -> None:
@@ -609,10 +635,21 @@ class CodexConfigTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('"local_proxy_app.py"', script)
+        self.assertIn("start_local_proxy_hidden.vbs", script)
+        self.assertIn("wscript.exe", script)
         self.assertIn("--tray", script)
         self.assertIn("--no-browser", script)
         self.assertIn("IconLocation", script)
+        self.assertNotIn('$shortcut.TargetPath = $pythonw', script)
         self.assertNotIn("codex_local_proxy_gui.py", script)
+
+        launcher = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "start_local_proxy_hidden.vbs"
+        ).read_text(encoding="ascii")
+        self.assertIn("GetAbsolutePathName", launcher)
+        self.assertIn("shell.Run command, 0, False", launcher)
 
     def test_app_icon_has_transparent_background(self) -> None:
         icon = local_proxy_app.create_app_icon()
