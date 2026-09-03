@@ -20,7 +20,7 @@
       <div class="settings-actions"><span>{{ runtimeSummary }}</span><button class="primary-button" type="submit" :disabled="saving">{{ saving ? '保存中...' : '保存设置' }}</button></div>
     </form>
     <div class="settings-form update-panel">
-      <div class="setting-row setting-readonly-row"><span><strong>版本与更新</strong><small>{{ update.hint || '检测最新发布版本' }}</small></span><div class="setting-control-with-action"><code>{{ update.current_version || '—' }}</code><button class="secondary-button setting-action-button" type="button" @click="checkUpdate">检查更新</button><button v-if="update.update_available" class="primary-button setting-action-button" type="button" @click="applyUpdate">更新并重启</button></div></div>
+      <div class="setting-row setting-readonly-row"><span><strong>版本与更新</strong><small>{{ update.hint || '检测最新发布版本' }}</small></span><div class="setting-control-with-action"><code>当前 {{ update.current_version || '—' }} / 最新 {{ update.latest_version || '—' }}</code><button class="secondary-button setting-action-button" type="button" @click="checkUpdate">检查更新</button><button v-if="updateAvailable && update.supported" class="primary-button setting-action-button" type="button" @click="applyUpdate">更新并重启</button></div></div>
       <div v-if="updateMessage" class="setting-notice">{{ updateMessage }}</div>
     </div>
   </section>
@@ -47,6 +47,7 @@ const activeConsoleUi = 'modern'
 const runtimeSummary = computed(() => Number(settings.value.configured_port) !== Number(settings.value.active_port) ? `当前使用 ${settings.value.active_port}，重启后切换到 ${settings.value.configured_port}` : '数据源和检测地址保存后即时生效')
 function setTimeoutEditor(selection, minutes, seconds) { if (seconds === null) { selection.value = 0; return }; const numeric = Number(seconds); if (timeoutPresetValues.has(numeric)) { selection.value = numeric; minutes.value = numeric / 60 } else { selection.value = 'custom'; minutes.value = numeric / 60 } }
 function timeoutSeconds(selection, minutes, label) { if (selection === 0) return null; if (selection === 'custom') { const value = Number(minutes); if (!Number.isInteger(value) || value < 1 || value > 10080) throw new Error(`${label}必须是 1 到 10080 之间的整数分钟`); return value * 60 }; return Number(selection) }
+const updateAvailable = computed(() => update.value.update_available ?? update.value.has_update ?? false)
 function syncButtonVisibility() { emit('launch-command-visibility-change', settings.value.show_provider_launch_command !== false); emit('status-upload-visibility-change', settings.value.show_status_upload !== false) }
 async function loadSettings() { try { settings.value = { ...settings.value, ...(await controlFetch('/api/runtime-settings')) }; settings.value.health_status_url ||= ''; setTimeoutEditor(responseHeadersTimeoutSelection, responseHeadersTimeoutMinutes, settings.value.upstream_response_headers_timeout_seconds); setTimeoutEditor(streamIdleTimeoutSelection, streamIdleTimeoutMinutes, settings.value.upstream_stream_idle_timeout_seconds); syncButtonVisibility() } catch (error) { message.value = `读取失败：${error.message}` }; try { update.value = await controlFetch('/api/update') } catch {} }
 async function validateDatabase() { try { const result = await controlFetch('/api/runtime-settings/validate-database', jsonOptions('POST', { database_path: settings.value.database_path })); settings.value.database_path = result.database_path; message.value = `数据来源可用，已读取 ${result.provider_count} 个供应商。` } catch (error) { message.value = `数据来源不可用：${error.message}` } }
@@ -85,7 +86,7 @@ async function saveSettings() {
   }
 }
 async function copyPath() { await navigator.clipboard.writeText(settings.value.data_directory || '') ; message.value = '本地数据目录已复制。' }
-async function checkUpdate() { try { update.value = await controlFetch('/api/update/check', { method: 'POST' }); updateMessage.value = update.value.update_available ? `发现新版本 ${update.value.latest_version || ''}` : '当前已经是最新版本。' } catch (error) { updateMessage.value = `检查失败：${error.message}` } }
+async function checkUpdate() { try { update.value = await controlFetch('/api/update/check', { method: 'POST' }); const hasUpdate = update.value.update_available ?? update.value.has_update ?? false; const newer = update.value.newer_available ?? false; const latest = update.value.latest_version || ''; if (hasUpdate) updateMessage.value = `发现新版本 ${latest}`; else if (newer) updateMessage.value = `发现新版本 ${latest}，当前平台请手动下载安装。`; else updateMessage.value = '当前已经是最新版本。' } catch (error) { updateMessage.value = `检查失败：${error.message}` } }
 async function applyUpdate() { try { await controlFetch('/api/update/apply', { method: 'POST' }); updateMessage.value = '更新已开始，完成后将自动重启。' } catch (error) { updateMessage.value = `更新失败：${error.message}` } }
 onMounted(loadSettings)
 </script>
