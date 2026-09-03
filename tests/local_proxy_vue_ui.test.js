@@ -252,6 +252,13 @@ test("usage trend view matches the shared page padding and content width", () =>
   assert.ok(narrow, "narrow-screen usage padding missing");
 });
 
+test("usage trend chart toggle stays on one line", () => {
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+
+  assert.match(styles, /\.usage-chart-toggle \{ display: inline-flex; flex-shrink: 0;/);
+  assert.match(styles, /\.usage-chart-toggle-button \{ min-width: 48px;[^}]*white-space: nowrap;/);
+});
+
 test("provider action visibility follows the saved runtime settings", () => {
   const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
@@ -473,7 +480,7 @@ test("Token share poster redraws as the terminal-style card", () => {
   const shareCardData = fs.readFileSync(path.join(root, "share-card.js"), "utf8");
   const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 
-  assert.match(shareCard, /class="share-card-canvas share-card-canvas-terminal" width="436" height="509"/);
+  assert.match(shareCard, /class="share-card-canvas share-card-canvas-terminal" width="360" height="640"/);
   assert.match(shareCard, /terminalCardTheme\(\)/);
   assert.match(shareCard, /document\.fonts\.ready/);
   assert.match(shareCard, /today's-usage\.log/);
@@ -484,7 +491,11 @@ test("Token share poster redraws as the terminal-style card", () => {
   assert.match(shareCard, /最晚一战 \$\{card\.latestBattle\}/);
   assert.match(shareCard, /你正在敲代码/);
   assert.match(shareCard, /rgba\(255, 255, 255, 0\.012\)/);
-  assert.match(shareCard, /createLinearGradient\(bodyLeft, heroNumY - 40, bodyRight, heroNumY\)/);
+  assert.match(shareCard, /createLinearGradient\(bodyLeft, heroNumY - 48, bodyRight, heroNumY\)/);
+  assert.match(shareCard, /usage-timeline\?usage_window=today/);
+  assert.match(shareCard, /今日时段分布/);
+  assert.match(shareCard, /fillRect\(0, 0, cardWidth, cardHeight\)/);
+  assert.doesNotMatch(shareCard, /shadowColor/);
   assert.match(shareCardData, /export function terminalCardTheme\(/);
   assert.match(shareCardData, /ember1: '#ff5f2e'/);
   assert.match(shareCardData, /JetBrains Mono/);
