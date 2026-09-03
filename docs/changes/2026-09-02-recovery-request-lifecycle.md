@@ -88,17 +88,20 @@ last known activity rather than exact upstream execution time.
   `proxy_static/src/components/ProvidersView.vue` display one lifecycle per
   request, label attempts as attempts, and distinguish retrying state from a
   final failure.
+- `proxy_static/dist` is regenerated from the merged Vue sources so the
+  production assets include the recovery lifecycle changes.
 - `tests/test_proxy_core.py`, `tests/local_proxy_recovery_history.test.js`,
   and `tests/local_proxy_vue_ui.test.js` cover migration, recovery duration,
   grouped pagination, lifecycle labels, and summary API usage.
 
 ## 验证结果
 
-- `python -m unittest discover -s tests -p "test_*.py"` -> 534 tests passed.
-- All `tests/*.test.js` files run with `node --test` -> passed.
-- `npm run build --prefix proxy_static` -> production build passed.
-- `python -m compileall -q local_proxy provider_status` -> passed.
-- `node --check proxy_static/classic/app.js` -> passed.
+- `.venv\\Scripts\\python.exe -m unittest discover -s tests -p "test_*.py"` -> 541 tests passed in 84.500s.
+- `Get-ChildItem -Path tests -File -Filter *.test.js | Sort-Object Name | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }` -> 18 files and 89 tests passed.
+- `npm run build --prefix proxy_static` -> Vite production build passed with 29 modules; final assets are `index-CFci3PoS.js` and `index-CJ1v9bgC.css` after syncing main.
+- `.venv\\Scripts\\python.exe -m compileall -q provider_status local_proxy scripts tests` -> passed.
+- `node --check proxy_static/classic/app.js` and all JavaScript files under `proxy_static/src` and `provider_status/static` -> passed.
+- `cscript.exe //nologo scripts\\start_local_proxy_hidden.vbs <pythonw> <local_proxy_app.py> --smoke-test` -> passed.
 - `git diff --check` -> passed.
 
 ## PR
