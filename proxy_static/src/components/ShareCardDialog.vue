@@ -8,7 +8,7 @@
       <p v-if="error" class="share-card-error" role="alert">{{ error }}</p>
       <div class="share-card-stage">
         <div v-if="loading" class="share-card-placeholder">正在生成战报…</div>
-        <canvas v-show="!loading" ref="canvasElement" class="share-card-canvas share-card-canvas-terminal" width="360" height="640" aria-label="今日 Token 战报海报预览" />
+        <canvas v-show="!loading" ref="canvasElement" class="share-card-canvas share-card-canvas-terminal" width="384" height="664" aria-label="今日 Token 战报海报预览" />
       </div>
       <p v-if="!loading && data && !data.hasData" class="share-card-empty">今天还没有请求记录，先领一张零消耗战报也不错。</p>
       <p v-if="notice" class="share-card-notice" :class="{ error: notice.tone === 'error' }" role="status">{{ notice.detail }}</p>
@@ -151,15 +151,23 @@ function drawCard() {
   const bodyRight = cardWidth - theme.bodyPaddingX
   const bodyWidth = cardWidth - theme.bodyPaddingX * 2
 
-  canvas.width = cardWidth * scale
-  canvas.height = cardHeight * scale
-  canvas.style.aspectRatio = `${cardWidth} / ${cardHeight}`
+  const margin = theme.backdropMargin
+  const canvasWidth = cardWidth + margin * 2
+  const canvasHeight = cardHeight + margin * 2
+
+  canvas.width = canvasWidth * scale
+  canvas.height = canvasHeight * scale
+  canvas.style.aspectRatio = `${canvasWidth} / ${canvasHeight}`
   const context = canvas.getContext('2d')
   context.scale(scale, scale)
+  context.translate(margin, margin)
   context.textBaseline = 'alphabetic'
   context.textAlign = 'left'
 
-  // 满幅圆角卡片：无透明边距，预览阴影由 CSS 提供
+  // 深色底板铺满画布：导出图不含透明像素，微信压平 alpha 也不会出现白色
+  context.fillStyle = theme.backdrop
+  context.fillRect(-margin, -margin, canvasWidth, canvasHeight)
+
   context.save()
   roundedRect(context, 0, 0, cardWidth, cardHeight, cornerRadius)
   context.clip()

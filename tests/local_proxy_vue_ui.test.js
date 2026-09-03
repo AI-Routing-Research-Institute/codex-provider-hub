@@ -501,7 +501,7 @@ test("Token share poster redraws as the terminal-style card", () => {
   const shareCardData = fs.readFileSync(path.join(root, "share-card.js"), "utf8");
   const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 
-  assert.match(shareCard, /class="share-card-canvas share-card-canvas-terminal" width="360" height="640"/);
+  assert.match(shareCard, /class="share-card-canvas share-card-canvas-terminal" width="384" height="664"/);
   assert.match(shareCard, /terminalCardTheme\(\)/);
   assert.match(shareCard, /document\.fonts\.ready/);
   assert.match(shareCard, /today's-usage\.log/);
@@ -516,6 +516,9 @@ test("Token share poster redraws as the terminal-style card", () => {
   assert.match(shareCard, /usage-timeline\?usage_window=today/);
   assert.match(shareCard, /今日时段分布/);
   assert.match(shareCard, /fillRect\(0, 0, cardWidth, cardHeight\)/);
+  assert.match(shareCard, /context\.fillStyle = theme\.backdrop/);
+  assert.match(shareCard, /fillRect\(-margin, -margin, canvasWidth, canvasHeight\)/);
+  assert.match(shareCard, /context\.translate\(margin, margin\)/);
   assert.doesNotMatch(shareCard, /shadowColor/);
   assert.match(shareCardData, /export function terminalCardTheme\(/);
   assert.match(shareCardData, /ember1: '#ff5f2e'/);
