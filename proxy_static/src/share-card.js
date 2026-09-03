@@ -116,51 +116,34 @@ export function latestBattleLabel(lastRequestAt) {
   return `${hour}:${minute}`
 }
 
-export function posterStars({ count, width, height, seed = 20260901 }) {
-  const points = []
-  let state = Math.floor(Math.abs(seed)) % 2147483647 || 1
-  const next = () => {
-    state = (state * 48271) % 2147483647
-    return state / 2147483647
-  }
-  for (let index = 0; index < count; index += 1) {
-    points.push({
-      x: Math.round(next() * width),
-      y: Math.round(next() * height),
-      radius: 0.8 + next() * 1.8,
-      alpha: 0.25 + next() * 0.65,
-      sparkle: index % 7 === 0
-    })
-  }
-  return points
-}
-
-export function posterLayout({ providerCount = 0, legendRows = providerCount > 0 ? 1 : 0, width = 600, height = 1000 } = {}) {
-  const rows = Math.max(0, Math.min(2, Number(legendRows) || 0))
-  const donutCenterY = 790
-  const donutRadius = 62
-  const donutWidth = 20
-  const donutBottom = donutCenterY + donutRadius + donutWidth / 2
-  const legendTop = donutBottom + 18
-  const legendRowHeight = 18
-  const legendBottom = rows ? legendTop + rows * legendRowHeight : legendTop
-  const latestBattleY = Math.max(930, legendBottom + 28)
-  const dividerY = Math.max(950, latestBattleY + 18)
-  const footerY = Math.min(height - 22, dividerY + 26)
+export function terminalCardTheme() {
   return {
-    width,
-    height,
-    providerCount: Math.max(0, Number(providerCount) || 0),
-    legendRows: rows,
-    donutCenterY,
-    donutRadius,
-    donutWidth,
-    donutBottom,
-    legendTop,
-    legendRowHeight,
-    legendBottom,
-    latestBattleY,
-    dividerY,
-    footerY
+    margin: 28,
+    cardWidth: 380,
+    titlebarHeight: 36,
+    bodyPaddingTop: 26,
+    bodyPaddingBottom: 22,
+    bodyPaddingX: 22,
+    colors: {
+      bgDeep: '#0b0d10',
+      panel: '#14171c',
+      panel2: '#181c22',
+      border: '#262b33',
+      text: '#e9e6e0',
+      muted: '#868c96',
+      muted2: '#565c66',
+      ember1: '#ff5f2e',
+      ember2: '#ffb020',
+      good: '#49d67a',
+      cache: '#6fb7ff',
+      out: '#c893ff',
+      dotR: '#ff5f56',
+      dotY: '#ffbd2e',
+      dotG: '#27c93f'
+    },
+    fonts: {
+      mono: '"JetBrains Mono", ui-monospace, Consolas, "Courier New", monospace',
+      display: '"Space Grotesk", "Segoe UI", "PingFang SC", sans-serif'
+    }
   }
 }

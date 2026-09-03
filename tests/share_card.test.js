@@ -157,34 +157,25 @@ test("latestBattleLabel formats millisecond timestamps", async () => {
   assert.equal(latestBattleLabel(Number.NaN), "")
 })
 
-test("posterStars is deterministic for the same seed", async () => {
-  const { posterStars } = await import(sourceUrl)
+test("terminalCardTheme pins the terminal card palette, fonts, and metrics", async () => {
+  const { terminalCardTheme } = await import(sourceUrl)
 
-  const first = posterStars({ count: 8, width: 600, height: 940, seed: 42 })
-  const second = posterStars({ count: 8, width: 600, height: 940, seed: 42 })
-  const other = posterStars({ count: 8, width: 600, height: 940, seed: 43 })
-
-  assert.deepEqual(first, second)
-  assert.notDeepEqual(first, other)
-  assert.equal(first.length, 8)
-  for (const star of first) {
-    assert.ok(star.x >= 0 && star.x <= 600)
-    assert.ok(star.y >= 0 && star.y <= 940)
-    assert.ok(star.radius >= 0.8)
-  }
-})
-
-test("posterLayout keeps donut, legend, battle label, and footer separated", async () => {
-  const { posterLayout } = await import(sourceUrl)
-
-  for (const legendRows of [0, 1, 2]) {
-    const layout = posterLayout({ providerCount: legendRows ? 4 : 0, legendRows })
-    assert.equal(layout.width, 600)
-    assert.equal(layout.height, 1000)
-    assert.ok(layout.donutBottom < layout.legendTop)
-    assert.ok(layout.legendBottom + 28 <= layout.latestBattleY)
-    assert.ok(layout.latestBattleY + 18 <= layout.dividerY)
-    assert.ok(layout.dividerY < layout.footerY)
-    assert.ok(layout.footerY < layout.height)
-  }
+  const theme = terminalCardTheme()
+  assert.equal(theme.cardWidth, 380)
+  assert.equal(theme.margin, 28)
+  assert.equal(theme.titlebarHeight, 36)
+  assert.equal(theme.bodyPaddingX, 22)
+  assert.equal(theme.colors.panel, "#14171c")
+  assert.equal(theme.colors.panel2, "#181c22")
+  assert.equal(theme.colors.border, "#262b33")
+  assert.equal(theme.colors.ember1, "#ff5f2e")
+  assert.equal(theme.colors.ember2, "#ffb020")
+  assert.equal(theme.colors.good, "#49d67a")
+  assert.equal(theme.colors.cache, "#6fb7ff")
+  assert.equal(theme.colors.out, "#c893ff")
+  assert.equal(theme.colors.dotR, "#ff5f56")
+  assert.equal(theme.colors.dotY, "#ffbd2e")
+  assert.equal(theme.colors.dotG, "#27c93f")
+  assert.match(theme.fonts.mono, /JetBrains Mono/)
+  assert.match(theme.fonts.display, /Space Grotesk/)
 })
