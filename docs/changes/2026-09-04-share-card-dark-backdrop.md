@@ -58,4 +58,4 @@ status = "verified"
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/85
