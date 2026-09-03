@@ -21,6 +21,9 @@ test("classic console saves the selected UI and reloads without an override", ()
   assert.doesNotMatch(source, /setTimeout\(\(\) => \{[\s\S]*searchParams\.delete\("ui"\)/);
   assert.match(source, /searchParams\.delete\("ui"\)/);
   assert.match(styles, /\.setting-segmented/);
+  assert.match(styles, /\.setting-readonly-row\s+code\s*\{[^}]*align-self:\s*center/s);
+  assert.match(html, /id="update-github-link"/);
+  assert.match(html, /href="https:\/\/github\.com\/AI-Routing-Research-Institute\/codex-provider-hub"/);
 });
 
 test("classic provider editor round-trips the model rewrite field", () => {

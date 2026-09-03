@@ -1033,13 +1033,15 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .setting-toggle input[type="checkbox"]:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 .setting-toggle input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .55; }
 .setting-control-with-action { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.update-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+a.secondary-button.setting-action-button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
 .timeout-control { min-width: 0; display: block; }
 .timeout-control.custom { display: grid; grid-template-columns: minmax(0, 1fr) 108px; gap: 8px; }
 .timeout-custom-input[hidden] { display: none; }
 .setting-action-button { min-height: 34px; white-space: nowrap; }
 .setting-readonly-row { grid-template-columns: minmax(0, 1fr) 225px; }
 .setting-path-value { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.setting-readonly-row code { overflow: hidden; color: var(--teal); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.setting-readonly-row code { overflow: hidden; align-self: center; color: var(--teal); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .setting-notice { padding: 10px 16px; border-bottom: 1px solid var(--warning-border); background: var(--amber-soft); color: var(--warning-text); font-size: 11px; line-height: 1.5; }
 .settings-actions { min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 11px 16px; background: var(--surface-soft); }
 .settings-actions span { color: var(--muted); font-size: 11px; }
