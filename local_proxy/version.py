@@ -33,15 +33,17 @@ def resolve_app_version(
         "--abbrev=0",
         "HEAD",
     )
+    options: dict[str, object] = {
+        "cwd": repository,
+        "check": True,
+        "capture_output": True,
+        "text": True,
+        "timeout": 2,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        result = runner(
-            command,
-            cwd=repository,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
+        result = runner(command, **options)
     except (OSError, subprocess.SubprocessError):
         return fallback
 

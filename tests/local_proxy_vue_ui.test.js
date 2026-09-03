@@ -205,6 +205,16 @@ test("Vue runtime settings switch between classic and modern consoles", () => {
   assert.match(styles, /\.setting-segmented/);
 });
 
+test("Vue runtime settings expose configurable upstream timeouts", () => {
+  const runtime = fs.readFileSync(path.join(root, "components", "RuntimeView.vue"), "utf8");
+  assert.match(runtime, /上游响应头超时/);
+  assert.match(runtime, /SSE 流空闲超时/);
+  assert.match(runtime, /自定义分钟/);
+  assert.match(runtime, /永不/);
+  assert.match(runtime, /upstream_response_headers_timeout_seconds/);
+  assert.match(runtime, /upstream_stream_idle_timeout_seconds/);
+});
+
 test("shared time range selector uses day precision and stays anchored", async () => {
   const selector = fs.readFileSync(path.join(root, "components", "TimeRangeSelect.vue"), "utf8");
   const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
@@ -469,6 +479,7 @@ test("Vue recovery details load history and use dynamic popover positioning", ()
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
   assert.match(providers, /v-if="hasRecoveryDetails" ref="recoveryDetailsButton"/);
   assert.match(providers, /api\/recovery-history\?/);
+  assert.match(providers, /view: 'summary'/);
   assert.match(providers, /recoveryNextCursor/);
   assert.match(providers, /item\.provider_id/);
   assert.match(providers, /item\.summary/);

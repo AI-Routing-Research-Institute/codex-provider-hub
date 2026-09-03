@@ -280,6 +280,38 @@
             </div>
           </div>
           <div class="setting-row">
+            <label for="runtime-response-headers-timeout"><strong>上游响应头超时</strong><small>等待上游返回响应头；永不表示不限制等待时间</small></label>
+            <div class="timeout-control" data-timeout-control="response-headers">
+              <select id="runtime-response-headers-timeout" aria-label="上游响应头超时">
+                <option value="60">1 分钟</option>
+                <option value="120">2 分钟</option>
+                <option value="300">5 分钟</option>
+                <option value="600">10 分钟</option>
+                <option value="1800">30 分钟</option>
+                <option value="3600">1 小时</option>
+                <option value="custom">自定义分钟</option>
+                <option value="0">永不</option>
+              </select>
+              <input id="runtime-response-headers-timeout-minutes" class="timeout-custom-input" type="number" min="1" max="10080" step="1" inputmode="numeric" aria-label="上游响应头自定义分钟数" hidden>
+            </div>
+          </div>
+          <div class="setting-row">
+            <label for="runtime-stream-idle-timeout"><strong>SSE 流空闲超时</strong><small>两次上游数据之间允许的空闲时间；永不表示不限制等待时间</small></label>
+            <div class="timeout-control" data-timeout-control="stream-idle">
+              <select id="runtime-stream-idle-timeout" aria-label="SSE 流空闲超时">
+                <option value="60">1 分钟</option>
+                <option value="120">2 分钟</option>
+                <option value="300">5 分钟</option>
+                <option value="600">10 分钟</option>
+                <option value="1800">30 分钟</option>
+                <option value="3600">1 小时</option>
+                <option value="custom">自定义分钟</option>
+                <option value="0">永不</option>
+              </select>
+              <input id="runtime-stream-idle-timeout-minutes" class="timeout-custom-input" type="number" min="1" max="10080" step="1" inputmode="numeric" aria-label="SSE 流空闲自定义分钟数" hidden>
+            </div>
+          </div>
+          <div class="setting-row">
             <span><strong>控制台界面</strong><small>保存后刷新页面生效，不影响中转请求</small></span>
             <div class="setting-segmented" role="radiogroup" aria-label="控制台界面">
               <label><input type="radio" name="runtime-console-ui" value="classic"><span>经典界面</span></label>

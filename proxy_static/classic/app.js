@@ -158,6 +158,10 @@ const runtimeForm = document.querySelector("#runtime-form");
 const runtimePortInput = document.querySelector("#runtime-port");
 const runtimeDatabaseInput = document.querySelector("#runtime-database-path");
 const runtimeHealthUrlInput = document.querySelector("#runtime-health-url");
+const runtimeResponseHeadersTimeoutInput = document.querySelector("#runtime-response-headers-timeout");
+const runtimeResponseHeadersTimeoutMinutesInput = document.querySelector("#runtime-response-headers-timeout-minutes");
+const runtimeStreamIdleTimeoutInput = document.querySelector("#runtime-stream-idle-timeout");
+const runtimeStreamIdleTimeoutMinutesInput = document.querySelector("#runtime-stream-idle-timeout-minutes");
 const runtimeConsoleUiInputs = [...document.querySelectorAll('input[name="runtime-console-ui"]')];
 const runtimeShowLaunchCommandInput = document.querySelector("#runtime-show-launch-command");
 const runtimeShowStatusUploadInput = document.querySelector("#runtime-show-status-upload");
@@ -871,14 +875,26 @@ function recoveryOutcomeLabel(error) {
 }
 
 function recoveryMetaText(error, providerName) {
+  const grouped = error.event_count != null;
+  const groupedOutcome = {
+    retrying: "重试中",
+    exhausted: "重试结束",
+    client_disconnected: "已取消",
+    passed_through: "已透传",
+  }[error.outcome] || "已记录";
+  const eventCount = Number(error.event_count);
   return [
-    `失败 ${formatRetryTime(error.recorded_at)}`,
+    grouped ? groupedOutcome : `失败 ${formatRetryTime(error.recorded_at)}`,
+    grouped ? `最后 ${formatRetryTime(error.recorded_at)}` : null,
     error.request_started_at == null
       ? null
       : `开始 ${formatRetryTime(error.request_started_at)}`,
     providerName,
-    `第 ${error.attempt} 次请求`,
-    recoveryOutcomeLabel(error),
+    grouped ? `第 ${error.attempt || 1} 次尝试` : `第 ${error.attempt} 次请求`,
+    grouped && Number.isFinite(eventCount) && eventCount > 1
+      ? `${eventCount} 次错误事件`
+      : null,
+    grouped ? (formatRetryKind(error.kind) || null) : recoveryOutcomeLabel(error),
   ].filter(Boolean).join(" · ");
 }
 
@@ -929,12 +945,16 @@ function recoveryHistoryStatusText(
   if (!detailLoaded && loadFailed) {
     return `近 ${windowHours} 小时 · 加载失败，正在重试`;
   }
+  const noun = history?.grouped ? "个请求" : "条";
   return history?.truncated
-    ? `近 ${windowHours} 小时 · 显示最新 ${items.length}/${totalCount} 条`
-    : `近 ${windowHours} 小时 · ${totalCount} 条`;
+    ? `近 ${windowHours} 小时 · 显示最新 ${items.length}/${totalCount} ${noun}`
+    : `近 ${windowHours} 小时 · ${totalCount} ${noun}`;
 }
 
 function recoveryHistoryEntryKey(entry) {
+  if (entry?.event_count != null) {
+    return ["grouped", entry?.request_id, entry?.request_started_at].map((value) => String(value ?? "")).join("\u0000");
+  }
   return [
     entry?.recorded_at,
     entry?.request_id,
@@ -1029,7 +1049,10 @@ async function readRecoveryHistory({ loadMore = false, refresh = false } = {}) {
   }
   let pageLoaded = false;
   try {
-    const params = new URLSearchParams({ limit: String(RECOVERY_HISTORY_PAGE_SIZE) });
+    const params = new URLSearchParams({
+      limit: String(RECOVERY_HISTORY_PAGE_SIZE),
+      view: "summary",
+    });
     if (loadMore) params.set("cursor", latestRecoveryHistory.next_cursor);
     const response = await fetchControl(`${controlUrl("/api/recovery-history")}?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1166,6 +1189,46 @@ function formatRecoverySummary(recoveryItem, { waiting = false } = {}) {
   return parts.join(" · ");
 }
 
+const TIMEOUT_PRESET_SECONDS = new Set([60, 120, 300, 600, 1800, 3600]);
+
+function setTimeoutEditor(select, customInput, seconds) {
+  if (seconds === null || Number(seconds) === 0) {
+    select.value = "0";
+    customInput.hidden = true;
+    select.closest("[data-timeout-control]")?.classList.remove("custom");
+    return;
+  }
+  const numeric = Number(seconds);
+  if (TIMEOUT_PRESET_SECONDS.has(numeric)) {
+    select.value = String(numeric);
+    customInput.value = String(numeric / 60);
+    customInput.hidden = true;
+    select.closest("[data-timeout-control]")?.classList.remove("custom");
+  } else {
+    select.value = "custom";
+    customInput.value = String(numeric / 60);
+    customInput.hidden = false;
+    select.closest("[data-timeout-control]")?.classList.add("custom");
+  }
+}
+
+function syncTimeoutEditor(select, customInput) {
+  customInput.hidden = select.value !== "custom";
+  select.closest("[data-timeout-control]")?.classList.toggle("custom", select.value === "custom");
+}
+
+function timeoutSecondsFromEditor(select, customInput, label) {
+  if (select.value === "0") return null;
+  if (select.value === "custom") {
+    const minutes = Number(customInput.value);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
+      throw new Error(`${label}必须是 1 到 10080 之间的整数分钟`);
+    }
+    return minutes * 60;
+  }
+  return Number(select.value);
+}
+
 function runtimePayloadFromForm() {
   const healthStatusUrl = runtimeHealthUrlInput.value.trim();
   const selectedConsoleUi = runtimeConsoleUiInputs.find((input) => input.checked)?.value;
@@ -1174,6 +1237,16 @@ function runtimePayloadFromForm() {
     database_path: runtimeDatabaseInput.value.trim(),
     health_status_url: healthStatusUrl || null,
     console_ui: selectedConsoleUi || "modern",
+    upstream_response_headers_timeout_seconds: timeoutSecondsFromEditor(
+      runtimeResponseHeadersTimeoutInput,
+      runtimeResponseHeadersTimeoutMinutesInput,
+      "上游响应头超时",
+    ),
+    upstream_stream_idle_timeout_seconds: timeoutSecondsFromEditor(
+      runtimeStreamIdleTimeoutInput,
+      runtimeStreamIdleTimeoutMinutesInput,
+      "SSE 流空闲超时",
+    ),
     ...(uiConfig.features.provider_launch_command === true
       ? { show_provider_launch_command: runtimeShowLaunchCommandInput.checked }
       : {}),
@@ -1199,6 +1272,16 @@ function renderRuntimeSettings(settings) {
   runtimePortInput.value = String(settings.configured_port ?? settings.active_port ?? "");
   runtimeDatabaseInput.value = settings.database_path || "~/.cc-switch/cc-switch.db";
   runtimeHealthUrlInput.value = settings.health_status_url || "";
+  setTimeoutEditor(
+    runtimeResponseHeadersTimeoutInput,
+    runtimeResponseHeadersTimeoutMinutesInput,
+    settings.upstream_response_headers_timeout_seconds,
+  );
+  setTimeoutEditor(
+    runtimeStreamIdleTimeoutInput,
+    runtimeStreamIdleTimeoutMinutesInput,
+    settings.upstream_stream_idle_timeout_seconds,
+  );
   runtimeConsoleUiInputs.forEach((input) => {
     input.checked = input.value === (settings.console_ui || "modern");
   });
@@ -3067,7 +3150,7 @@ function renderStatus(status) {
     recoveryTitle.textContent = "当前供应商短暂熔断";
     recoveryDetail.textContent = `约 ${Math.ceil(openCircuit.retry_after_seconds)} 秒后恢复接收新请求。`;
   } else if (recoveryHistoryCount > 0) {
-    recoveryTitle.textContent = `自动恢复已就绪 · 近 24 小时 ${recoveryHistoryCount} 条`;
+    recoveryTitle.textContent = `自动恢复已就绪 · 近 24 小时 ${recoveryHistoryCount} ${recoveryHistory?.grouped ? "个请求" : "条"}`;
     const latestError = recoveryHistoryItems[0];
     recoveryDetail.textContent = latestError
       ? `最近一次 · ${formatRecoverySummary(latestError)}`
@@ -3582,7 +3665,13 @@ async function testRuntimeHealthUrl() {
 async function saveRuntimeSettings(event) {
   event.preventDefault();
   const button = document.querySelector("#save-runtime-settings");
-  const payload = runtimePayloadFromForm();
+  let payload;
+  try {
+    payload = runtimePayloadFromForm();
+  } catch (error) {
+    showToast("设置无效", error?.message || "超时必须是有效的整数分钟。", "error");
+    return;
+  }
   if (!Number.isInteger(payload.port) || payload.port < 1024 || payload.port > 65535) {
     showToast("端口无效", "端口必须是 1024 到 65535 之间的整数。", "error");
     return;
@@ -3985,8 +4074,17 @@ for (const control of retryForm.querySelectorAll("input, select")) {
   control.addEventListener("change", renderSettingsSummary);
 }
 retryForm.addEventListener("submit", saveRetrySettings);
-for (const control of runtimeForm.querySelectorAll("input")) {
+for (const control of runtimeForm.querySelectorAll("input, select")) {
   control.addEventListener("input", () => {
+    renderRuntimeSettingsSummary();
+  });
+  control.addEventListener("change", () => {
+    if (control === runtimeResponseHeadersTimeoutInput) {
+      syncTimeoutEditor(runtimeResponseHeadersTimeoutInput, runtimeResponseHeadersTimeoutMinutesInput);
+    }
+    if (control === runtimeStreamIdleTimeoutInput) {
+      syncTimeoutEditor(runtimeStreamIdleTimeoutInput, runtimeStreamIdleTimeoutMinutesInput);
+    }
     renderRuntimeSettingsSummary();
   });
 }

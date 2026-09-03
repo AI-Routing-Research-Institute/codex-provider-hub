@@ -71,20 +71,51 @@ def auto_start_supported() -> bool:
     return os.name == "nt"
 
 
+def _source_pythonw_path() -> Path:
+    executable_path = Path(sys.executable).resolve()
+    pythonw_path = executable_path.with_name("pythonw.exe")
+    if executable_path.name.casefold() == "python.exe" and pythonw_path.is_file():
+        return pythonw_path
+    return executable_path
+
+
+def _source_proxy_command() -> list[str]:
+    return [
+        str(_source_pythonw_path()),
+        str(Path(__file__).resolve().parents[1] / "local_proxy_app.py"),
+        "--tray",
+        "--no-browser",
+    ]
+
+
+def _hidden_source_proxy_command() -> list[str]:
+    direct_command = _source_proxy_command()
+    if os.name != "nt":
+        return direct_command
+
+    script_path = Path(direct_command[1])
+    launcher_path = script_path.parent / "scripts" / "start_local_proxy_hidden.vbs"
+    windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    wscript_path = windir / "System32" / "wscript.exe"
+    if not launcher_path.is_file() or not wscript_path.is_file():
+        return direct_command
+    return [
+        str(wscript_path),
+        str(launcher_path),
+        *direct_command,
+    ]
+
+
+def _legacy_source_auto_start_command() -> str:
+    return subprocess.list2cmdline(_source_proxy_command())
+
+
 def auto_start_command() -> str:
     executable_path = Path(sys.executable).resolve()
     if getattr(sys, "frozen", False):
         command = [str(executable_path), "--no-browser"]
     else:
-        pythonw_path = executable_path.with_name("pythonw.exe")
-        if executable_path.name.casefold() == "python.exe" and pythonw_path.is_file():
-            executable_path = pythonw_path
-        command = [
-            str(executable_path),
-            str(Path(__file__).resolve().parents[1] / "local_proxy_app.py"),
-            "--tray",
-            "--no-browser",
-        ]
+        command = _hidden_source_proxy_command()
     return subprocess.list2cmdline(command)
 
 
@@ -139,7 +170,17 @@ def is_auto_start_enabled() -> bool:
     value = _read_auto_start_value()
     if not value:
         return False
-    return os.path.expandvars(value).strip().casefold() == auto_start_command().casefold()
+    normalized = os.path.expandvars(value).strip().casefold()
+    current_command = auto_start_command()
+    if normalized == current_command.casefold():
+        return True
+    if normalized == _legacy_source_auto_start_command().casefold():
+        try:
+            _write_auto_start_value(current_command)
+        except OSError:
+            pass
+        return True
+    return False
 
 
 def set_auto_start_enabled(enabled: bool) -> None:
@@ -574,9 +615,8 @@ def launch_replacement_process() -> None:
         command = [sys.executable, "--no-browser"]
         working_directory = Path(sys.executable).resolve().parent
     else:
-        script = Path(__file__).resolve().parents[1] / "local_proxy_app.py"
-        command = [sys.executable, str(script), "--tray", "--no-browser"]
-        working_directory = script.parent
+        command = _hidden_source_proxy_command()
+        working_directory = Path(__file__).resolve().parents[1]
 
     options: dict[str, Any] = {
         "cwd": str(working_directory),
@@ -854,6 +894,11 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, sqlite3.Error) as exc:
         show_startup_error(f"无法迁移旧版本地数据：{exc}")
         return 1
+    if auto_start_supported():
+        try:
+            is_auto_start_enabled()
+        except OSError:
+            pass
     settings = load_settings()
     port = args.port if args.port is not None else int(settings["port"])
     database = args.database or resolve_user_path(settings["database_path"])

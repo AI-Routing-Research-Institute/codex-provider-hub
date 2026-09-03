@@ -102,6 +102,10 @@ test("labels running, successful, and failed request results", () => {
   assert.match(source, /async function fetchControl\(/);
   assert.match(source, /本地中转响应超时，请检查服务是否卡住/);
   assert.match(source, /stream_idle_timeout: "上游长时间无数据"/);
+  assert.match(source, /runtime-response-headers-timeout/);
+  assert.match(source, /runtime-stream-idle-timeout/);
+  assert.match(source, /upstream_response_headers_timeout_seconds/);
+  assert.match(source, /upstream_stream_idle_timeout_seconds/);
 });
 test("keeps the actual provider visible in each request row", () => {
   assert.equal(

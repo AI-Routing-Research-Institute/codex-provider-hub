@@ -7,8 +7,12 @@ $ErrorActionPreference = "Stop"
 
 $projectPath = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $scriptPath = Join-Path $projectPath "local_proxy_app.py"
+$launcherScript = Join-Path $projectPath "scripts\start_local_proxy_hidden.vbs"
 if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
     throw "未找到本地中转入口：$scriptPath"
+}
+if (-not (Test-Path -LiteralPath $launcherScript -PathType Leaf)) {
+    throw "未找到隐藏启动脚本：$launcherScript"
 }
 
 $pythonCandidates = @(
@@ -39,13 +43,18 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $iconPath -PathType Lea
 }
 $desktop = [Environment]::GetFolderPath("Desktop")
 $shortcutPath = Join-Path $desktop $ShortcutName
+$wscript = Join-Path $env:WINDIR "System32\wscript.exe"
+if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) {
+    throw "未找到 Windows 隐藏脚本宿主：$wscript"
+}
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $pythonw
-$shortcut.Arguments = '"' + $scriptPath + '" --tray --no-browser'
+$shortcut.TargetPath = $wscript
+$shortcut.Arguments = '"' + $launcherScript + '" "' + $pythonw + '" "' + $scriptPath + '" "--tray" "--no-browser"'
 $shortcut.WorkingDirectory = $projectPath
 $shortcut.Description = "Start Codex local proxy in the notification area"
 $shortcut.IconLocation = $iconPath + ",0"
+$shortcut.WindowStyle = 1
 $shortcut.Save()
 
 Write-Output $shortcutPath

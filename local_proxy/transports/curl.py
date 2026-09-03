@@ -4,12 +4,13 @@ import asyncio
 import codecs
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
+from curl_cffi.const import CurlOpt
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class CurlRequest:
     params: Sequence[tuple[str, str]] = ()
     headers: Mapping[str, str] = field(default_factory=dict)
     content: bytes = b""
+    disable_internal_idle_timeout: bool = False
 
 
 class CurlResponse:
@@ -102,6 +104,18 @@ class CurlClient:
             content=content,
         )
 
+    def configure_upstream_request(
+        self,
+        request: CurlRequest,
+        *,
+        response_headers_timeout_seconds: float | None,
+        stream_idle_timeout_seconds: float | None,
+    ) -> CurlRequest:
+        del response_headers_timeout_seconds, stream_idle_timeout_seconds
+        # The proxy core applies the two guards independently. curl's combined
+        # low-speed timer would otherwise impose a shorter hidden timeout.
+        return replace(request, disable_internal_idle_timeout=True)
+
     async def send(
         self,
         request: CurlRequest,
@@ -113,6 +127,16 @@ class CurlClient:
             if key.casefold() == "accept-encoding":
                 headers.pop(key)
         headers["accept-encoding"] = "identity"
+        timeout = self._timeout
+        curl_options = None
+        if request.disable_internal_idle_timeout:
+            timeout = None
+            curl_options = {
+                CurlOpt.CONNECTTIMEOUT_MS: int(self._timeout[0] * 1000),
+                CurlOpt.TIMEOUT_MS: 0,
+                CurlOpt.LOW_SPEED_LIMIT: 0,
+                CurlOpt.LOW_SPEED_TIME: 0,
+            }
         try:
             response = await self._session.request(
                 method=request.method,
@@ -121,9 +145,10 @@ class CurlClient:
                 headers=headers,
                 data=request.content,
                 stream=stream,
-                timeout=self._timeout,
+                timeout=timeout,
                 allow_redirects=False,
                 accept_encoding="identity",
+                curl_options=curl_options,
             )
         except RequestException as exc:
             raise httpx.TransportError(str(exc)) from exc
