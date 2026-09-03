@@ -64,4 +64,4 @@ VBS 参数引用错误可能导致包含空格或非 ASCII 字符的路径无法
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/68

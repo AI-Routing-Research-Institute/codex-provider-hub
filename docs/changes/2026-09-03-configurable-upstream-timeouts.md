@@ -109,4 +109,4 @@ shorter internal idle timeout than the configured outer guard.
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/68

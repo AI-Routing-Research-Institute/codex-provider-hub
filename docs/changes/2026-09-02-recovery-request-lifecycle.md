@@ -106,4 +106,4 @@ last known activity rather than exact upstream execution time.
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/68
