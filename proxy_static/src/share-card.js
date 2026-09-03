@@ -121,6 +121,8 @@ export function terminalCardTheme() {
     cardWidth: 360,
     cardHeight: 640,
     cornerRadius: 16,
+    backdrop: '#0b0d10',
+    backdropMargin: 12,
     titlebarHeight: 36,
     bodyPaddingX: 24,
     colors: {

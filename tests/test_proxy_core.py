@@ -1058,7 +1058,13 @@ class UsageTests(unittest.TestCase):
         self.assertNotIn("request_body", columns)
 
     def test_timeline_today_buckets_hourly_with_zero_fill_and_totals(self) -> None:
-        now = time.time()
+        # 固定在当天中午后半小时，避免 0-3 点运行时 now-3h 落入昨天、
+        # 以及整点边界导致桶数随运行时刻漂移
+        local_now = time.localtime()
+        midnight = time.mktime(
+            (local_now.tm_year, local_now.tm_mon, local_now.tm_mday, 0, 0, 0, 0, 0, -1)
+        )
+        now = midnight + 12 * 3600 + 1800
         self.store.record(
             provider_id="provider-a",
             model="gpt-5.6-sol",
