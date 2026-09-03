@@ -199,6 +199,32 @@ test("usage trend view renders a time-bucketed token curve", () => {
   assert.match(styles, /\.usage-tooltip/);
 });
 
+test("usage trend view offers selectable mono chart types", () => {
+  const usage = fs.readFileSync(path.join(root, "components", "UsageTrendView.vue"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+
+  assert.match(usage, /localStorage\.getItem\('local-proxy-usage-trend-chart'\) \|\| 'area'/);
+  assert.match(usage, /localStorage\.setItem\('local-proxy-usage-trend-chart', value\)/);
+  for (const chart of ["area", "line", "bars", "heat"]) {
+    assert.match(usage, new RegExp(`value: '${chart}'`));
+  }
+  assert.match(usage, /class="usage-chart-toggle-button"/);
+  assert.match(usage, /aria-label="图表类型"/);
+  assert.match(usage, /const meanValue = computed/);
+  assert.match(usage, /class="usage-mean-line"/);
+  assert.match(usage, /const barRects = computed/);
+  assert.match(usage, /class="usage-bar-input"/);
+  assert.match(usage, /const heatCells = computed/);
+  assert.match(usage, /function heatLevel\(value\)/);
+  assert.match(usage, /aria-label="Token 消耗热力矩阵，颜色越深消耗越高"/);
+  assert.match(usage, /const conclusionLabel = computed/);
+  assert.match(styles, /--usage-mono-1:/);
+  assert.match(styles, /--usage-mono-ink:/);
+  assert.match(styles, /\.usage-heat-4 \{ fill: var\(--usage-mono-4\); \}/);
+  assert.match(styles, /\.usage-chart-toggle-button\.is-active/);
+  assert.match(styles, /\.usage-bar-output \{ fill: var\(--usage-mono-4\); \}/);
+});
+
 test("provider action visibility follows the saved runtime settings", () => {
   const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
