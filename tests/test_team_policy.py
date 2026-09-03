@@ -1,7 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import scripts.team_policy as team_policy
 from scripts.team_policy import (
     PolicyError,
     ChangeRecord,
@@ -16,6 +18,11 @@ from scripts.team_policy import (
     validate_commit_message,
     validate_staged_paths,
     render_release_notes,
+    diff_new_failures,
+    parse_node_failures,
+    parse_unittest_failures,
+    read_baseline_cache,
+    write_baseline_cache,
     _coauthor_names,
     _extract_name,
 )
@@ -238,7 +245,9 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
         self.assertIn("Windows", agents)
         self.assertIn("macOS", agents)
         self.assertIn("auto-merge", agents)
-        self.assertIn("自动发版", agents)
+        self.assertIn("不再自动发版", agents)
+        self.assertIn("人工确认发版", agents)
+        self.assertIn("gh workflow run release.yml", agents)
         self.assertNotIn("只有用户针对具体版本号", agents)
 
     def test_merge_policy_matches_ruleset_gates(self) -> None:
@@ -258,7 +267,8 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
         self.assertIn("gh CLI not required", skill)
         self.assertIn("PR 阶段不运行 CI", agents)
         self.assertIn("release tag", agents)
-        self.assertIn("本地测试未运行或失败", agents)
+        self.assertIn("基线之外的新增失败", agents)
+        self.assertIn("基线相同的既有失败直接放行", agents)
 
     def test_hook_wrappers_are_versioned_and_call_policy(self) -> None:
         for hook_name in ("pre-commit", "commit-msg", "pre-push"):
@@ -311,11 +321,12 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
             {"deletion", "pull_request"},
         )
 
-    def test_auto_release_workflow_is_serialized_and_dispatches_both_platforms(self) -> None:
-        workflow = (ROOT / ".github/workflows/auto-release.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("push:", workflow)
+    def test_release_workflow_is_manual_dispatch_and_dispatches_both_platforms(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertFalse((ROOT / ".github/workflows/auto-release.yml").exists())
+        self.assertNotIn("branches:", workflow)
         self.assertIn("release-main", workflow)
         self.assertIn("contents: write", workflow)
         self.assertIn("actions: write", workflow)
@@ -330,6 +341,114 @@ class RepositoryGovernanceAssetTests(unittest.TestCase):
             )
             if name == "windows-release.yml":
                 self.assertIn("release-notes", workflow)
+
+
+class VerificationBaselineTests(unittest.TestCase):
+    def test_parses_unittest_failure_ids_including_rerun_timing_suffix(self) -> None:
+        output = (
+            "======================================================================\n"
+            "FAIL: test_alpha (tests.test_proxy_core.UsageTests.test_alpha) [0.001s]\n"
+            "----------------------------------------------------------------------\n"
+            "Traceback (most recent call last):\n"
+            "AssertionError: 1 != 0\n"
+            "\n"
+            "======================================================================\n"
+            "ERROR: test_beta (tests.test_status_config.ConfigTests.test_beta)\n"
+            "----------------------------------------------------------------------\n"
+            "Traceback (most recent call last):\n"
+            "ValueError: boom\n"
+            "\n"
+            "----------------------------------------------------------------------\n"
+            "Ran 2 tests in 0.1s\n"
+            "\n"
+            "FAILED (failures=1, errors=1)\n"
+        )
+
+        self.assertEqual(
+            parse_unittest_failures(output),
+            [
+                "tests.test_proxy_core.UsageTests.test_alpha",
+                "tests.test_status_config.ConfigTests.test_beta",
+            ],
+        )
+
+    def test_parses_unittest_failures_deduplicates_repeated_ids(self) -> None:
+        output = (
+            "ERROR: test_dup (tests.mod.Class.test_dup)\n"
+            "FAIL: test_dup (tests.mod.Class.test_dup)\n"
+        )
+
+        self.assertEqual(parse_unittest_failures(output), ["tests.mod.Class.test_dup"])
+
+    def test_parses_node_tap_failure_names_and_ignores_passing_lines(self) -> None:
+        output = (
+            "TAP version 13\n"
+            "ok 1 - passing case\n"
+            "    not ok 2 - failing case # duration\n"
+            "        not ok 3 - nested failure\n"
+            "1..3\n"
+            "# fail 2\n"
+        )
+
+        self.assertEqual(
+            parse_node_failures(output), ["failing case", "nested failure"]
+        )
+
+    def test_diff_new_failures_passes_baseline_subsets_and_flags_new_entries(self) -> None:
+        baseline = {
+            "python": ["tests.old.EnvTests.test_dns"],
+            "node": {"tests/a.test.js": ["old flaky"]},
+        }
+
+        subset_head = {
+            "python": ["tests.old.EnvTests.test_dns"],
+            "node": {"tests/a.test.js": ["old flaky"]},
+        }
+        self.assertEqual(diff_new_failures(subset_head, baseline), [])
+
+        new_head = {
+            "python": ["tests.old.EnvTests.test_dns", "tests.new.BugTests.test_regression"],
+            "node": {"tests/a.test.js": ["old flaky"], "tests/b.test.js": ["broken case"]},
+        }
+        self.assertEqual(
+            diff_new_failures(new_head, baseline),
+            [
+                "python tests.new.BugTests.test_regression",
+                "node tests/b.test.js :: broken case",
+            ],
+        )
+
+    def test_diff_new_failures_flags_suite_sentinels(self) -> None:
+        baseline = {"python": [], "node": {}}
+
+        self.assertEqual(
+            diff_new_failures({"python": ["<python-suite-exit-nonzero>"], "node": {}}, baseline),
+            ["python <python-suite-exit-nonzero>"],
+        )
+        self.assertEqual(
+            diff_new_failures(
+                {"python": [], "node": {"tests/c.test.js": ["<node-suite-exit-nonzero>"]}},
+                baseline,
+            ),
+            ["node tests/c.test.js :: <node-suite-exit-nonzero>"],
+        )
+
+    def test_baseline_cache_roundtrip_and_stale_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "new-base.json"
+            (Path(temp) / "old-base.json").write_text("{}", encoding="utf-8")
+
+            def fake_path(merge_base: str) -> Path:
+                return Path(temp) / f"{merge_base}.json"
+
+            self.assertIsNone(read_baseline_cache("new-base"))
+            with mock.patch.object(team_policy, "_baseline_cache_path", fake_path):
+                write_baseline_cache("new-base", {"python": ["tests.x.Y.test_z"], "node": {}})
+                loaded = read_baseline_cache("new-base")
+
+            self.assertEqual(loaded, {"python": ["tests.x.Y.test_z"], "node": {}})
+            self.assertTrue(cache.exists())
+            self.assertFalse((Path(temp) / "old-base.json").exists())
 
 
 class ReleasePlanningTests(unittest.TestCase):
