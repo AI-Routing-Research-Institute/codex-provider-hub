@@ -154,6 +154,7 @@ test("Vue views use the shared API helper and clean up polling timers", () => {
     "components/ConnectionStrip.vue",
     "components/ProvidersView.vue",
     "components/RequestsView.vue",
+    "components/UsageTrendView.vue",
     "components/SettingsView.vue",
     "components/RuntimeView.vue",
     "components/MonitorView.vue",
@@ -164,10 +165,38 @@ test("Vue views use the shared API helper and clean up polling timers", () => {
     assert.match(source, /controlFetch/);
     assert.doesNotMatch(source, /fetch\(['"]\/control\//);
   }
-  for (const index of [1, 2, 3]) {
+  for (const index of [1, 2, 3, 4]) {
     assert.match(sources[index], /onBeforeUnmount/);
     assert.match(sources[index], /window\.clearInterval\(timer\)/);
   }
+});
+
+test("usage trend view renders a time-bucketed token curve", () => {
+  const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
+  const tabs = fs.readFileSync(path.join(root, "components", "ViewTabs.vue"), "utf8");
+  const usage = fs.readFileSync(path.join(root, "components", "UsageTrendView.vue"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+
+  assert.match(tabs, /\{ id: 'usage', label: '用量趋势' \}/);
+  assert.match(tabs, /usageEnabled: \{ type: Boolean, default: true \}/);
+  assert.match(tabs, /tab\.id !== 'usage' \|\| props\.usageEnabled/);
+  assert.match(app, /<UsageTrendView v-if="config\.features\?\.usage_history !== false" v-show="activeView === 'usage'" \/>/);
+  assert.match(app, /import UsageTrendView from '\.\/components\/UsageTrendView\.vue'/);
+  assert.match(app, /\['requests', 'usage'\]\.includes\(storedView\)/);
+  assert.match(usage, /\/api\/usage-timeline\?\$\{timelineParams\(\)\}/);
+  assert.match(usage, /new URLSearchParams\(\{ usage_window: windowName\.value \}\)/);
+  assert.match(usage, /localStorage\.getItem\('local-proxy-usage-trend-window'\) \|\| '24h'/);
+  for (const option of ["today", "24h", "7d", "30d", "all"]) {
+    assert.match(usage, new RegExp(`value: '${option}'`));
+  }
+  assert.match(usage, /granularity\.value === 'hour' \? '按小时' : '按天'/);
+  assert.match(usage, /formatTokenCount\(total\.total_tokens\)/);
+  assert.match(usage, /aria-label="Token 消耗随时间变化曲线"/);
+  assert.match(usage, /usage-area-input|areaPoints/);
+  assert.match(usage, /window\.setInterval\(loadTimeline, 30000\)/);
+  assert.match(styles, /\.usage-chart-svg/);
+  assert.match(styles, /\.usage-line-total/);
+  assert.match(styles, /\.usage-tooltip/);
 });
 
 test("provider action visibility follows the saved runtime settings", () => {
