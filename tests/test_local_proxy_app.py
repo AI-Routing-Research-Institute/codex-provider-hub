@@ -33,6 +33,25 @@ from local_proxy.shared_settings import (
 )
 
 
+def expected_source_proxy_command(executable: Path) -> list[str]:
+    pythonw = executable.with_name("pythonw.exe")
+    runtime = (
+        pythonw
+        if executable.name.casefold() == "python.exe" and pythonw.is_file()
+        else executable
+    )
+    script = Path(local_proxy_app.__file__).resolve().parents[1] / "local_proxy_app.py"
+    direct_command = [str(runtime), str(script), "--tray", "--no-browser"]
+    if os.name != "nt":
+        return direct_command
+
+    launcher = script.parent / "scripts" / "start_local_proxy_hidden.vbs"
+    wscript = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "wscript.exe"
+    if launcher.is_file() and wscript.is_file():
+        return [str(wscript), str(launcher), *direct_command]
+    return direct_command
+
+
 class LocalProxySettingsTests(unittest.TestCase):
     def test_ui_config_uses_unified_port_and_peer_console_path(self) -> None:
         config = codex_ui_config(19000)
@@ -231,12 +250,15 @@ class CodexConfigTests(unittest.TestCase):
             mock.patch.object(sys, "executable", executable),
         ):
             source_command = local_proxy_app.auto_start_command()
+            expected_source_command = subprocess.list2cmdline(
+                expected_source_proxy_command(Path(executable))
+            )
 
         self.assertEqual(
             frozen_command,
             subprocess.list2cmdline([executable, "--no-browser"]),
         )
-        self.assertIn("start_local_proxy_hidden.vbs", source_command)
+        self.assertEqual(source_command, expected_source_command)
         self.assertIn("local_proxy_app.py", source_command)
         self.assertIn("--tray", source_command)
         self.assertTrue(source_command.endswith("--no-browser"))
@@ -252,24 +274,12 @@ class CodexConfigTests(unittest.TestCase):
                 mock.patch.object(sys, "executable", str(executable)),
             ):
                 command = local_proxy_app.auto_start_command()
+                expected_command = subprocess.list2cmdline(
+                    expected_source_proxy_command(executable)
+                )
 
-        self.assertEqual(
-            command,
-            subprocess.list2cmdline(
-                [
-                    str(Path(os.environ["WINDIR"]) / "System32" / "wscript.exe"),
-                    str(
-                        Path(local_proxy_app.__file__).resolve().parents[1]
-                        / "scripts"
-                        / "start_local_proxy_hidden.vbs"
-                    ),
-                    str(pythonw.resolve()),
-                    str(Path(local_proxy_app.__file__).resolve().parents[1] / "local_proxy_app.py"),
-                    "--tray",
-                    "--no-browser",
-                ]
-            ),
-        )
+        self.assertEqual(command, expected_command)
+        self.assertIn(str(pythonw.resolve()), command)
 
     def test_legacy_source_auto_start_is_migrated_to_hidden_command(self) -> None:
         with (
@@ -349,13 +359,10 @@ class CodexConfigTests(unittest.TestCase):
             mock.patch.object(subprocess, "Popen") as popen,
         ):
             local_proxy_app.launch_replacement_process()
+            expected_command = expected_source_proxy_command(Path(sys.executable).resolve())
 
         command = popen.call_args.args[0]
-        self.assertEqual(
-            command[0],
-            str(Path(os.environ["WINDIR"]) / "System32" / "wscript.exe"),
-        )
-        self.assertEqual(Path(command[1]).name, "start_local_proxy_hidden.vbs")
+        self.assertEqual(command, expected_command)
         self.assertEqual(command[-2:], ["--tray", "--no-browser"])
 
     def test_tray_restart_stops_server_and_returns_restart_request(self) -> None:
