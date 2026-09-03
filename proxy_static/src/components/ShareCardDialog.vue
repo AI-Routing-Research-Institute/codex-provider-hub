@@ -8,7 +8,7 @@
       <p v-if="error" class="share-card-error" role="alert">{{ error }}</p>
       <div class="share-card-stage">
         <div v-if="loading" class="share-card-placeholder">正在生成战报…</div>
-        <canvas v-show="!loading" ref="canvasElement" class="share-card-canvas" width="600" height="940" aria-label="今日 Token 战报海报预览" />
+        <canvas v-show="!loading" ref="canvasElement" class="share-card-canvas" width="600" height="1000" aria-label="今日 Token 战报海报预览" />
       </div>
       <p v-if="!loading && data && !data.hasData" class="share-card-empty">今天还没有请求记录，先领一张零消耗战报也不错。</p>
       <p v-if="notice" class="share-card-notice" :class="{ error: notice.tone === 'error' }" role="status">{{ notice.detail }}</p>
@@ -28,6 +28,7 @@ import {
   buildShareCardData,
   formatGroupedTokens,
   latestBattleLabel,
+  posterLayout,
   posterStars,
   shareBadgeTitle,
   shareCardFileName,
@@ -147,6 +148,34 @@ function fitText(context, text, maxWidth, baseSize, fontFamily, weight = '700') 
     context.font = `${weight} ${size}px ${fontFamily}`
   }
   return { label, size }
+}
+
+function legendRows(context, entries, fontFamily) {
+  context.font = `500 12px ${fontFamily}`
+  const maxWidth = 500
+  const itemGap = 16
+  const items = entries.slice(0, 4).map((entry, index) => {
+    context.font = `500 12px ${fontFamily}`
+    const name = fitText(context, entry.name, 92, 12, fontFamily, '500').label
+    const label = `${name} ${entry.tokenShare}%`
+    return {
+      label,
+      color: ['#f472b6', '#a78bfa', '#38bdf8', '#fbbf24', '#34d399'][index % 5],
+      width: 18 + context.measureText(label).width
+    }
+  })
+  const rows = []
+  for (const item of items) {
+    const row = rows[rows.length - 1]
+    const nextWidth = row ? row.width + itemGap + item.width : item.width
+    if (row && nextWidth <= maxWidth) {
+      row.items.push(item)
+      row.width = nextWidth
+    } else {
+      rows.push({ items: [item], width: item.width })
+    }
+  }
+  return rows
 }
 
 function drawCard() {
@@ -300,11 +329,13 @@ function drawCard() {
   context.fillText('今日消耗构成', centerX, 714)
   if ('letterSpacing' in context) context.letterSpacing = '0px'
 
-  const donutCenterY = 810
-  const donutRadius = 76
-  const donutWidth = 24
-  const palette = ['#f472b6', '#a78bfa', '#38bdf8', '#fbbf24', '#34d399']
   const providerEntries = card.byProvider.slice(0, 5)
+  const legend = providerEntries.length > 1 ? legendRows(context, providerEntries, fontFamily) : []
+  const layout = posterLayout({ providerCount: providerEntries.length, legendRows: providerEntries.length === 1 ? 1 : legend.length })
+  const donutCenterY = layout.donutCenterY
+  const donutRadius = layout.donutRadius
+  const donutWidth = layout.donutWidth
+  const palette = ['#f472b6', '#a78bfa', '#38bdf8', '#fbbf24', '#34d399']
   const donutTotal = providerEntries.reduce((sum, entry) => sum + entry.totalTokens, 0) || 1
   if (providerEntries.length) {
     let angle = -Math.PI / 2
@@ -337,36 +368,31 @@ function drawCard() {
   }
 
   if (providerEntries.length > 1) {
-    const legendEntries = providerEntries.slice(0, 4)
-    context.font = `500 12px ${fontFamily}`
-    const itemGap = 18
-    const items = legendEntries.map((entry, index) => {
-      const name = fitText(context, entry.name, 84, 12, fontFamily, '500').label
-      return { name, share: entry.tokenShare, color: palette[index % palette.length], width: 16 + context.measureText(`${name} ${entry.tokenShare}%`).width }
-    })
-    const totalWidth = items.reduce((sum, item) => sum + item.width, 0) + itemGap * (items.length - 1)
-    let left = centerX - totalWidth / 2
-    items.forEach(item => {
-      context.fillStyle = item.color
-      context.beginPath()
-      context.arc(left + 4, 893, 4, 0, Math.PI * 2)
-      context.fill()
-      context.fillStyle = 'rgba(255, 255, 255, 0.75)'
-      context.textAlign = 'left'
-      context.fillText(`${item.name} ${item.share}%`, left + 14, 897)
-      context.textAlign = 'center'
-      left += item.width + itemGap
+    legend.forEach((row, rowIndex) => {
+      let left = centerX - row.width / 2
+      const baseline = layout.legendTop + rowIndex * layout.legendRowHeight + 13
+      row.items.forEach(item => {
+        context.fillStyle = item.color
+        context.beginPath()
+        context.arc(left + 4, baseline - 4, 4, 0, Math.PI * 2)
+        context.fill()
+        context.fillStyle = 'rgba(255, 255, 255, 0.75)'
+        context.textAlign = 'left'
+        context.fillText(item.label, left + 14, baseline)
+        context.textAlign = 'center'
+        left += item.width + 16
+      })
     })
   } else if (providerEntries.length === 1) {
     context.fillStyle = 'rgba(255, 255, 255, 0.75)'
     context.font = `600 14px ${fontFamily}`
-    context.fillText('独挑今日全部用量', centerX, 898)
+    context.fillText('独挑今日全部用量', centerX, layout.legendTop + 14)
   }
 
   if (card.latestBattle) {
     context.fillStyle = 'rgba(255, 255, 255, 0.55)'
     context.font = `500 14px ${fontFamily}`
-    context.fillText(`最晚一战 ${card.latestBattle} · 你还在敲代码`, centerX, 934)
+    context.fillText(`最晚一战 ${card.latestBattle} · 你还在敲代码`, centerX, layout.latestBattleY)
   }
 
   const footerLine = context.createLinearGradient(56, 0, width - 56, 0)
@@ -374,10 +400,10 @@ function drawCard() {
   footerLine.addColorStop(0.5, 'rgba(255,255,255,0.28)')
   footerLine.addColorStop(1, 'rgba(255,255,255,0.05)')
   context.fillStyle = footerLine
-  context.fillRect(56, 950, width - 112, 1)
+  context.fillRect(56, layout.dividerY, width - 112, 1)
   context.fillStyle = 'rgba(255, 255, 255, 0.5)'
   context.font = `600 13px ${fontFamily}`
-  context.fillText(`${card.displayName} · 数据仅保存在本机`, centerX, 976)
+  context.fillText(`${card.displayName} · 数据仅保存在本机`, centerX, layout.footerY)
 
   canvas.toBlob(blob => { canvasBlob = blob }, 'image/png')
 }

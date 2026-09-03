@@ -134,3 +134,33 @@ export function posterStars({ count, width, height, seed = 20260901 }) {
   }
   return points
 }
+
+export function posterLayout({ providerCount = 0, legendRows = providerCount > 0 ? 1 : 0, width = 600, height = 1000 } = {}) {
+  const rows = Math.max(0, Math.min(2, Number(legendRows) || 0))
+  const donutCenterY = 790
+  const donutRadius = 62
+  const donutWidth = 20
+  const donutBottom = donutCenterY + donutRadius + donutWidth / 2
+  const legendTop = donutBottom + 18
+  const legendRowHeight = 18
+  const legendBottom = rows ? legendTop + rows * legendRowHeight : legendTop
+  const latestBattleY = Math.max(930, legendBottom + 28)
+  const dividerY = Math.max(950, latestBattleY + 18)
+  const footerY = Math.min(height - 22, dividerY + 26)
+  return {
+    width,
+    height,
+    providerCount: Math.max(0, Number(providerCount) || 0),
+    legendRows: rows,
+    donutCenterY,
+    donutRadius,
+    donutWidth,
+    donutBottom,
+    legendTop,
+    legendRowHeight,
+    legendBottom,
+    latestBattleY,
+    dividerY,
+    footerY
+  }
+}
