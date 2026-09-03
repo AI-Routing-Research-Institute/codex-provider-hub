@@ -173,3 +173,18 @@ test("posterStars is deterministic for the same seed", async () => {
     assert.ok(star.radius >= 0.8)
   }
 })
+
+test("posterLayout keeps donut, legend, battle label, and footer separated", async () => {
+  const { posterLayout } = await import(sourceUrl)
+
+  for (const legendRows of [0, 1, 2]) {
+    const layout = posterLayout({ providerCount: legendRows ? 4 : 0, legendRows })
+    assert.equal(layout.width, 600)
+    assert.equal(layout.height, 1000)
+    assert.ok(layout.donutBottom < layout.legendTop)
+    assert.ok(layout.legendBottom + 28 <= layout.latestBattleY)
+    assert.ok(layout.latestBattleY + 18 <= layout.dividerY)
+    assert.ok(layout.dividerY < layout.footerY)
+    assert.ok(layout.footerY < layout.height)
+  }
+})
