@@ -1,6 +1,6 @@
 +++
 id = "2026-09-02-recovery-request-lifecycle"
-type = "bugfix"
+type = "fix"
 release_bump = "patch"
 status = "verified"
 +++
