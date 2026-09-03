@@ -34,6 +34,7 @@ from local_proxy.shared_settings import (
 
 
 def expected_source_proxy_command(executable: Path) -> list[str]:
+    executable = executable.resolve()
     pythonw = executable.with_name("pythonw.exe")
     runtime = (
         pythonw
