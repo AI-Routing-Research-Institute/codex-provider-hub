@@ -33,6 +33,7 @@ class UpdateInfo:
     current_version: str
     latest_version: str
     has_update: bool
+    newer_available: bool
     release_url: str
     notes: str
     asset_name: str | None
@@ -90,6 +91,7 @@ def parse_release(
         current_version=current_version,
         latest_version=latest_version,
         has_update=newer and asset_url is not None and sha256_url is not None,
+        newer_available=newer,
         release_url=str(payload.get("html_url") or RELEASES_PAGE),
         notes=str(payload.get("body") or "").strip(),
         asset_name=wanted,

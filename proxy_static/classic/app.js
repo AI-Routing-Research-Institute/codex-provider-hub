@@ -3928,7 +3928,7 @@ async function shutdownProxy() {
   }
 }
 
-let updateState = { supported: false, has_update: false, release_url: "" };
+let updateState = { supported: false, has_update: false, update_available: false, newer_available: false, current_version: "", latest_version: "", release_url: "" };
 
 function renderUpdateResult(message, tone) {
   const box = document.querySelector("#update-result");
@@ -3964,7 +3964,8 @@ function applyUpdateState(state) {
   }
   const applyButton = document.querySelector("#update-apply-button");
   if (applyButton) {
-    applyButton.hidden = !(updateState.has_update && updateState.supported);
+    const hasUpdate = state.update_available ?? state.has_update ?? updateState.has_update ?? false;
+    applyButton.hidden = !(hasUpdate && updateState.supported);
   }
 }
 
@@ -3995,8 +3996,12 @@ async function checkForUpdate() {
       return;
     }
     applyUpdateState(payload);
-    if (payload.has_update) {
+    const hasUpdate = payload.update_available ?? payload.has_update ?? false;
+    const newer = payload.newer_available ?? false;
+    if (hasUpdate) {
       renderUpdateResult(`发现新版本 v${payload.latest_version}`, "update");
+    } else if (newer) {
+      renderUpdateResult(`发现新版本 v${payload.latest_version}，当前平台请手动下载安装。`, "update");
     } else {
       renderUpdateResult("当前已是最新版本。", "info");
     }
