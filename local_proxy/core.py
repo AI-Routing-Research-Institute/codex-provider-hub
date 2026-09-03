@@ -1450,6 +1450,89 @@ class UsageStore:
             "total": total,
         }
 
+    def weekday_hour(
+        self,
+        window: str,
+        *,
+        start_at: float | None = None,
+        end_at: float | None = None,
+        provider_id: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate usage into a 7×24 (Monday-first weekday × hour) matrix."""
+        normalized = window.strip().lower()
+        if normalized not in USAGE_WINDOWS:
+            raise ValueError("不支持的 Token 统计时间范围")
+        timestamp = time.time() if now is None else float(now)
+        if normalized == "custom":
+            raw_lower, upper = _custom_time_bounds(
+                start_at,
+                end_at,
+                max_seconds=TIMELINE_MAX_CUSTOM_SECONDS,
+            )
+        else:
+            raw_lower = _usage_window_cutoff(normalized, timestamp)
+            upper = timestamp
+        matrix: list[list[dict[str, int]]] = [
+            [dict.fromkeys(TIMELINE_BUCKET_FIELDS, 0) for _ in range(24)]
+            for _ in range(7)
+        ]
+        total = dict.fromkeys(TIMELINE_BUCKET_FIELDS, 0)
+        clauses: list[str] = []
+        params: list[Any] = []
+        if provider_id is not None:
+            clauses.append("provider_id = ?")
+            params.append(str(provider_id))
+        with self._lock, closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            if raw_lower is None:
+                earliest = connection.execute(
+                    "SELECT MIN(recorded_at) AS earliest FROM request_usage"
+                ).fetchone()["earliest"]
+                raw_lower = None if earliest is None else float(earliest)
+            rows: list[sqlite3.Row] = []
+            if raw_lower is not None:
+                clauses.extend(["recorded_at >= ?", "recorded_at < ?"])
+                params.extend([raw_lower, upper])
+                rows = connection.execute(
+                    f"""
+                    SELECT (CAST(strftime('%w', recorded_at, 'unixepoch', 'localtime')
+                            AS INTEGER) + 6) % 7 AS weekday,
+                           CAST(strftime('%H', recorded_at, 'unixepoch', 'localtime')
+                            AS INTEGER) AS hour,
+                           COUNT(*) AS request_count,
+                           COALESCE(
+                               SUM(CASE WHEN succeeded = 1 THEN 1 ELSE 0 END), 0
+                           ) AS successful_requests,
+                           COALESCE(
+                               SUM(CASE WHEN succeeded = 1 THEN 0 ELSE 1 END), 0
+                           ) AS failed_requests,
+                           COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                           COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                           COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                           COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                           COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens
+                    FROM request_usage
+                    WHERE {" AND ".join(clauses)}
+                    GROUP BY weekday, hour
+                    """,
+                    params,
+                ).fetchall()
+        for row in rows:
+            cell = matrix[int(row["weekday"])][int(row["hour"])]
+            for field in TIMELINE_BUCKET_FIELDS:
+                value = int(row[field])
+                cell[field] = value
+                total[field] += value
+        return {
+            "window": normalized,
+            "start_at": None if raw_lower is None else round(raw_lower * 1000),
+            "end_at": round(upper * 1000) - 1,
+            "provider_id": None if provider_id is None else str(provider_id),
+            "matrix": matrix,
+            "total": total,
+        }
+
 
 class RecoveryHistoryStore:
     """Persist sanitized recovery events without request or response content."""
@@ -3402,6 +3485,39 @@ def create_proxy_app(
             return JSONResponse(status_code=422, content={"detail": str(exc)})
         except (OSError, sqlite3.Error):
             return JSONResponse(status_code=503, content={"detail": "无法读取用量趋势"})
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+    @app.get("/control/api/usage-weekday-hour", include_in_schema=False)
+    async def control_usage_weekday_hour(request: Request):
+        provider_id = request.query_params.get("provider_id", "").strip() or None
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="30d",
+                allowed_windows=USAGE_WINDOWS,
+                max_custom_seconds=TIMELINE_MAX_CUSTOM_SECONDS,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        if provider_id and not any(
+            provider.provider_id == provider_id for provider in router.providers()
+        ):
+            return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+        if usage_store is None:
+            return JSONResponse(status_code=503, content={"detail": "Token 记录功能不可用"})
+        try:
+            payload = await asyncio.to_thread(
+                usage_store.weekday_hour,
+                window,
+                start_at=start_at,
+                end_at=end_at,
+                provider_id=provider_id,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取时段节律"})
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     @app.get("/control/api/requests", include_in_schema=False)

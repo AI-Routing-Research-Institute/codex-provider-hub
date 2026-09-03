@@ -192,7 +192,7 @@ test("usage trend view renders a time-bucketed token curve", () => {
   assert.match(usage, /granularity\.value === 'hour' \? '按小时' : '按天'/);
   assert.match(usage, /formatTokenCount\(total\.total_tokens\)/);
   assert.match(usage, /aria-label="图表类型"/);
-  assert.match(usage, /window\.setInterval\(loadTimeline, 30000\)/);
+  assert.match(usage, /window\.setInterval\(loadAll, 30000\)/);
   assert.match(styles, /\.usage-chart-svg/);
   assert.match(styles, /\.usage-line-total/);
   assert.match(styles, /\.usage-tooltip/);
@@ -204,19 +204,20 @@ test("usage trend view offers differentiated animated chart types", () => {
 
   assert.match(usage, /localStorage\.getItem\('local-proxy-usage-trend-chart'\)/);
   assert.match(usage, /function normalizeChart\(value\)/);
-  for (const chart of ["trend", "heat", "cumulative"]) {
+  for (const chart of ["trend", "calendar", "cumulative", "punch", "waffle", "barcode"]) {
     assert.match(usage, new RegExp(`value: '${chart}'`));
   }
   assert.doesNotMatch(usage, /value: 'bars'/);
   assert.doesNotMatch(usage, /value: 'line'/);
 
-  // 指标轮播：tokens / 请求数 / 成功率，5 秒切换，悬停暂停
+  // 指标轮播：tokens / 请求数 / 成功率，5 秒切换，悬停暂停，仅趋势/累计显示
   assert.match(usage, /const metrics = \[/);
   assert.match(usage, /id: 'tokens'/);
   assert.match(usage, /id: 'requests'/);
   assert.match(usage, /id: 'success'/);
   assert.match(usage, /CAROUSEL_MS = 5000/);
   assert.match(usage, /hoverIndex\.value >= 0 \|\| hoverCell\.value/);
+  assert.match(usage, /const pillsVisible = computed/);
   assert.match(usage, /class="usage-metric-pill"/);
 
   // 动画引擎：quarticOut 画入 + 悬停重播防抖 + reduced-motion 降级
@@ -231,16 +232,36 @@ test("usage trend view offers differentiated animated chart types", () => {
   assert.match(usage, /const counterDisplay = computed/);
   assert.match(usage, /class="usage-cumulative-number"/);
 
-  // 热力比例修复：等比 cell clamp + 显式宽高不拉伸
-  assert.match(usage, /Math\.min\(availableWidth \/ Math\.max\(1, columns\), availableHeight \/ Math\.max\(1, rows\.length\)\)/);
-  assert.match(usage, /:width="heatGeom\.width" :height="heatGeom\.height"/);
-  assert.match(usage, /animationDelay: `\$\{Math\.min\(index \* 12, 600\)\}ms`/);
+  // 日历热力：GitHub 风格周×星期圆点阵（≥7 天）+ 今天/24h 小时方格
+  assert.match(usage, /function buildCalendarGeom\(\)/);
+  assert.match(usage, /GitHub 风格日历热力图/);
+  assert.match(usage, /usage-cal-peak-ring/);
+  assert.match(usage, /chartName === 'calendar' && granularity === 'hour'/);
+
+  // 节律 punch / 构成 waffle / 发丝线 barcode
+  assert.match(usage, /api\/usage-weekday-hour\?/);
+  assert.match(usage, /function buildPunchGeom\(\)/);
+  assert.match(usage, /aria-label="星期乘以24小时的消耗节律点阵/);
+  assert.match(usage, /api\/status\?\$\{windowParams\(\)\}/);
+  assert.match(usage, /buildShareCardData\(\{ status, providerLimit: 8 \}\)/);
+  assert.match(usage, /const waffleDots = computed/);
+  assert.match(usage, /aria-label="每个分桶一根发丝线的消耗条码图"/);
+  assert.match(usage, /class="usage-barcode-line"/);
+
+  // 图例独立于图表卡片，单行 nowrap
+  assert.match(usage, /class="usage-legend-row"/);
+  assert.doesNotMatch(usage, /usage-legend-inline/);
 
   assert.match(styles, /height: 260px/);
   assert.match(styles, /usage-heat-pop/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /\.usage-metric-pill\.is-active/);
   assert.match(styles, /\.usage-cumulative-number/);
+  assert.match(styles, /\.usage-legend-row \{ display: flex; align-items: center; gap: 14px; padding: 0 4px; \}/);
+  assert.match(styles, /\.usage-legend-item \{ display: inline-flex; align-items: center; gap: 6px; color: var\(--muted\); font-size: var\(--font-meta\); white-space: nowrap; \}/);
+  assert.match(styles, /\.usage-cal-peak-ring/);
+  assert.match(styles, /\.usage-barcode-line\.is-empty/);
+  assert.match(styles, /\.usage-waffle-4 \{ fill: var\(--usage-mono-4\); \}/);
 });
 
 test("usage trend view matches the shared page padding and content width", () => {

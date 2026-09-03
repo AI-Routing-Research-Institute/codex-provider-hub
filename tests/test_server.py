@@ -405,6 +405,46 @@ class UnifiedProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(no_store.status_code, 200)
         self.assertEqual(no_store.headers["cache-control"], "no-store")
 
+    async def test_usage_weekday_hour_is_served_per_service_console(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.codex_profile.usage_store = UsageStore(root / "codex.sqlite3")
+            self.claude_profile.usage_store = UsageStore(root / "claude.sqlite3")
+            self.codex_profile.usage_store.record(
+                provider_id="codex-a",
+                model="gpt-test",
+                usage=TokenUsage(5, 2, 7),
+                status_code=200,
+            )
+            self.claude_profile.usage_store.record(
+                provider_id="claude-a",
+                model="claude-test",
+                usage=TokenUsage(11, 3, 14),
+                status_code=200,
+            )
+
+            codex = await self.client.get(
+                "/control/codex/api/usage-weekday-hour",
+                params={"usage_window": "30d"},
+            )
+            claude = await self.client.get(
+                "/control/claude/api/usage-weekday-hour",
+                params={"usage_window": "30d"},
+            )
+            crossed = await self.client.get(
+                "/control/codex/api/usage-weekday-hour",
+                params={"usage_window": "30d", "provider_id": "claude-a"},
+            )
+
+        self.assertEqual(codex.status_code, 200)
+        self.assertEqual(len(codex.json()["matrix"]), 7)
+        self.assertTrue(all(len(row) == 24 for row in codex.json()["matrix"]))
+        self.assertEqual(codex.json()["total"]["total_tokens"], 7)
+        self.assertEqual(claude.status_code, 200)
+        self.assertEqual(claude.json()["total"]["total_tokens"], 14)
+        self.assertEqual(crossed.status_code, 404)
+        self.assertEqual(codex.headers["cache-control"], "no-store")
+
     async def test_both_control_views_update_the_same_runtime_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
