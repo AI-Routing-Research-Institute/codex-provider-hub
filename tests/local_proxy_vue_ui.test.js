@@ -376,6 +376,21 @@ test("Vue Token values use the classic compact formatter and labeled units", () 
   assert.doesNotMatch(requests, /function formatNumber/);
 });
 
+test("Token share poster uses the 600x1000 canvas and shared safe layout", () => {
+  const shareCard = fs.readFileSync(path.join(root, "components", "ShareCardDialog.vue"), "utf8");
+  const shareCardData = fs.readFileSync(path.join(root, "share-card.js"), "utf8");
+
+  assert.match(shareCard, /class="share-card-canvas" width="600" height="1000"/);
+  assert.match(shareCard, /const height = 1000/);
+  assert.match(shareCard, /posterLayout\(/);
+  assert.match(shareCard, /function legendRows\(/);
+  assert.match(shareCardData, /export function posterLayout\(/);
+  assert.match(shareCard, /layout\.legendTop/);
+  assert.match(shareCard, /layout\.latestBattleY/);
+  assert.match(shareCard, /layout\.dividerY/);
+  assert.match(shareCard, /layout\.footerY/);
+});
+
 test("Vue provider usage opens request details and positions the popover from its anchor", () => {
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
   assert.match(providers, /openUsageHistory\(provider, \$event\.currentTarget\)/);
