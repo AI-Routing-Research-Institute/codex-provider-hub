@@ -40,6 +40,9 @@ from local_proxy.core import (
     _public_control_status,
     _public_requests,
     _request_reasoning_effort,
+    _next_stream_chunk,
+    _resolve_upstream_timeouts,
+    _send_upstream_response,
     create_proxy_app,
     filter_self_referencing_providers,
     order_proxy_providers,
@@ -87,6 +90,46 @@ class ProviderRouterTests(unittest.TestCase):
         ):
             with self.subTest(payload=payload):
                 self.assertEqual(_rewrite_request_model(payload, mappings), payload)
+
+
+class UpstreamTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_none_stream_timeout_waits_for_next_chunk_without_wait_for(self) -> None:
+        async def stream() -> AsyncIterator[bytes]:
+            yield b"chunk"
+
+        self.assertEqual(
+            await _next_stream_chunk(stream(), timeout_seconds=None),
+            b"chunk",
+        )
+
+    async def test_none_response_headers_timeout_sends_without_wait_for(self) -> None:
+        class Client:
+            async def send(self, request, *, stream):
+                del request, stream
+                return "response"
+
+        self.assertEqual(
+            await _send_upstream_response(Client(), object(), timeout_seconds=None),
+            "response",
+        )
+
+    def test_runtime_timeout_snapshot_preserves_null_and_defaults_missing_values(self) -> None:
+        self.assertEqual(
+            _resolve_upstream_timeouts(
+                {"upstream_stream_idle_timeout_seconds": None},
+                stream_default=120,
+                response_headers_default=120,
+            ),
+            (None, 120),
+        )
+        self.assertEqual(
+            _resolve_upstream_timeouts(
+                {"upstream_response_headers_timeout_seconds": 3600},
+                stream_default=120,
+                response_headers_default=120,
+            ),
+            (120, 3600.0),
+        )
 
     def test_active_request_exposes_resolved_name_without_thread_id(self) -> None:
         router = ProviderRouter((provider("first", current=True),))
@@ -446,6 +489,7 @@ class UsageTests(unittest.TestCase):
             }
         self.assertIn("reasoning_effort", history_columns)
         self.assertIn("upstream_model", history_columns)
+        self.assertIn("last_activity_at", history_columns)
         self.assertIn("upstream_model", inflight_columns)
 
     def test_inflight_request_is_updated_and_removed_on_completion(self) -> None:
@@ -543,6 +587,36 @@ class UsageTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM inflight_requests"
             ).fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_recovery_duration_uses_last_persisted_activity(self) -> None:
+        now = time.time()
+        started_at = now - 120
+        last_activity_at = now - 45
+        self.store.start_inflight_request(
+            request_id=24,
+            started_at=started_at,
+            provider_id="provider-a",
+            thread_id="thread-a",
+            phase="retrying",
+            retry_count=8,
+        )
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
+            connection.execute(
+                """
+                UPDATE inflight_requests
+                SET started_at = ?, updated_at = ?
+                WHERE request_id = 24
+                """,
+                (started_at, last_activity_at),
+            )
+
+        recovered = UsageStore(self.store.path, run_id="next-run")
+        item = recovered.request_history(window="24h", status="failed")["items"][0]
+
+        self.assertEqual(item["outcome"], "interrupted")
+        self.assertEqual(item["last_activity_at"], round(last_activity_at * 1000))
+        self.assertGreaterEqual(item["duration_ms"], 74_000)
+        self.assertLess(item["duration_ms"], 76_000)
 
     def test_reads_nested_and_legacy_reasoning_effort(self) -> None:
         self.assertEqual(
@@ -1305,6 +1379,60 @@ class RecoveryHistoryTests(unittest.TestCase):
         self.assertIsNone(second["next_cursor"])
         with self.assertRaisesRegex(ValueError, "游标"):
             self.store.history(now=now, cursor="invalid")
+
+    def test_grouped_history_returns_one_item_per_request_lifecycle(self) -> None:
+        now = time.time()
+        request_started_at = now - 60
+        for attempt in range(1, 4):
+            self.store.record(
+                request_id=7,
+                provider_id="provider-a",
+                attempt=attempt,
+                max_attempts=-1,
+                delay_seconds=5,
+                kind="connection",
+                summary=f"failure {attempt}",
+                stage="before_output",
+                outcome="retrying",
+                recorded_at=now - (4 - attempt),
+                request_started_at=request_started_at,
+            )
+        self.store.record(
+            request_id=8,
+            provider_id="provider-b",
+            attempt=1,
+            max_attempts=4,
+            delay_seconds=1,
+            kind="model_capacity",
+            summary="capacity",
+            stage="before_output",
+            outcome="exhausted",
+            recorded_at=now - 1,
+            request_started_at=now - 10,
+        )
+
+        summary = self.store.history(now=now, grouped=True, limit=1)
+
+        self.assertEqual(summary["grouped"], True)
+        self.assertEqual(summary["total_count"], 2)
+        self.assertEqual(len(summary["items"]), 1)
+        item = summary["items"][0]
+        self.assertEqual(item["request_id"], 8)
+        self.assertEqual(item["event_count"], 1)
+        self.assertEqual(item["attempt"], 1)
+        self.assertEqual(item["outcome"], "exhausted")
+        self.assertIsNotNone(summary["next_cursor"])
+
+        older = self.store.history(
+            now=now,
+            grouped=True,
+            limit=1,
+            cursor=summary["next_cursor"],
+        )
+        self.assertEqual(older["total_count"], 2)
+        self.assertEqual(older["items"][0]["request_id"], 7)
+        self.assertEqual(older["items"][0]["event_count"], 3)
+        self.assertEqual(older["items"][0]["attempt"], 3)
 
 
 class CCSourceTests(unittest.TestCase):
@@ -2334,6 +2462,11 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
             params={"limit": 2},
         )
         detail = detail_response.json()
+        summary_response = await client.get(
+            "/control/api/recovery-history",
+            params={"limit": 2, "view": "summary"},
+        )
+        summary = summary_response.json()
         older = (
             await client.get(
                 "/control/api/recovery-history",
@@ -2348,6 +2481,11 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(detail["items"]), 2)
         self.assertTrue(detail["truncated"])
         self.assertIsNotNone(detail["next_cursor"])
+        self.assertEqual(summary_response.status_code, 200)
+        self.assertTrue(summary["grouped"])
+        self.assertEqual(summary["total_count"], 3)
+        self.assertEqual(len(summary["items"]), 2)
+        self.assertEqual(summary["items"][0]["event_count"], 1)
         self.assertEqual(len(older["items"]), 1)
         self.assertFalse(older["truncated"])
         self.assertIsNone(older["next_cursor"])

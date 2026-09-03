@@ -141,6 +141,21 @@ class ClaudeCurlClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CurlClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_configured_upstream_request_disables_hidden_stream_timeout(self) -> None:
+        session = FakeSession()
+        client = CurlClient(session=session)
+        request = client.configure_upstream_request(
+            client.build_request("POST", "https://provider.example/v1/responses"),
+            response_headers_timeout_seconds=None,
+            stream_idle_timeout_seconds=3600,
+        )
+
+        await client.send(request, stream=True)
+
+        call = session.calls[0]
+        self.assertIsNone(call["timeout"])
+        self.assertIsNotNone(call["curl_options"])
+
     async def test_generic_client_forwards_and_streams_codex_requests(self) -> None:
         session = FakeSession()
         client = CurlClient(session=session)

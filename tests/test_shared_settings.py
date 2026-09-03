@@ -15,6 +15,7 @@ from local_proxy.shared_settings import (
     protocol_settings_path,
     protocol_usage_database_path,
     save_protocol_settings,
+    save_shared_settings,
     shared_settings_path,
 )
 
@@ -88,6 +89,8 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
                     "database_path": str(database),
                     "health_status_url": "https://status.example.test/api/status",
                     "console_ui": "classic",
+                    "upstream_stream_idle_timeout_seconds": None,
+                    "upstream_response_headers_timeout_seconds": 3600,
                 }
             )
 
@@ -98,6 +101,13 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
                 "https://status.example.test/api/status",
             )
             self.assertEqual(claude.runtime_settings_snapshot()["console_ui"], "classic")
+            self.assertIsNone(
+                claude.runtime_settings_snapshot()["upstream_stream_idle_timeout_seconds"]
+            )
+            self.assertEqual(
+                claude.runtime_settings_snapshot()["upstream_response_headers_timeout_seconds"],
+                3600,
+            )
             self.assertEqual(codex.applied, [(database.resolve(), ("codex-a",))])
             self.assertEqual(claude.applied, [(database.resolve(), ())])
             self.assertIs(codex.retry_policy_store, claude.retry_policy_store)
@@ -122,6 +132,8 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
             self.assertEqual(persisted["port"], 19999)
             self.assertEqual(persisted["retry"]["max_attempts"], 9)
             self.assertEqual(persisted["console_ui"], "classic")
+            self.assertIsNone(persisted["upstream_stream_idle_timeout_seconds"])
+            self.assertEqual(persisted["upstream_response_headers_timeout_seconds"], 3600)
 
     def test_rejects_unknown_console_ui_without_changing_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -148,6 +160,20 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
 
             self.assertEqual(store.snapshot()["port"], 17890)
             self.assertEqual(store.snapshot()["console_ui"], "modern")
+
+            with self.assertRaisesRegex(ValueError, "至少为 1 分钟"):
+                codex.on_runtime_settings_changed(
+                    {
+                        "port": 18888,
+                        "database_path": str(database),
+                        "health_status_url": None,
+                        "upstream_stream_idle_timeout_seconds": 30,
+                    }
+                )
+            self.assertEqual(
+                store.snapshot()["upstream_stream_idle_timeout_seconds"],
+                120,
+            )
 
     def test_database_validation_accepts_a_protocol_with_no_providers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -200,6 +226,39 @@ class SharedRuntimeCoordinatorTests(unittest.TestCase):
 
 
 class RuntimeMigrationTests(unittest.TestCase):
+    def test_shared_timeout_settings_migrate_and_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = shared_settings_path(Path(temp_dir))
+            self.assertEqual(load_shared_settings(path)["upstream_stream_idle_timeout_seconds"], 120)
+            self.assertEqual(
+                load_shared_settings(path)["upstream_response_headers_timeout_seconds"],
+                120,
+            )
+
+            save_shared_settings(
+                {
+                    "upstream_stream_idle_timeout_seconds": None,
+                    "upstream_response_headers_timeout_seconds": 3600,
+                },
+                path,
+            )
+            persisted = load_shared_settings(path)
+            self.assertIsNone(persisted["upstream_stream_idle_timeout_seconds"])
+            self.assertEqual(persisted["upstream_response_headers_timeout_seconds"], 3600)
+
+            path.write_text(
+                json.dumps(
+                    {
+                        "upstream_stream_idle_timeout_seconds": 30,
+                        "upstream_response_headers_timeout_seconds": "never",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            invalid = load_shared_settings(path)
+            self.assertEqual(invalid["upstream_stream_idle_timeout_seconds"], 120)
+            self.assertEqual(invalid["upstream_response_headers_timeout_seconds"], 120)
+
     def test_shared_console_ui_defaults_to_modern_and_invalid_values_fall_back(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = shared_settings_path(Path(temp_dir))

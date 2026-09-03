@@ -1033,6 +1033,9 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .setting-toggle input[type="checkbox"]:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 .setting-toggle input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .55; }
 .setting-control-with-action { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.timeout-control { min-width: 0; display: block; }
+.timeout-control.custom { display: grid; grid-template-columns: minmax(0, 1fr) 108px; gap: 8px; }
+.timeout-custom-input[hidden] { display: none; }
 .setting-action-button { min-height: 34px; white-space: nowrap; }
 .setting-readonly-row { grid-template-columns: minmax(0, 1fr) 225px; }
 .setting-path-value { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
