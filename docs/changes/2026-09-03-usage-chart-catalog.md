@@ -1,7 +1,7 @@
 +++
 id = "2026-09-03-usage-chart-catalog"
 type = "feature"
-release_bump = "minor"
+release_bump = "patch"
 status = "verified"
 +++
 
@@ -46,6 +46,7 @@ status = "verified"
 ## 兼容性
 
 - 后端纯新增端点与查询，`request_usage` 无 schema 变更；timeline 行为不变。dist 重建。
+- 发布级别经用户确认由 minor 调整为 patch：本轮功能跨度有限，不足以提升第二位版本号。
 
 ## 风险
 
