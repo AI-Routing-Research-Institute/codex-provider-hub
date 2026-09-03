@@ -2,10 +2,11 @@
   <main class="stage">
     <section class="app-window" aria-label="本地中转控制台">
       <Titlebar :config="config" />
-      <ViewTabs :active-view="activeView" :request-count="requestCount" :requests-enabled="config.features?.usage_history !== false" @change-view="changeView" />
+      <ViewTabs :active-view="activeView" :request-count="requestCount" :requests-enabled="config.features?.usage_history !== false" :usage-enabled="config.features?.usage_history !== false" @change-view="changeView" />
 
       <ProvidersView v-show="activeView === 'providers'" :show-launch-command="showProviderLaunchCommand" :show-status-upload="showStatusUpload" @navigate-requests="navigateToProviderRequests" @notify="showProviderToast" />
       <RequestsView v-if="config.features?.usage_history !== false" v-show="activeView === 'requests'" :config="config" :navigation-provider-id="requestProviderId" @count="requestCount = $event" />
+      <UsageTrendView v-if="config.features?.usage_history !== false" v-show="activeView === 'usage'" />
       <SettingsView v-show="activeView === 'settings'" />
       <RuntimeView v-show="activeView === 'runtime'" :config="config" @launch-command-visibility-change="showProviderLaunchCommand = $event" @status-upload-visibility-change="showStatusUpload = $event" />
       <MonitorView v-show="activeView === 'monitor'" />
@@ -36,6 +37,7 @@ import ConnectionStrip from './components/ConnectionStrip.vue'
 import ViewTabs from './components/ViewTabs.vue'
 import ProvidersView from './components/ProvidersView.vue'
 import RequestsView from './components/RequestsView.vue'
+import UsageTrendView from './components/UsageTrendView.vue'
 import SettingsView from './components/SettingsView.vue'
 import RuntimeView from './components/RuntimeView.vue'
 import MonitorView from './components/MonitorView.vue'
@@ -109,7 +111,7 @@ onMounted(async () => {
   try {
     config.value = { ...config.value, ...(await controlFetch('/api/ui-config')) }
     const storedView = localStorage.getItem(viewStorageKey()) || 'providers'
-    activeView.value = storedView === 'requests' && config.value.features?.usage_history === false ? 'providers' : storedView
+    activeView.value = ['requests', 'usage'].includes(storedView) && config.value.features?.usage_history === false ? 'providers' : storedView
     document.title = config.value.display_name || '本地中转'
   } catch (error) {
     showToast('界面配置读取失败', error.message, 'error')

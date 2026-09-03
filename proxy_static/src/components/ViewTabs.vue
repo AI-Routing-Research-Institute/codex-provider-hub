@@ -8,8 +8,8 @@
 
 <script setup>
 import { computed } from 'vue'
-const props = defineProps({ activeView: { type: String, required: true }, requestCount: { type: Number, default: 0 }, requestsEnabled: { type: Boolean, default: true } })
+const props = defineProps({ activeView: { type: String, required: true }, requestCount: { type: Number, default: 0 }, requestsEnabled: { type: Boolean, default: true }, usageEnabled: { type: Boolean, default: true } })
 defineEmits(['changeView'])
-const tabs = [{ id: 'providers', label: '供应商' }, { id: 'requests', label: '请求' }, { id: 'settings', label: '重试设置' }, { id: 'runtime', label: '运行设置' }, { id: 'monitor', label: '监控管理' }]
-const visibleTabs = computed(() => tabs.filter(tab => tab.id !== 'requests' || props.requestsEnabled))
+const tabs = [{ id: 'providers', label: '供应商' }, { id: 'requests', label: '请求' }, { id: 'usage', label: '用量趋势' }, { id: 'settings', label: '重试设置' }, { id: 'runtime', label: '运行设置' }, { id: 'monitor', label: '监控管理' }]
+const visibleTabs = computed(() => tabs.filter(tab => (tab.id !== 'requests' || props.requestsEnabled) && (tab.id !== 'usage' || props.usageEnabled)))
 </script>
