@@ -505,7 +505,21 @@ def command_pre_push(stdin: str) -> None:
     run_full_verification()
 
 
+def _ensure_utf8_stdio() -> None:
+    """Force UTF-8 stdio so Chinese policy errors stay readable under git-bash.
+
+    Hooks run with an MSYS locale whose default codepage is not UTF-8; without
+    this, PolicyError messages degrade into mojibake. Never raises.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            continue
+
+
 def main(argv: list[str] | None = None) -> int:
+    _ensure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Repository delivery policy")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("install-hooks")
