@@ -51,9 +51,10 @@ status = "verified"
 ## 验证结果
 
 - `.venv\\Scripts\\python.exe -m unittest tests.test_version`：5 项通过。
-- `.venv\\Scripts\\python.exe -m unittest discover -s tests -p "test_*.py"`：541 项通过。
+- `.venv\\Scripts\\python.exe -m unittest discover -s tests -p "test_*.py"`：541 项通过，耗时 78.931 秒。
+- `Get-ChildItem -Path tests -File -Filter *.test.js | Sort-Object Name | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }`：18 个 JavaScript 测试文件、91 项通过。
 - `.venv\\Scripts\\python.exe -m py_compile local_proxy\\version.py tests\\test_version.py`：通过。
-- `git diff --check`：通过；仅有既有 CRLF 提示，无差异错误。
+- `git diff --check`：通过；无差异错误。
 - 启动快捷方式进程扫描：`git.exe` 仍执行版本查询，但未再出现其启动链上的 `conhost.exe`、`OpenConsole.exe` 或 `WindowsTerminal.exe`。
 
 ## PR

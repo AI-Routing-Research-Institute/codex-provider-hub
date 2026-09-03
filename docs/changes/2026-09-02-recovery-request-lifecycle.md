@@ -97,7 +97,7 @@ last known activity rather than exact upstream execution time.
 ## 验证结果
 
 - `.venv\\Scripts\\python.exe -m unittest discover -s tests -p "test_*.py"` -> 541 tests passed in 84.500s.
-- `Get-ChildItem -Path tests -File -Filter *.test.js | Sort-Object Name | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }` -> 18 files and 89 tests passed.
+- `Get-ChildItem -Path tests -File -Filter *.test.js | Sort-Object Name | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }` -> 18 files and 91 tests passed.
 - `npm run build --prefix proxy_static` -> Vite production build passed with 29 modules; final assets are `index-CFci3PoS.js` and `index-CJ1v9bgC.css` after syncing main.
 - `.venv\\Scripts\\python.exe -m compileall -q provider_status local_proxy scripts tests` -> passed.
 - `node --check proxy_static/classic/app.js` and all JavaScript files under `proxy_static/src` and `provider_status/static` -> passed.

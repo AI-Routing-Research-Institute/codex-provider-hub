@@ -55,12 +55,12 @@ VBS 参数引用错误可能导致包含空格或非 ASCII 字符的路径无法
 
 ## 验证结果
 
-- `.venv\\Scripts\\python.exe -m unittest discover -s tests -p "test_*.py"`：540 项通过。
+- `.venv\\Scripts\\python.exe -m unittest discover -s tests -p "test_*.py"`：541 项通过，耗时 78.931 秒。
 - `.venv\\Scripts\\python.exe -m unittest tests.test_local_proxy_app`：25 项通过。
 - `cscript.exe //nologo scripts\\start_local_proxy_hidden.vbs ... --smoke-test`：返回码 0。
 - `scripts\\install_local_proxy_shortcut.ps1` 临时快捷方式实际生成：目标为 `C:\\Windows\\System32\\wscript.exe`，参数包含隐藏启动脚本和 `--tray --no-browser`。
 - PowerShell 安装脚本语法检查、Python 编译检查和 `git diff --check`：通过。
-- `tests/*.test.js`：87 项通过。
+- `tests/*.test.js`：91 项通过，覆盖主线新增的战报布局用例。
 
 ## PR
 
