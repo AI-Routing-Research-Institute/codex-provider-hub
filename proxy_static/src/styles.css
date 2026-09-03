@@ -1389,20 +1389,36 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .usage-summary-item { display: flex; flex-direction: column; gap: 4px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); }
 .usage-summary-item span { color: var(--muted); font-size: var(--font-meta); }
 .usage-summary-item strong { font-size: 15px; }
-.usage-chart { position: relative; padding: 8px 4px 0; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); }
-.usage-chart-svg { display: block; width: 100%; height: auto; touch-action: none; }
 .usage-grid-line { stroke: var(--line); stroke-width: 1; }
 .usage-axis-text { fill: var(--muted); font-size: var(--font-meta); font-family: var(--font-sans); }
 .usage-area-input { fill: var(--usage-mono-2); fill-opacity: 0.45; }
 .usage-area-output { fill: var(--usage-mono-4); fill-opacity: 0.45; }
 .usage-line-total { fill: none; stroke: var(--usage-mono-ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.usage-mean-line { stroke: var(--usage-mono-3); stroke-width: 1.5; stroke-dasharray: 5 4; }
-.usage-bar-input { fill: var(--usage-mono-2); }
-.usage-bar-output { fill: var(--usage-mono-4); }
 .usage-hover-line { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 4 3; }
 .usage-hover-dot { fill: var(--usage-mono-ink); stroke: var(--surface); stroke-width: 2; }
-.usage-heat-cell { stroke: var(--line); stroke-width: 0.5; }
+.usage-chart-stage { display: grid; gap: 8px; }
+.usage-chart { position: relative; display: flex; align-items: center; justify-content: center; height: 260px; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); }
+.usage-chart-svg { display: block; width: 100%; max-width: 100%; height: auto; max-height: 100%; touch-action: none; }
+.usage-heat-svg { display: block; touch-action: none; }
+.usage-chart-heat { display: grid; justify-items: center; gap: 6px; }
+.usage-heat-cell { stroke: var(--line); stroke-width: 0.5; transform-box: fill-box; transform-origin: center; }
 .usage-heat-0 { fill: var(--usage-heat-0); }
+.usage-heat-cell.is-animated { animation: usage-heat-pop 320ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+@keyframes usage-heat-pop { from { opacity: 0; transform: scale(0.4); } to { opacity: 1; transform: scale(1); } }
+.usage-metric-pills { display: flex; align-items: center; gap: 6px; }
+.usage-metric-pill { border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: var(--font-meta); padding: 3px 12px; cursor: pointer; }
+.usage-metric-pill.is-active { background: var(--usage-mono-ink); color: var(--surface); border-color: var(--usage-mono-ink); }
+.usage-metric-auto { color: var(--muted); font-size: var(--font-meta); margin-left: 4px; }
+.usage-cumulative-number { fill: var(--usage-mono-ink); font-size: 24px; font-weight: 700; font-family: 'Space Grotesk', var(--font-sans); }
+.usage-cumulative-label { fill: var(--muted); font-size: calc(var(--font-meta) - 1px); }
+.usage-area-cumulative { fill: var(--usage-mono-3); }
+.usage-line-cumulative { fill: none; stroke: var(--usage-mono-ink); stroke-width: 2.25; stroke-linejoin: round; stroke-linecap: round; }
+.usage-legend-inline { padding: 0 4px 2px; }
+.usage-tooltip-heat { top: auto; bottom: 40px; }
+@media (prefers-reduced-motion: reduce) {
+  .usage-heat-cell.is-animated { animation: none; }
+  .usage-chart, .usage-metric-pill, .usage-chart-toggle-button { transition: none; }
+}
 .usage-heat-1 { fill: var(--usage-mono-1); }
 .usage-heat-2 { fill: var(--usage-mono-2); }
 .usage-heat-3 { fill: var(--usage-mono-3); }
@@ -1411,7 +1427,6 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .usage-heat-swatch-2 { background: var(--usage-mono-2); }
 .usage-heat-swatch-3 { background: var(--usage-mono-3); }
 .usage-heat-swatch-4 { background: var(--usage-mono-4); }
-.usage-chart-heat .usage-tooltip { top: auto; bottom: 46px; }
 .usage-chart-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--control-surface); overflow: hidden; }
 .usage-chart-toggle-button { border: none; background: transparent; color: var(--muted); font-size: var(--font-meta); padding: 6px 12px; cursor: pointer; }
 .usage-chart-toggle-button + .usage-chart-toggle-button { border-left: 1px solid var(--line); }

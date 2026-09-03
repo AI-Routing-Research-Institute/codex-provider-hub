@@ -191,38 +191,56 @@ test("usage trend view renders a time-bucketed token curve", () => {
   }
   assert.match(usage, /granularity\.value === 'hour' \? '按小时' : '按天'/);
   assert.match(usage, /formatTokenCount\(total\.total_tokens\)/);
-  assert.match(usage, /aria-label="Token 消耗随时间变化曲线"/);
-  assert.match(usage, /usage-area-input|areaPoints/);
+  assert.match(usage, /aria-label="图表类型"/);
   assert.match(usage, /window\.setInterval\(loadTimeline, 30000\)/);
   assert.match(styles, /\.usage-chart-svg/);
   assert.match(styles, /\.usage-line-total/);
   assert.match(styles, /\.usage-tooltip/);
 });
 
-test("usage trend view offers selectable mono chart types", () => {
+test("usage trend view offers differentiated animated chart types", () => {
   const usage = fs.readFileSync(path.join(root, "components", "UsageTrendView.vue"), "utf8");
   const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 
-  assert.match(usage, /localStorage\.getItem\('local-proxy-usage-trend-chart'\) \|\| 'area'/);
-  assert.match(usage, /localStorage\.setItem\('local-proxy-usage-trend-chart', value\)/);
-  for (const chart of ["area", "line", "bars", "heat"]) {
+  assert.match(usage, /localStorage\.getItem\('local-proxy-usage-trend-chart'\)/);
+  assert.match(usage, /function normalizeChart\(value\)/);
+  for (const chart of ["trend", "heat", "cumulative"]) {
     assert.match(usage, new RegExp(`value: '${chart}'`));
   }
-  assert.match(usage, /class="usage-chart-toggle-button"/);
-  assert.match(usage, /aria-label="图表类型"/);
-  assert.match(usage, /const meanValue = computed/);
-  assert.match(usage, /class="usage-mean-line"/);
-  assert.match(usage, /const barRects = computed/);
-  assert.match(usage, /class="usage-bar-input"/);
-  assert.match(usage, /const heatCells = computed/);
-  assert.match(usage, /function heatLevel\(value\)/);
-  assert.match(usage, /aria-label="Token 消耗热力矩阵，颜色越深消耗越高"/);
-  assert.match(usage, /const conclusionLabel = computed/);
-  assert.match(styles, /--usage-mono-1:/);
-  assert.match(styles, /--usage-mono-ink:/);
-  assert.match(styles, /\.usage-heat-4 \{ fill: var\(--usage-mono-4\); \}/);
-  assert.match(styles, /\.usage-chart-toggle-button\.is-active/);
-  assert.match(styles, /\.usage-bar-output \{ fill: var\(--usage-mono-4\); \}/);
+  assert.doesNotMatch(usage, /value: 'bars'/);
+  assert.doesNotMatch(usage, /value: 'line'/);
+
+  // 指标轮播：tokens / 请求数 / 成功率，5 秒切换，悬停暂停
+  assert.match(usage, /const metrics = \[/);
+  assert.match(usage, /id: 'tokens'/);
+  assert.match(usage, /id: 'requests'/);
+  assert.match(usage, /id: 'success'/);
+  assert.match(usage, /CAROUSEL_MS = 5000/);
+  assert.match(usage, /hoverIndex\.value >= 0 \|\| hoverCell\.value/);
+  assert.match(usage, /class="usage-metric-pill"/);
+
+  // 动画引擎：quarticOut 画入 + 悬停重播防抖 + reduced-motion 降级
+  assert.match(usage, /function quarticOut\(t\)/);
+  assert.match(usage, /strokeDashoffset: pathLength\.value \* \(1 - drawProgress\.value\)/);
+  assert.match(usage, /function scheduleHoverReplay\(\)/);
+  assert.match(usage, /prefers-reduced-motion: reduce/);
+  assert.match(usage, /reducedMotion \|\| document\.hidden/);
+
+  // 累计冲击线 + 大数字
+  assert.match(usage, /function cumulativeLinePath\(\)/);
+  assert.match(usage, /const counterDisplay = computed/);
+  assert.match(usage, /class="usage-cumulative-number"/);
+
+  // 热力比例修复：等比 cell clamp + 显式宽高不拉伸
+  assert.match(usage, /Math\.min\(availableWidth \/ Math\.max\(1, columns\), availableHeight \/ Math\.max\(1, rows\.length\)\)/);
+  assert.match(usage, /:width="heatGeom\.width" :height="heatGeom\.height"/);
+  assert.match(usage, /animationDelay: `\$\{Math\.min\(index \* 12, 600\)\}ms`/);
+
+  assert.match(styles, /height: 260px/);
+  assert.match(styles, /usage-heat-pop/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(styles, /\.usage-metric-pill\.is-active/);
+  assert.match(styles, /\.usage-cumulative-number/);
 });
 
 test("provider action visibility follows the saved runtime settings", () => {
