@@ -7,19 +7,19 @@ status = "verified"
 
 # Configurable Upstream Timeouts
 
-## Goal
+## 目标
 
 Allow users to configure the upstream response-header timeout and SSE stream
 idle timeout from the control console. Support minute-based values, one hour,
 custom long values, and an explicit no-timeout option.
 
-## Current State
+## 现状
 
 Both upstream protections are fixed at 120 seconds in the proxy core. The
 shared runtime settings file and both control consoles do not expose these
 values. The curl transport also has an independent 300 second idle timeout.
 
-## Design Scope
+## 设计范围
 
 - Store both settings in shared runtime settings as seconds, with `null`
   meaning no application-level timeout.
@@ -32,27 +32,27 @@ values. The curl transport also has an independent 300 second idle timeout.
   timeout.
 - Add matching controls to the modern and classic runtime settings pages.
 
-## Non-Goals
+## 非目标
 
 - Do not change retry policy, retry count, or provider selection behavior.
 - Do not make connection establishment wait forever.
 - Do not remove or rewrite existing user settings or request history.
 - Do not alter unrelated uncommitted recovery or model-mapping changes.
 
-## Compatibility
+## 兼容性
 
 Missing timeout fields migrate to 120 seconds in memory and on the next save.
 Existing shared-settings files remain readable. The runtime settings API adds
 the timeout fields without removing existing fields.
 
-## Risks
+## 风险
 
 Very long waits can retain request and provider resources. The no-timeout
 option must disable only the application-level response-header and stream-idle
 guards; the connect timeout remains finite. The curl transport must not keep a
 shorter internal idle timeout than the configured outer guard.
 
-## Test Plan
+## 测试计划
 
 - Test shared-settings defaults, migration, persistence, and validation.
 - Test response-header and SSE idle timeout behavior for finite and null
@@ -63,7 +63,7 @@ shorter internal idle timeout than the configured outer guard.
 - Run Python unit tests, JavaScript tests, Vue build, Python compilation, JS
   syntax checks, and `git diff --check`.
 
-## Self-Review
+## 自审
 
 - Timeout values are shared by Codex and Claude because both protocols use the
   same runtime settings coordinator.
@@ -73,7 +73,7 @@ shorter internal idle timeout than the configured outer guard.
 - The implementation must not claim no timeout while curl's internal idle
   timeout can still fire sooner.
 
-## Actual Changes
+## 实际改动
 
 - `local_proxy/shared_settings.py` adds shared response-header and SSE idle
   timeout fields, version 3 migration defaults, minute-granularity validation,
@@ -95,7 +95,7 @@ shorter internal idle timeout than the configured outer guard.
   `tests/local_proxy_requests.test.js` cover migration, validation, runtime
   behavior, curl options, and both control consoles.
 
-## Verification Results
+## 验证结果
 
 - `.venv\\Scripts\\python.exe -m unittest discover -s tests -p "test_*.py"`
   -> 539 tests passed.

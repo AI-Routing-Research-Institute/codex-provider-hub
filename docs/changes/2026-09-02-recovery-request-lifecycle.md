@@ -7,14 +7,14 @@ status = "verified"
 
 # Recovery Request Lifecycle Display
 
-## Goal
+## 目标
 
 Make a long-running retry request show its actual lifecycle clearly after a
 process restart. The request history must identify the restart boundary, while
 the recovery panel must avoid presenting every retry attempt as a separate
 request.
 
-## Current State
+## 现状
 
 The proxy persists one recovery event for each retry attempt. The recovery API
 returns those raw events without grouping. Startup recovery converts every row
@@ -23,7 +23,7 @@ the duration from `started_at` to startup time, even when the last activity was
 earlier. The UI labels retrying events as failures and calls the attempt count a
 request count.
 
-## Design Scope
+## 设计范围
 
 - Keep raw recovery events for audit and pagination.
 - Expose a grouped recovery view with one summary per request lifecycle,
@@ -36,20 +36,20 @@ request count.
 - Keep `max_attempts = -1`, provider routing, and retry timing semantics
   unchanged.
 
-## Non-Goals
+## 非目标
 
 - Do not delete existing recovery or request history.
 - Do not add a request-level retry deadline in this change.
 - Do not change upstream error classification or provider failover rules.
 - Do not change the `thread_id` same-session takeover behavior.
 
-## Compatibility
+## 兼容性
 
 The recovery API remains backward-compatible for existing raw event fields.
 New grouped fields are additive. Existing databases migrate through the normal
 SQLite initialization path; no manual schema reset is required.
 
-## Risks
+## 风险
 
 Grouping can hide individual retry events in the default view if the summary
 contract is ambiguous. The raw event list must remain available through the
@@ -57,14 +57,14 @@ detail path. Using `updated_at` can under-report the lifetime of a request that
 was actively waiting without updating its phase, so the UI must describe it as
 last known activity rather than exact upstream execution time.
 
-## Test Plan
+## 测试计划
 
 - Add SQLite tests for restart recovery duration and grouped recovery summaries.
 - Add JavaScript tests for retrying/interrupted labels and grouped rendering.
 - Run Python unit tests, JavaScript tests, Vue build, Python compilation, JS
   syntax checks, and `git diff --check`.
 
-## Self-Review
+## 自审
 
 - The change is limited to persisted local lifecycle metadata and presentation.
 - Existing raw records and retry policy semantics remain available.
@@ -73,7 +73,7 @@ last known activity rather than exact upstream execution time.
 - The implementation must not assume `request_id` is globally unique across
   process runs; grouping will include the request start timestamp.
 
-## Actual Changes
+## 实际改动
 
 - `local_proxy/core.py` adds the migratable `request_history.last_activity_at`
   field and uses persisted `inflight_requests.updated_at` when creating a
@@ -92,7 +92,7 @@ last known activity rather than exact upstream execution time.
   and `tests/local_proxy_vue_ui.test.js` cover migration, recovery duration,
   grouped pagination, lifecycle labels, and summary API usage.
 
-## Verification Results
+## 验证结果
 
 - `python -m unittest discover -s tests -p "test_*.py"` -> 534 tests passed.
 - All `tests/*.test.js` files run with `node --test` -> passed.
