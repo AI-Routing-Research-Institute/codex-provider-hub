@@ -1263,6 +1263,102 @@ class UsageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不支持的 Token 统计时间范围"):
             self.store.timeline("yesterday", now=now)
 
+    def test_weekday_hour_matrix_places_records_by_local_weekday_and_hour(
+        self,
+    ) -> None:
+        now = time.time()
+        local_now = time.localtime(now)
+        current_weekday = local_now.tm_wday  # 周一=0，与 SQL 的 (strftime('%w')+6)%7 一致
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(100, 40, 140, cached_tokens=30),
+            status_code=200,
+            recorded_at=now - 60,
+        )
+        self.store.record(
+            provider_id="provider-b",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(10, 5, 15),
+            status_code=500,
+            recorded_at=now - 120,
+        )
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(999, 1, 1000),
+            status_code=200,
+            recorded_at=now - 3 * 86400,
+        )
+
+        payload = self.store.weekday_hour("30d", now=now)
+
+        self.assertEqual(payload["window"], "30d")
+        self.assertEqual(len(payload["matrix"]), 7)
+        self.assertTrue(all(len(row) == 24 for row in payload["matrix"]))
+        current_cell = payload["matrix"][current_weekday][local_now.tm_hour]
+        self.assertEqual(current_cell["request_count"], 2)
+        self.assertEqual(current_cell["total_tokens"], 155)
+        self.assertEqual(current_cell["successful_requests"], 1)
+        self.assertEqual(current_cell["cached_tokens"], 30)
+        total_tokens = sum(
+            cell["total_tokens"] for row in payload["matrix"] for cell in row
+        )
+        self.assertEqual(total_tokens, 1155)
+        self.assertEqual(payload["total"]["request_count"], 3)
+        self.assertEqual(
+            payload["total"]["total_tokens"],
+            total_tokens,
+        )
+
+    def test_weekday_hour_filters_by_provider_and_handles_empty_store(
+        self,
+    ) -> None:
+        now = time.time()
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(100, 40, 140),
+            status_code=200,
+            recorded_at=now - 60,
+        )
+
+        filtered = self.store.weekday_hour("30d", provider_id="provider-a", now=now)
+        cells = [
+            cell for row in filtered["matrix"] for cell in row if cell["request_count"]
+        ]
+        self.assertEqual(len(cells), 1)
+        self.assertEqual(cells[0]["total_tokens"], 140)
+
+        other = self.store.weekday_hour("30d", provider_id="provider-b", now=now)
+        self.assertEqual(
+            [cell for row in other["matrix"] for cell in row if cell["request_count"]],
+            [],
+        )
+
+        empty_store = UsageStore(
+            Path(self.temp_context.name) / "weekday-empty.sqlite3"
+        )
+        empty = empty_store.weekday_hour("all", now=now)
+        self.assertIsNone(empty["start_at"])
+        self.assertEqual(
+            sum(cell["request_count"] for row in empty["matrix"] for cell in row),
+            0,
+        )
+        empty_30d = empty_store.weekday_hour("30d", now=now)
+        self.assertIsNotNone(empty_30d["start_at"])
+        self.assertEqual(empty_30d["total"]["request_count"], 0)
+
+        with self.assertRaisesRegex(ValueError, "不支持的 Token 统计时间范围"):
+            self.store.weekday_hour("yesterday", now=now)
+        with self.assertRaisesRegex(ValueError, "90 天"):
+            self.store.weekday_hour(
+                "custom",
+                start_at=now - 91 * 86400,
+                end_at=now,
+                now=now,
+            )
+
 
 class SSEPreflightTests(unittest.IsolatedAsyncioTestCase):
     def test_terminal_capture_requires_a_complete_protocol_event(self) -> None:
