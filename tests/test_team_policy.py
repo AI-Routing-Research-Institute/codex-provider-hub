@@ -505,7 +505,7 @@ class ReleasePlanningTests(unittest.TestCase):
             "patch",
             "fix-y",
             type="fix",
-            headline="分享到微信不再出现白色边角",
+            headline="分享卡片：粘贴到微信不再出现白色边角",
             goal="导出画布整幅填充 #0b0d10 深色底板（四周 12px），`context.translate(margin, margin)` 于卡片原点做既有圆角裁剪",
         )
         chore = self.make_record("patch", "chore-z", type="chore", goal="同步门禁描述。")
@@ -519,7 +519,7 @@ class ReleasePlanningTests(unittest.TestCase):
         self.assertIn("## 🛠️ 其他改进", notes)
         self.assertIn("**feature-x**：在新版控制台新增“用量趋势”视图", notes)
         self.assertNotIn("以时间曲线展示", notes)
-        self.assertIn("**fix-y**：分享到微信不再出现白色边角", notes)
+        self.assertIn("**fix-y**：分享卡片：粘贴到微信不再出现白色边角", notes)
         self.assertNotIn("translate", notes)
         self.assertNotIn("`", notes)
         self.assertIn("**chore-z**：同步门禁描述", notes)
