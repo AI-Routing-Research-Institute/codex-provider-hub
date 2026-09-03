@@ -7,7 +7,7 @@
           <button v-for="chart in chartOptions" :key="chart.value" type="button" class="usage-chart-toggle-button" :class="{ 'is-active': chartName === chart.value }" :title="chart.hint" @click="changeChart(chart.value)">{{ chart.label }}</button>
         </div>
         <TimeRangeSelect v-model="windowName" class="usage-window-control" aria-label="用量时间范围" title="用量时间范围" :options="windowOptions" :initial-range="customRange" @change="changeWindow" @apply="applyCustomRange" />
-        <button class="icon-button" type="button" title="刷新用量趋势" aria-label="刷新用量趋势" @click="loadTimeline"><UiIcon name="refresh" /></button>
+        <button class="icon-button" type="button" title="刷新用量趋势" aria-label="刷新用量趋势" @click="loadAll"><UiIcon name="refresh" /></button>
       </div>
     </div>
     <div class="usage-summary">
@@ -17,86 +17,121 @@
       <div class="usage-summary-item"><span>成功 / 失败</span><strong>{{ Number(total.successful_requests || 0) }} / {{ Number(total.failed_requests || 0) }}</strong></div>
     </div>
     <div v-if="error" class="usage-error" role="alert">{{ error }}</div>
-    <div v-else-if="buckets.length" class="usage-chart-stage" @pointerenter="scheduleHoverReplay">
-      <div v-if="chartName !== 'heat'" class="usage-metric-pills" role="group" aria-label="指标维度">
+    <div v-else-if="chartEmpty" class="usage-empty">{{ loading ? '正在读取用量数据…' : emptyText }}</div>
+    <div v-else class="usage-chart-stage" @pointerenter="scheduleHoverReplay">
+      <div v-if="pillsVisible" class="usage-metric-pills" role="group" aria-label="指标维度">
         <button v-for="(metric, index) in metrics" :key="metric.id" type="button" class="usage-metric-pill" :class="{ 'is-active': metricIndex === index }" @click="changeMetric(index)">{{ metric.label }}</button>
         <span class="usage-metric-auto" :title="carouselling ? '每 5 秒自动切换指标，悬停图表时暂停' : '已跟随系统减少动态效果，指标不自动切换'">{{ carouselling ? 'auto ↻' : '' }}</span>
       </div>
 
-      <div v-if="chartName === 'heat'" class="usage-chart usage-chart-heat">
-        <svg :width="heatGeom.width" :height="heatGeom.height" class="usage-heat-svg" role="img" aria-label="Token 消耗热力矩阵，颜色越深消耗越高">
-          <text v-for="label in heatGeom.colLabels" :key="`c${label.index}`" class="usage-axis-text" :x="heatLeft + label.index * heatGeom.cell + heatGeom.cell / 2" :y="heatTop - 5" text-anchor="middle">{{ label.text }}</text>
-          <text v-for="label in heatGeom.rowLabels" :key="`r${label.index}`" class="usage-axis-text" :x="heatLeft - 6" :y="heatTop + label.index * heatGeom.cell + heatGeom.cell / 2 + 4" text-anchor="end">{{ label.text }}</text>
-          <g :key="`cells-${animKey}`">
+      <div class="usage-chart">
+        <svg v-if="chartName === 'calendar' && granularity === 'hour'" :width="heatGeom.width" :height="heatGeom.height" class="usage-heat-svg" role="img" aria-label="Token 消耗小时方格热力图，颜色越深消耗越高">
+          <text v-for="label in heatGeom.colLabels" :key="`hc${label.index}`" class="usage-axis-text" :x="heatGeom.left + label.index * heatGeom.cell + heatGeom.cell / 2" :y="heatGeom.top - 6" text-anchor="middle">{{ label.text }}</text>
+          <text v-for="label in heatGeom.rowLabels" :key="`hr${label.index}`" class="usage-axis-text" :x="heatGeom.left - 8" :y="heatGeom.top + label.index * heatGeom.cell + heatGeom.cell / 2 + 4" text-anchor="end">{{ label.text }}</text>
+          <g :key="`heat-${animKey}`">
             <rect v-for="(cell, index) in heatGeom.cells" :key="cell.key" class="usage-heat-cell" :class="[`usage-heat-${cell.level}`, { 'is-animated': !reducedMotion }]" :style="{ animationDelay: `${Math.min(index * 12, 600)}ms` }" :x="cell.x" :y="cell.y" :width="heatGeom.cell - 2" :height="heatGeom.cell - 2" rx="2" @pointerenter="hoverCell = cell" @pointerleave="hoverCell = null" />
           </g>
         </svg>
-        <div v-if="hoverCell && hoverCell.bucket" class="usage-tooltip usage-tooltip-heat" :style="heatTooltipStyle">
-          <strong>{{ formatBucketTime(hoverCell.bucket.start_at) }}</strong>
-          <span>请求 {{ hoverCell.bucket.request_count }}（成功 {{ hoverCell.bucket.successful_requests }} / 失败 {{ hoverCell.bucket.failed_requests }}）</span>
-          <span>合计 {{ hoverCell.bucket.total_tokens.toLocaleString() }} Token</span>
+        <svg v-else-if="chartName === 'calendar'" :width="calendarGeom.width" :height="calendarGeom.height" class="usage-heat-svg" role="img" aria-label="GitHub 风格日历热力图，圆点越大颜色越深表示当日消耗越高">
+          <text v-for="label in calendarGeom.colLabels" :key="`mc${label.index}`" class="usage-axis-text" :x="calendarGeom.left + label.index * calendarGeom.cell + calendarGeom.cell / 2" :y="calendarGeom.top - 6" text-anchor="middle">{{ label.text }}</text>
+          <text v-for="label in calendarGeom.rowLabels" :key="`mr${label.index}`" class="usage-axis-text" :x="calendarGeom.left - 8" :y="calendarGeom.top + label.index * calendarGeom.cell + calendarGeom.cell / 2 + 4" text-anchor="end">{{ label.text }}</text>
+          <g :key="`cal-${animKey}`">
+            <circle v-for="(dot, index) in calendarGeom.dots" :key="dot.key" class="usage-cal-dot" :class="`usage-heat-${dot.level}`" :style="{ animationDelay: `${Math.min(index * 6, 600)}ms` }" :cx="dot.cx" :cy="dot.cy" :r="dot.radius" @pointerenter="hoverCell = dot" @pointerleave="hoverCell = null" />
+            <circle v-if="calendarGeom.peak" class="usage-cal-peak-ring" :cx="calendarGeom.peak.cx" :cy="calendarGeom.peak.cy" :r="calendarGeom.peak.radius + 4" />
+          </g>
+        </svg>
+        <div v-else-if="chartName === 'punch'" class="usage-punch-wrap">
+          <div v-if="punchEmpty" class="usage-empty usage-empty-inline">{{ loading ? '正在读取时段节律…' : '所选时间范围内没有 Token 记录' }}</div>
+          <svg v-else :width="punchGeom.width" :height="punchGeom.height" class="usage-heat-svg" role="img" aria-label="星期乘以24小时的消耗节律点阵，圆点越大表示该时段消耗越高">
+            <text v-for="label in punchGeom.colLabels" :key="`pc${label}`" class="usage-axis-text" :x="punchGeom.left + label * punchGeom.cell + punchGeom.cell / 2" :y="punchGeom.top - 6" text-anchor="middle">{{ label }}</text>
+            <text v-for="label in punchGeom.rowLabels" :key="`pr${label.index}`" class="usage-axis-text" :x="punchGeom.left - 8" :y="punchGeom.top + label.index * punchGeom.cell + punchGeom.cell / 2 + 4" text-anchor="end">{{ label.text }}</text>
+            <g :key="`punch-${animKey}`">
+              <circle v-for="(dot, index) in punchGeom.dots" :key="dot.key" class="usage-punch-dot" :class="`usage-heat-${dot.level}`" :style="{ animationDelay: `${Math.min(index * 5, 600)}ms` }" :cx="dot.cx" :cy="dot.cy" :r="dot.radius" @pointerenter="hoverCell = dot" @pointerleave="hoverCell = null" />
+            </g>
+          </svg>
         </div>
-        <div class="usage-legend usage-legend-inline">
-          <span class="usage-legend-item usage-legend-note">颜色越深 = 该时段消耗越高</span>
-          <span class="usage-legend-item"><i class="usage-swatch usage-heat-swatch-1" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-2" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-3" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-4" aria-hidden="true" />合计 Token</span>
+        <svg v-else-if="chartName === 'waffle'" :viewBox="`0 0 ${waffleWidth} ${waffleHeight}`" class="usage-chart-svg" role="img" aria-label="供应商消耗构成点阵，一枚圆点约等于百分之一的消耗" preserveAspectRatio="xMidYMid meet">
+          <g :key="`waffle-${animKey}`">
+            <circle v-for="(dot, index) in waffleDots" :key="dot.key" class="usage-waffle-dot" :class="`usage-waffle-${dot.shade}`" :style="{ animationDelay: `${Math.min(index * 8, 640)}ms` }" :cx="dot.cx" :cy="dot.cy" r="9" />
+          </g>
+        </svg>
+        <svg v-else-if="chartName === 'barcode'" :viewBox="`0 0 ${chartWidth} ${chartHeight}`" class="usage-chart-svg" role="img" aria-label="每个分桶一根发丝线的消耗条码图" preserveAspectRatio="xMidYMid meet">
+          <g :key="`barcode-${animKey}`">
+            <line v-for="(bar, index) in barcodeGeom" :key="bar.key" class="usage-barcode-line" :class="{ 'is-empty': bar.empty }" :x1="bar.x" :x2="bar.x" :y1="bar.y1" :y2="bar.y2" :style="{ animationDelay: `${Math.min(index * 4, 500)}ms` }" />
+            <circle v-for="bar in barcodeGeom" v-show="!bar.empty" :key="`${bar.key}-dot`" class="usage-barcode-dot" :cx="bar.x" :cy="bar.y1" :r="bar.radius" />
+          </g>
+          <text v-for="label in xLabels" :key="label.index" class="usage-axis-text" :x="x(label.index)" :y="chartHeight - 6" :text-anchor="label.index === 0 ? 'start' : label.index === buckets.length - 1 ? 'end' : 'middle'">{{ label.text }}</text>
+        </svg>
+        <template v-else>
+          <svg :viewBox="`0 0 ${chartWidth} ${chartHeight}`" class="usage-chart-svg" role="img" :aria-label="`${metric.label}随时间变化曲线`" preserveAspectRatio="xMidYMid meet">
+            <g v-for="grid in gridLines" :key="grid.value">
+              <line class="usage-grid-line" :x1="padLeft" :x2="chartWidth - padRight" :y1="y(grid.value)" :y2="y(grid.value)" />
+              <text class="usage-axis-text" :x="padLeft - 8" :y="y(grid.value) + 4" text-anchor="end">{{ grid.label }}</text>
+            </g>
+            <template v-if="chartName === 'trend'">
+              <path v-if="metric.id === 'tokens'" class="usage-area-input" :d="areaPath(bucket => bucket.input_tokens)" :style="{ opacity: drawProgress }" />
+              <path v-if="metric.id === 'tokens'" class="usage-area-output" :d="areaPath(bucket => bucket.input_tokens + bucket.output_tokens)" :style="{ opacity: drawProgress }" />
+              <path v-if="metric.id === 'requests'" class="usage-area-output" :d="areaPath(bucket => bucket.request_count)" :style="{ opacity: drawProgress }" />
+              <path class="usage-line-total" :d="linePath(lineValueOf)" :style="lineDrawStyle" />
+            </template>
+            <template v-else>
+              <path class="usage-area-cumulative" :d="cumulativeAreaPath()" :style="{ opacity: drawProgress * 0.5 }" />
+              <path class="usage-line-cumulative" :d="cumulativeLinePath()" :style="lineDrawStyle" />
+              <circle v-if="buckets.length" class="usage-hover-dot" :cx="x(buckets.length - 1)" :cy="y(cumulativeFinal)" r="3.5" :style="{ opacity: drawProgress }" />
+              <text class="usage-cumulative-number" :x="chartWidth - padRight" y="26" text-anchor="end">{{ counterDisplay }}</text>
+              <text class="usage-cumulative-label" :x="chartWidth - padRight" y="42" text-anchor="end">累计{{ metric.id === 'requests' ? '请求' : ' Tokens' }}</text>
+            </template>
+            <g v-for="label in xLabels" :key="label.index">
+              <text class="usage-axis-text" :x="x(label.index)" :y="chartHeight - 6" :text-anchor="label.index === 0 ? 'start' : label.index === buckets.length - 1 ? 'end' : 'middle'">{{ label.text }}</text>
+            </g>
+            <line v-if="hoverIndex >= 0" class="usage-hover-line" :x1="x(hoverIndex)" :x2="x(hoverIndex)" :y1="padTop" :y2="chartHeight - padBottom" />
+            <circle v-if="hoverIndex >= 0" class="usage-hover-dot" :cx="x(hoverIndex)" :cy="y(hoverValue)" r="4" />
+          </svg>
+          <div v-if="hoverIndex >= 0 && buckets[hoverIndex]" class="usage-tooltip" :style="tooltipStyle">
+            <strong>{{ formatBucketTime(buckets[hoverIndex].start_at) }}</strong>
+            <span>请求 {{ buckets[hoverIndex].request_count }}（成功 {{ buckets[hoverIndex].successful_requests }} / 失败 {{ buckets[hoverIndex].failed_requests }}）</span>
+            <span>输入 {{ buckets[hoverIndex].input_tokens.toLocaleString() }} · 输出 {{ buckets[hoverIndex].output_tokens.toLocaleString() }}</span>
+            <span v-if="chartName === 'cumulative'">累计 {{ counterDisplay }}</span>
+            <span v-else>合计 {{ buckets[hoverIndex].total_tokens.toLocaleString() }} Token</span>
+          </div>
+        </template>
+        <div v-if="hoverCell && hoverCell.bucket" class="usage-tooltip usage-tooltip-heat" :style="heatTooltipStyle">
+          <strong>{{ hoverCell.bucket._label || formatBucketTime(hoverCell.bucket.start_at) }}</strong>
+          <span>请求 {{ hoverCell.bucket.request_count }} · 合计 {{ Number(hoverCell.bucket.total_tokens || 0).toLocaleString() }} Token</span>
         </div>
       </div>
 
-      <div v-else class="usage-chart" @pointermove="trackHover" @pointerleave="hoverIndex = -1">
-        <svg :viewBox="`0 0 ${chartWidth} ${chartHeight}`" class="usage-chart-svg" role="img" :aria-label="chartName === 'cumulative' ? `累计${metric.label}曲线` : `${metric.label}随时间变化曲线`" preserveAspectRatio="xMidYMid meet">
-          <g v-for="grid in gridLines" :key="grid.value">
-            <line class="usage-grid-line" :x1="padLeft" :x2="chartWidth - padRight" :y1="y(grid.value)" :y2="y(grid.value)" />
-            <text class="usage-axis-text" :x="padLeft - 8" :y="y(grid.value) + 4" text-anchor="end">{{ grid.label }}</text>
-          </g>
-
-          <template v-if="chartName === 'trend'">
-            <path v-if="metric.id === 'tokens'" class="usage-area-input" :d="areaPath(bucket => bucket.input_tokens)" :style="{ opacity: drawProgress }" />
-            <path v-if="metric.id === 'tokens'" class="usage-area-output" :d="areaPath(bucket => bucket.input_tokens + bucket.output_tokens)" :style="{ opacity: drawProgress }" />
-            <path v-if="metric.id === 'requests'" class="usage-area-output" :d="areaPath(bucket => bucket.request_count)" :style="{ opacity: drawProgress }" />
-            <path class="usage-line-total" :d="linePath(lineValueOf)" :style="lineDrawStyle" />
-          </template>
-
-          <template v-else>
-            <path class="usage-area-cumulative" :d="cumulativeAreaPath()" :style="{ opacity: drawProgress * 0.5 }" />
-            <path class="usage-line-cumulative" :d="cumulativeLinePath()" :style="lineDrawStyle" />
-            <circle v-if="buckets.length" class="usage-hover-dot" :cx="x(buckets.length - 1)" :cy="y(cumulativeFinal)" r="3.5" :style="{ opacity: drawProgress }" />
-            <text class="usage-cumulative-number" :x="chartWidth - padRight" y="26" text-anchor="end">{{ counterDisplay }}</text>
-            <text class="usage-cumulative-label" :x="chartWidth - padRight" y="42" text-anchor="end">累计{{ metric.id === 'requests' ? '请求' : ' Tokens' }}</text>
-          </template>
-
-          <g v-for="label in xLabels" :key="label.index">
-            <text class="usage-axis-text" :x="x(label.index)" :y="chartHeight - 6" :text-anchor="label.index === 0 ? 'start' : label.index === buckets.length - 1 ? 'end' : 'middle'">{{ label.text }}</text>
-          </g>
-          <line v-if="hoverIndex >= 0" class="usage-hover-line" :x1="x(hoverIndex)" :x2="x(hoverIndex)" :y1="padTop" :y2="chartHeight - padBottom" />
-          <circle v-if="hoverIndex >= 0" class="usage-hover-dot" :cx="x(hoverIndex)" :cy="y(hoverValue)" r="4" />
-        </svg>
-        <div v-if="hoverIndex >= 0 && buckets[hoverIndex]" class="usage-tooltip" :style="tooltipStyle">
-          <strong>{{ formatBucketTime(buckets[hoverIndex].start_at) }}</strong>
-          <span>请求 {{ buckets[hoverIndex].request_count }}（成功 {{ buckets[hoverIndex].successful_requests }} / 失败 {{ buckets[hoverIndex].failed_requests }}）</span>
-          <span>输入 {{ buckets[hoverIndex].input_tokens.toLocaleString() }} · 输出 {{ buckets[hoverIndex].output_tokens.toLocaleString() }}</span>
-          <span v-if="chartName === 'cumulative'">累计 {{ counterDisplay }}</span>
-          <span v-else>合计 {{ buckets[hoverIndex].total_tokens.toLocaleString() }} Token</span>
-        </div>
-        <div class="usage-legend usage-legend-inline">
-          <template v-if="chartName === 'trend' && metric.id === 'tokens'">
-            <span class="usage-legend-item"><i class="usage-swatch usage-swatch-input" aria-hidden="true" />输入</span>
-            <span class="usage-legend-item"><i class="usage-swatch usage-swatch-output" aria-hidden="true" />输出（叠加）</span>
-            <span class="usage-legend-item"><i class="usage-swatch usage-swatch-total" aria-hidden="true" />合计</span>
-          </template>
-          <template v-else-if="chartName === 'trend' && metric.id === 'requests'">
-            <span class="usage-legend-item"><i class="usage-swatch usage-swatch-output" aria-hidden="true" />请求数</span>
-          </template>
-          <template v-else-if="chartName === 'trend'">
-            <span class="usage-legend-item"><i class="usage-swatch usage-swatch-total" aria-hidden="true" />成功率</span>
-          </template>
-          <template v-else>
-            <span class="usage-legend-item"><i class="usage-swatch usage-swatch-total" aria-hidden="true" />累计曲线</span>
-          </template>
-          <span class="usage-legend-item usage-legend-note">y 轴从 0 开始 · 不断轴</span>
-        </div>
+      <div class="usage-legend-row">
+        <template v-if="chartName === 'trend' && metric.id === 'tokens'">
+          <span class="usage-legend-item"><i class="usage-swatch usage-swatch-input" aria-hidden="true" />输入</span>
+          <span class="usage-legend-item"><i class="usage-swatch usage-swatch-output" aria-hidden="true" />输出（叠加）</span>
+          <span class="usage-legend-item"><i class="usage-swatch usage-swatch-total" aria-hidden="true" />合计</span>
+        </template>
+        <template v-else-if="chartName === 'trend' && metric.id === 'requests'">
+          <span class="usage-legend-item"><i class="usage-swatch usage-swatch-output" aria-hidden="true" />请求数</span>
+        </template>
+        <template v-else-if="chartName === 'trend'">
+          <span class="usage-legend-item"><i class="usage-swatch usage-swatch-total" aria-hidden="true" />成功率</span>
+        </template>
+        <template v-else-if="chartName === 'cumulative'">
+          <span class="usage-legend-item"><i class="usage-swatch usage-swatch-total" aria-hidden="true" />累计曲线</span>
+        </template>
+        <template v-else-if="chartName === 'calendar'">
+          <span class="usage-legend-item"><i class="usage-swatch usage-heat-swatch-1" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-2" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-3" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-4" aria-hidden="true" />圆点越大越深 = 当日消耗越高</span>
+          <span class="usage-legend-item usage-legend-note">{{ calendarPeakNote }}</span>
+        </template>
+        <template v-else-if="chartName === 'punch'">
+          <span class="usage-legend-item"><i class="usage-swatch usage-heat-swatch-2" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-3" aria-hidden="true" /><i class="usage-swatch usage-heat-swatch-4" aria-hidden="true" />圆点越大越深 = 该星期×小时消耗越高</span>
+        </template>
+        <template v-else-if="chartName === 'waffle'">
+          <span class="usage-legend-item"><i class="usage-swatch usage-waffle-swatch" aria-hidden="true" />一枚圆点 ≈ 1% 消耗，颜色越深 = 排名越靠前</span>
+        </template>
+        <template v-else>
+          <span class="usage-legend-item"><i class="usage-swatch usage-swatch-total" aria-hidden="true" />发丝线 = 一个分桶 · 圆点 = 消耗量</span>
+        </template>
+        <span class="usage-legend-note">{{ legendNoteTail }}</span>
       </div>
     </div>
-    <div v-else class="usage-empty">{{ loading ? '正在读取用量趋势…' : '所选时间范围内没有 Token 记录' }}</div>
   </section>
 </template>
 
@@ -106,6 +141,7 @@ import { controlFetch } from '../api.js'
 import TimeRangeSelect from './TimeRangeSelect.vue'
 import UiIcon from './ui/UiIcon.vue'
 import { formatTokenCount } from '../token-format.js'
+import { buildShareCardData } from '../share-card.js'
 
 const chartWidth = 720
 const chartHeight = 220
@@ -117,7 +153,15 @@ const DRAW_MS = 900
 const CAROUSEL_MS = 5000
 const HEAT_LEFT = 36
 const HEAT_TOP = 20
-const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日']
+const CALENDAR_LEFT = 40
+const CALENDAR_TOP = 22
+const CALENDAR_MAX = 26
+const PUNCH_LEFT = 36
+const PUNCH_TOP = 20
+const PUNCH_MAX = 24
+const WAFFLE_SIZE = 300
+const WAFFLE_GAP = 6
+const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 const metrics = [
   { id: 'tokens', label: 'Tokens' },
   { id: 'requests', label: '请求数' },
@@ -137,6 +181,8 @@ const hoverIndex = ref(-1)
 const hoverCell = ref(null)
 const drawProgress = ref(1)
 const animKey = ref(0)
+const punchMatrix = ref([])
+const waffleStatus = ref(null)
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 let timer
 let carouselTimer
@@ -152,19 +198,24 @@ const windowOptions = [
 ]
 const chartOptions = [
   { value: 'trend', label: '趋势', hint: '时序趋势（面积 + 合计线）' },
-  { value: 'heat', label: '热力', hint: '时段消耗热力矩阵' },
-  { value: 'cumulative', label: '累计', hint: '累计冲击线 + 大数字' }
+  { value: 'calendar', label: '日历', hint: 'GitHub 风格日历热力 / 小时方格' },
+  { value: 'cumulative', label: '累计', hint: '累计冲击线 + 大数字' },
+  { value: 'punch', label: '节律', hint: '星期×24 小时节律点阵' },
+  { value: 'waffle', label: '构成', hint: '供应商构成点阵' },
+  { value: 'barcode', label: '发丝线', hint: '逐桶发丝线条码' }
 ]
 
 function normalizeChart(value) {
-  if (value === 'heat' || value === 'cumulative') return value
+  if (value === 'calendar' || value === 'punch' || value === 'waffle' || value === 'barcode' || value === 'cumulative') return value
+  if (value === 'heat' || value === 'trend' || value === 'area' || value === 'line' || value === 'bars') return value === 'heat' ? 'calendar' : 'trend'
   return 'trend'
 }
 
 function quarticOut(t) { return 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 4) }
 
 const metric = computed(() => metrics[metricIndex.value] || metrics[0])
-const carouselling = computed(() => !reducedMotion && chartName.value !== 'heat')
+const pillsVisible = computed(() => chartName.value === 'trend' || chartName.value === 'cumulative')
+const carouselling = computed(() => !reducedMotion && pillsVisible.value)
 const windowLabel = computed(() => windowOptions.find(option => option.value === windowName.value)?.label || (windowName.value === 'custom' ? '自定义时间' : ''))
 const headingMeta = computed(() => {
   if (error.value) return '用量趋势暂不可用'
@@ -172,6 +223,20 @@ const headingMeta = computed(() => {
   return buckets.value.length ? `${windowLabel.value} · ${unit}分桶 · ${buckets.value.length} 个数据点` : windowLabel.value ? `${windowLabel.value} · ${unit}分桶` : ''
 })
 const conclusionLabel = computed(() => `${windowLabel.value || '所选范围'} 合计`)
+const emptyText = computed(() => {
+  if (loading.value) return '正在读取用量数据…'
+  if (chartName.value === 'punch') return '所选时间范围内没有 Token 记录，无法计算时段节律'
+  return '所选时间范围内没有 Token 记录'
+})
+const chartEmpty = computed(() => {
+  if (chartName.value === 'waffle') return !waffleDots.value.length && !loading.value
+  if (chartName.value === 'punch') return punchEmpty.value && !loading.value
+  return !buckets.value.length
+})
+const punchEmpty = computed(() => {
+  if (!punchMatrix.value.length) return true
+  return punchMatrix.value.every(row => row.every(cell => Number(cell.total_tokens || 0) <= 0))
+})
 
 const cumulativeBuckets = computed(() => {
   let sum = 0
@@ -228,20 +293,16 @@ const hoverValue = computed(() => {
   if (metric.value.id === 'requests') return Number(bucket.request_count || 0)
   return Number(bucket.total_tokens || 0)
 })
-
-const heatGeom = computed(() => buildHeatGeom())
-const heatTooltipStyle = computed(() => {
-  if (!hoverCell.value) return {}
-  const ratio = (hoverCell.value.x + heatGeom.value.cell / 2) / heatGeom.value.width
-  return ratio > 0.7 ? { right: `${(1 - ratio) * 100}%` } : { left: `${ratio * 100}%` }
+const calendarPeakNote = computed(() => {
+  const peak = calendarGeom.value.peak
+  if (!peak) return ''
+  return `最忙 ${formatBucketTime(peak.bucket.start_at)}（${formatTokenCount(Number(peak.bucket.total_tokens || 0))}）`
 })
-const tooltipStyle = computed(() => {
-  if (hoverIndex.value < 0) return {}
-  const ratio = x(hoverIndex.value) / chartWidth
-  return ratio > 0.7 ? { right: `${(1 - ratio) * 100}%` } : { left: `${ratio * 100}%` }
+const legendNoteTail = computed(() => {
+  if (chartName.value === 'trend' || chartName.value === 'cumulative') return 'y 轴从 0 开始 · 不断轴'
+  if (chartName.value === 'barcode') return 'y 轴从 0 开始 · 不断轴 · 安静分桶保留短基线'
+  return ''
 })
-const lineDrawStyle = computed(() => ({ strokeDasharray: pathLength.value, strokeDashoffset: pathLength.value * (1 - drawProgress.value) }))
-const pathLength = ref(0)
 
 function successRateOf(bucket) {
   const requests = Number(bucket.request_count || 0)
@@ -255,6 +316,87 @@ function lineValueOf(bucket) {
   return Number(bucket.total_tokens || 0)
 }
 
+const heatGeom = computed(() => buildHeatGeom())
+const punchGeom = computed(() => buildPunchGeom())
+const calendarGeom = computed(() => buildCalendarGeom())
+const barcodeGeom = computed(() => {
+  const count = buckets.value.length
+  if (!count) return []
+  const innerWidth = chartWidth - padLeft - padRight
+  const slot = innerWidth / count
+  const lineWidth = Math.max(1, Math.min(3, slot * 0.35))
+  const base = chartHeight - padBottom
+  const maxToken = Math.max(1, ...buckets.value.map(bucket => Number(bucket.total_tokens || 0)))
+  const trackTop = padTop + 18
+  return buckets.value.map((bucket, index) => {
+    const tokens = Number(bucket.total_tokens || 0)
+    const x = padLeft + slot * index + slot / 2
+    const dotRadius = tokens > 0 ? Math.max(2.5, Math.sqrt(tokens / maxToken) * 9) : 0
+    const dotY = tokens > 0 ? base - Math.sqrt(tokens / maxToken) * (base - trackTop) : base
+    return {
+      key: index,
+      x,
+      y1: dotY,
+      y2: base,
+      empty: tokens <= 0,
+      radius: dotRadius
+    }
+  })
+})
+const waffleDots = computed(() => {
+  const entries = waffleProviders.value
+  if (!entries.length) return []
+  const perRow = 10
+  const cell = (WAFFLE_SIZE - WAFFLE_GAP) / perRow
+  const dots = []
+  let index = 0
+  entries.forEach((entry, providerIndex) => {
+    const dotsForProvider = Math.max(entry.tokenShare > 0 ? 1 : 0, Math.round((entry.tokenShare / 100) * 100))
+    for (let d = 0; d < dotsForProvider && index < 100; d += 1) {
+      const row = Math.floor(index / perRow)
+      const col = index % perRow
+      dots.push({
+        key: `${entry.providerId}-${d}`,
+        cx: WAFFLE_GAP / 2 + col * cell + cell / 2,
+        cy: WAFFLE_GAP / 2 + row * cell + cell / 2,
+        shade: Math.min(4, providerIndex + 1)
+      })
+      index += 1
+    }
+  })
+  return dots
+})
+const waffleWidth = WAFFLE_SIZE
+const waffleHeight = WAFFLE_SIZE
+const waffleProviders = computed(() => {
+  const status = waffleStatus.value
+  if (!status) return []
+  return buildShareCardData({ status, providerLimit: 8 }).byProvider
+})
+const heatTooltipStyle = computed(() => {
+  if (!hoverCell.value) return {}
+  const cx = hoverCell.value.cx ?? hoverCell.value.x ?? 0
+  const width = chartName.value === 'punch' ? punchGeom.value.width : calendarGeom.value.width
+  const ratio = cx / width
+  return ratio > 0.7 ? { right: `${(1 - ratio) * 100}%` } : { left: `${ratio * 100}%` }
+})
+const tooltipStyle = computed(() => {
+  if (hoverIndex.value < 0) return {}
+  const ratio = x(hoverIndex.value) / chartWidth
+  return ratio > 0.7 ? { right: `${(1 - ratio) * 100}%` } : { left: `${ratio * 100}%` }
+})
+const lineDrawStyle = computed(() => ({ strokeDasharray: pathLength.value, strokeDashoffset: pathLength.value * (1 - drawProgress.value) }))
+const pathLength = ref(0)
+
+function heatLevel(value, maxToken) {
+  if (value <= 0) return 0
+  const ratio = value / maxToken
+  if (ratio > 0.75) return 4
+  if (ratio > 0.5) return 3
+  if (ratio > 0.25) return 2
+  return 1
+}
+
 function buildHeatGeom() {
   if (granularity.value === 'hour') {
     const rowsMap = new Map()
@@ -265,21 +407,125 @@ function buildHeatGeom() {
       rowsMap.get(key).cells.set(date.getHours(), bucket)
     }
     const rows = [...rowsMap.values()].sort((a, b) => String(a.key).localeCompare(String(b.key)))
-    return finishHeatGeom(rows, 24, row => row.label, bucket => new Date(bucket.start_at).getHours())
+    return finishGridGeom(rows, 24, row => row.label, bucket => new Date(bucket.start_at).getHours())
   }
-  const rows = WEEKDAY_LABELS.map((label, index) => ({ key: String(index), label, cells: new Map() }))
-  let firstMonday = null
-  for (const bucket of buckets.value) {
-    const date = new Date(bucket.start_at)
-    const weekday = (date.getDay() + 6) % 7
-    if (firstMonday === null) firstMonday = new Date(date.getFullYear(), date.getMonth(), date.getDate() - weekday)
-    const weekIndex = Math.floor((date - firstMonday) / (7 * 24 * 3600 * 1000))
-    rows[weekday].cells.set(weekIndex, { bucket, label: `${date.getMonth() + 1}-${date.getDate()}` })
-  }
-  return finishHeatGeom(rows, null, row => row.label)
+  return buildCalendarGeom()
 }
 
-function finishHeatGeom(rows, fixedColumns, rowLabelOf) {
+function buildPunchGeom() {
+  const maxToken = Math.max(1, ...punchMatrix.value.flat().map(cell => Number(cell.total_tokens || 0)))
+  const availableWidth = chartWidth - PUNCH_LEFT - 8
+  const availableHeight = chartHeight - PUNCH_TOP - 8
+  const cell = Math.max(14, Math.min(28, Math.floor(Math.min(availableWidth / 24, availableHeight / 7))))
+  const dots = []
+  punchMatrix.value.forEach((row, weekday) => {
+    row.forEach((cellData, hour) => {
+      const tokens = Number(cellData.total_tokens || 0)
+      dots.push({
+        key: `${weekday}-${hour}`,
+        cx: PUNCH_LEFT + hour * cell + cell / 2,
+        cy: PUNCH_TOP + weekday * cell + cell / 2,
+        radius: tokens > 0 ? Math.max(2, Math.sqrt(tokens / maxToken) * (cell / 2 - 2)) : 1.5,
+        level: heatLevel(tokens, maxToken),
+        bucket: {
+          ...cellData,
+          start_at: null,
+          _label: `${WEEKDAY_LABELS[weekday]} ${String(hour).padStart(2, '0')}:00`
+        }
+      })
+    })
+  })
+  return {
+    cell,
+    dots,
+    colLabels: [0, 6, 12, 18],
+    rowLabels: WEEKDAY_LABELS.map((text, index) => ({ index, text })),
+    width: PUNCH_LEFT + 24 * cell + 8,
+    height: PUNCH_TOP + 7 * cell + 8
+  }
+}
+
+function buildCalendarGeom() {
+  if (granularity.value === 'hour' || !buckets.value.length) return { dots: [], colLabels: [], rowLabels: [], width: 0, height: 0, left: CALENDAR_LEFT, top: CALENDAR_TOP, cell: 0, peak: null }
+  const byDay = new Map()
+  for (const bucket of buckets.value) {
+    const date = new Date(bucket.start_at)
+    const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+    const key = dayStart.getTime()
+    const existing = byDay.get(key)
+    if (existing) {
+      existing.tokens += Number(bucket.total_tokens || 0)
+      existing.request_count += Number(bucket.request_count || 0)
+      existing.successful_requests += Number(bucket.successful_requests || 0)
+      existing.failed_requests += Number(bucket.failed_requests || 0)
+    } else {
+      byDay.set(key, {
+        tokens: Number(bucket.total_tokens || 0),
+        request_count: Number(bucket.request_count || 0),
+        successful_requests: Number(bucket.successful_requests || 0),
+        failed_requests: Number(bucket.failed_requests || 0),
+        date: dayStart
+      })
+    }
+  }
+  const days = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([key, value]) => ({ key, ...value }))
+  const firstWeekday = (days[0].date.getDay() + 6) % 7
+  const weeks = Math.ceil((firstWeekday + days.length) / 7)
+  const availableWidth = chartWidth - CALENDAR_LEFT - 8
+  const availableHeight = chartHeight - CALENDAR_TOP - 10
+  const cell = Math.max(12, Math.min(CALENDAR_MAX, Math.floor(Math.min(availableWidth / Math.max(1, weeks), availableHeight / 7))))
+  const maxToken = Math.max(1, ...days.map(day => day.tokens))
+  const dotRadiusMax = cell / 2 - 2
+  const dots = []
+  let peak = null
+  days.forEach((day, index) => {
+    const slot = firstWeekday + index
+    const week = Math.floor(slot / 7)
+    const weekday = slot % 7
+    const radius = day.tokens > 0 ? Math.max(2, Math.sqrt(day.tokens / maxToken) * dotRadiusMax) : 1.5
+    const dot = {
+      key: String(day.key),
+      cx: CALENDAR_LEFT + week * cell + cell / 2,
+      cy: CALENDAR_TOP + weekday * cell + cell / 2,
+      radius,
+      level: heatLevel(day.tokens, maxToken),
+      bucket: {
+        start_at: day.date.getTime(),
+        total_tokens: day.tokens,
+        request_count: day.request_count,
+        successful_requests: day.successful_requests,
+        failed_requests: day.failed_requests
+      }
+    }
+    dots.push(dot)
+    if (!peak || day.tokens > peak.tokens) peak = { ...dot, tokens: day.tokens }
+  })
+  const monthLabels = []
+  let lastMonth = -1
+  days.forEach((day, index) => {
+    const slot = firstWeekday + index
+    const week = Math.floor(slot / 7)
+    if (day.date.getMonth() !== lastMonth) {
+      lastMonth = day.date.getMonth()
+      if (!monthLabels.some(label => label.index === week)) {
+        monthLabels.push({ index: week, text: `${lastMonth + 1}月` })
+      }
+    }
+  })
+  return {
+    cell,
+    dots,
+    colLabels: monthLabels,
+    rowLabels: ['周一', '周三', '周五', '周日'].map((text, index) => ({ index: index * 2, text })),
+    width: CALENDAR_LEFT + weeks * cell + 8,
+    height: CALENDAR_TOP + 7 * cell + 8,
+    left: CALENDAR_LEFT,
+    top: CALENDAR_TOP,
+    peak: peak && peak.tokens > 0 ? peak : null
+  }
+}
+
+function finishGridGeom(rows, fixedColumns, rowLabelOf, hourOf) {
   let columns = fixedColumns
   if (columns == null) {
     columns = 1
@@ -327,15 +573,6 @@ function finishHeatGeom(rows, fixedColumns, rowLabelOf) {
   }
 }
 
-function heatLevel(value, maxToken) {
-  if (value <= 0) return 0
-  const ratio = value / maxToken
-  if (ratio > 0.75) return 4
-  if (ratio > 0.5) return 3
-  if (ratio > 0.25) return 2
-  return 1
-}
-
 function x(index) {
   const count = buckets.value.length
   if (count <= 1) return padLeft
@@ -365,6 +602,7 @@ function formatBucketLabel(value) {
   return granularity.value === 'hour' ? `${String(date.getHours()).padStart(2, '0')}:00` : `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 function formatBucketTime(value) {
+  if (value == null) return ''
   const date = new Date(value)
   const dateText = `${date.getMonth() + 1}月${date.getDate()}日`
   return granularity.value === 'hour' ? `${dateText} ${String(date.getHours()).padStart(2, '0')}:00` : dateText
@@ -423,6 +661,7 @@ function changeChart(value) {
   hoverIndex.value = -1
   hoverCell.value = null
   localStorage.setItem('local-proxy-usage-trend-chart', value)
+  loadAuxData()
   replayEntrance()
 }
 function changeMetric(index) {
@@ -432,13 +671,13 @@ function changeMetric(index) {
 function changeWindow(value) {
   if (value !== 'custom') customRange.value = null
   localStorage.setItem('local-proxy-usage-trend-window', value)
-  loadTimeline()
+  loadAll()
 }
 function applyCustomRange(range) {
   customRange.value = range
   windowName.value = 'custom'
   localStorage.setItem('local-proxy-usage-trend-window', 'custom')
-  loadTimeline()
+  loadAll()
 }
 function timelineParams() {
   const params = new URLSearchParams({ usage_window: windowName.value })
@@ -448,10 +687,11 @@ function timelineParams() {
   }
   return params
 }
+function windowParams() {
+  return timelineParams()
+}
 async function loadTimeline() {
-  if (loading.value) { reloadAfterCurrent = true; return }
   if (windowName.value === 'custom' && !customRange.value) return
-  loading.value = true; error.value = ''
   try {
     const payload = await controlFetch(`/api/usage-timeline?${timelineParams()}`)
     buckets.value = Array.isArray(payload.buckets) ? payload.buckets : []
@@ -462,15 +702,34 @@ async function loadTimeline() {
     replayEntrance()
   } catch (requestError) {
     error.value = requestError.message
-  } finally {
-    loading.value = false
-    if (reloadAfterCurrent) { reloadAfterCurrent = false; void loadTimeline() }
   }
 }
-
+async function loadAuxData() {
+  error.value = ''
+  try {
+    if (chartName.value === 'punch') {
+      const payload = await controlFetch(`/api/usage-weekday-hour?${windowParams()}`)
+      punchMatrix.value = Array.isArray(payload.matrix) ? payload.matrix : []
+    } else if (chartName.value === 'waffle') {
+      waffleStatus.value = await controlFetch(`/api/status?${windowParams()}`).catch(() => null)
+    }
+  } catch (requestError) {
+    error.value = requestError.message
+  }
+}
+async function loadAll() {
+  if (document.hidden) return
+  if (loading.value) { reloadAfterCurrent = true; return }
+  if (windowName.value === 'custom' && !customRange.value) return
+  loading.value = true
+  await loadTimeline()
+  await loadAuxData()
+  loading.value = false
+  if (reloadAfterCurrent) { reloadAfterCurrent = false; void loadAll() }
+}
 onMounted(() => {
-  loadTimeline()
-  timer = window.setInterval(loadTimeline, 30000)
+  loadAll()
+  timer = window.setInterval(loadAll, 30000)
   carouselTimer = window.setInterval(() => {
     if (!carouselling.value || document.hidden || hoverIndex.value >= 0 || hoverCell.value) return
     metricIndex.value = (metricIndex.value + 1) % metrics.length
