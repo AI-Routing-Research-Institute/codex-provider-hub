@@ -243,6 +243,15 @@ test("usage trend view offers differentiated animated chart types", () => {
   assert.match(styles, /\.usage-cumulative-number/);
 });
 
+test("usage trend view matches the shared page padding and content width", () => {
+  const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+
+  assert.match(styles, /\.usage-view \{ display: flex; flex-direction: column; gap: 14px; min-height: 0; padding: 18px 20px 20px; background: var\(--surface-soft\); \}/);
+  assert.match(styles, /\.usage-view > \* \{ width: min\(1520px, 100%\); margin-inline: auto; \}/);
+  const narrow = styles.match(/@media \(max-width: 600px\) \{[\s\S]*?\.usage-view \{ padding: 16px 12px; \}/);
+  assert.ok(narrow, "narrow-screen usage padding missing");
+});
+
 test("provider action visibility follows the saved runtime settings", () => {
   const app = fs.readFileSync(path.join(root, "App.vue"), "utf8");
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");

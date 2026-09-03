@@ -1326,6 +1326,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
   .toast-region { top: max(12px, env(safe-area-inset-top)); right: 12px; left: 12px; width: auto; transform: none; }
   .settings-view { padding: 18px 12px; }
   .requests-view { padding: 16px 12px; }
+  .usage-view { padding: 16px 12px; }
   .request-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .time-range-fields fieldset > div { grid-template-columns: 1fr; }
   .request-search { grid-column: 1 / -1; }
@@ -1379,7 +1380,8 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .route-provider strong { font-size: 22px; }
 .recovery, .draining { font-size: 13px; }
 
-.usage-view { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+.usage-view { display: flex; flex-direction: column; gap: 14px; min-height: 0; padding: 18px 20px 20px; background: var(--surface-soft); }
+.usage-view > * { width: min(1520px, 100%); margin-inline: auto; }
 .usage-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .usage-heading h2 { font-size: 15px; }
 .usage-heading p { margin-top: 3px; color: var(--muted); font-size: var(--font-meta); }
