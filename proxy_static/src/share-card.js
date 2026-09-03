@@ -118,12 +118,11 @@ export function latestBattleLabel(lastRequestAt) {
 
 export function terminalCardTheme() {
   return {
-    margin: 28,
-    cardWidth: 380,
+    cardWidth: 360,
+    cardHeight: 640,
+    cornerRadius: 16,
     titlebarHeight: 36,
-    bodyPaddingTop: 26,
-    bodyPaddingBottom: 22,
-    bodyPaddingX: 22,
+    bodyPaddingX: 24,
     colors: {
       bgDeep: '#0b0d10',
       panel: '#14171c',

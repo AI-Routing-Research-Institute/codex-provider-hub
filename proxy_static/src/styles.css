@@ -618,7 +618,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .share-card-stage { display: grid; place-items: center; }
 .share-card-placeholder { padding: 60px 0; color: var(--muted); font-size: 13px; }
 .share-card-canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: min(66vh, 720px); border-radius: 14px; box-shadow: 0 12px 32px rgb(0 0 0 / .25); }
-.share-card-canvas-terminal { max-width: min(380px, 100%); border-radius: 10px; box-shadow: none; }
+.share-card-canvas-terminal { max-width: min(340px, 100%); border-radius: 16px; box-shadow: none; }
 .share-card-empty { margin: 0; color: var(--amber); font-size: 12px; }
 .share-card-notice { margin: 0; color: var(--teal); font-size: 12px; }
 .share-card-notice.error { color: var(--red); }
@@ -1429,8 +1429,8 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .usage-heat-swatch-2 { background: var(--usage-mono-2); }
 .usage-heat-swatch-3 { background: var(--usage-mono-3); }
 .usage-heat-swatch-4 { background: var(--usage-mono-4); }
-.usage-chart-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--control-surface); overflow: hidden; }
-.usage-chart-toggle-button { border: none; background: transparent; color: var(--muted); font-size: var(--font-meta); padding: 6px 12px; cursor: pointer; }
+.usage-chart-toggle { display: inline-flex; flex-shrink: 0; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--control-surface); overflow: hidden; }
+.usage-chart-toggle-button { min-width: 48px; border: none; background: transparent; color: var(--muted); font-size: var(--font-meta); padding: 6px 14px; white-space: nowrap; cursor: pointer; }
 .usage-chart-toggle-button + .usage-chart-toggle-button { border-left: 1px solid var(--line); }
 .usage-chart-toggle-button.is-active { background: var(--usage-mono-ink); color: var(--surface); }
 .usage-conclusion span { color: var(--muted); }
