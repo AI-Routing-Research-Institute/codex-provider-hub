@@ -3962,12 +3962,6 @@ function applyUpdateState(state) {
       ? `v${state.current_version}`
       : "—";
   }
-  const latestCode = document.querySelector("#update-latest-version");
-  if (latestCode) {
-    latestCode.textContent = state.latest_version
-      ? `v${state.latest_version}`
-      : "—";
-  }
   const applyButton = document.querySelector("#update-apply-button");
   if (applyButton) {
     const hasUpdate = state.update_available ?? state.has_update ?? updateState.has_update ?? false;

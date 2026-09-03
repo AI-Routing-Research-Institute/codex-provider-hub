@@ -53,10 +53,12 @@ status = "verified"
 - `local_proxy/updater.py`：`UpdateInfo` 新增 `newer_available`（远端有新版），`has_update` 保持“新版且本机有可用产物”的语义；无产物时 `has_update=False` 但 `newer_available=True`。
 - `local_proxy/application.py`：`UpdateController` 新增 `_refresh_current_version()`，`status()/check()` 每次重算 `resolve_app_version()` 并同步 `current_version`；`status()` 同时返回 `has_update` 与别名 `update_available`，并透传 `newer_available`。
 - `local_proxy/server.py`：无 controller 时的降级 payload 补齐 `update_available/newer_available/latest_version/release_url/notes`。
-- `proxy_static/src/components/RuntimeView.vue`：版本行改为 `当前 X / 最新 Y`（未检查 `最新`显示 `—`）；兼容读取 `update_available ?? has_update`；检查文案三分支（可更新/手动下载/已是最新）；更新按钮仅 `有更新且 supported` 时显示。
-- `proxy_static/classic/index.html` + `proxy_static/classic/app.js`：同上口径，版本行改为 `当前 vX / 最新 vY`，`check` 兼容两字段并区分手动下载分支，更新按钮沿用 `has_update && supported`（兼容别名）。
+- `proxy_static/src/components/RuntimeView.vue`：版本行只显示当前版本号；兼容读取 `update_available ?? has_update`；检查文案三分支（可更新/手动下载/已是最新）；更新按钮仅 `有更新且 supported` 时显示。
+- `proxy_static/classic/index.html` + `proxy_static/classic/app.js`：同上口径，版本行只显示当前版本，`check` 兼容两字段并区分手动下载分支，更新按钮沿用 `has_update && supported`（兼容别名）。
 - `tests/test_updater.py`：新增无产物时 `newer_available=True` 断言、`newer_available` 跟踪用例、`UpdateController` 契约用例（别名/刷新/透传）。
 - `tests/test_server.py`：`FakeUpdateController` 对齐新契约，`check` 与无 controller 用例追加新字段断言。
+- `proxy_static/dist`：随 pre-push 门禁重新构建并同步提交，生产包包含本次界面修复（含显示修正后的二次构建）。
+- 显示修正：版本行只显示当前版本号（右侧 225px 列放不下双号文本会被省略号截断）；最新版本号在“检查更新”后的结果提示行展示（发现新版本 X / 手动下载 / 已是最新），不改动样式布局。
 
 ## 验证结果
 
@@ -65,6 +67,7 @@ status = "verified"
 - `node --check proxy_static/classic/app.js`：通过；`RuntimeView.vue` script 段抽取为 `.mjs` 后 `node --check`：通过。
 - `Get-ChildItem tests -Filter *.test.js | ForEach-Object { node --test $_.FullName }`：全部通过，0 fail。
 - 行为核验：`resolve_app_version('0.1.7')` → `1.6.2`；模拟 `v1.6.2` 发布包：`1.6.1→has_update True/newer True`（提示发现新版本），`1.6.2→False/False`（已是最新），无产物→`has False/newer True`（手动下载分支）。
+- 显示修正后复验：全量 534 单测 OK（38s），JS 全量 0 fail，版本行恢复单行当前版、无截断风险（样式未动）。
 
 ## PR
 
