@@ -70,6 +70,18 @@ SSE_RETRY_PREFLIGHT_BYTES = 8 * 1024 * 1024
 SSE_RETRY_MARKER_TAIL_BYTES = 512
 USAGE_RESPONSE_BUFFER_BYTES = 8 * 1024 * 1024
 USAGE_WINDOWS = {"today", "24h", "7d", "30d", "all", "custom"}
+TIMELINE_MAX_CUSTOM_SECONDS = 90 * 24 * 3600
+TIMELINE_HOURLY_SPAN_SECONDS = 48 * 3600
+TIMELINE_BUCKET_FIELDS = (
+    "request_count",
+    "successful_requests",
+    "failed_requests",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cached_tokens",
+    "reasoning_tokens",
+)
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -1338,6 +1350,106 @@ class UsageStore:
             ),
         }
 
+    def timeline(
+        self,
+        window: str,
+        *,
+        start_at: float | None = None,
+        end_at: float | None = None,
+        provider_id: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        normalized = window.strip().lower()
+        if normalized not in USAGE_WINDOWS:
+            raise ValueError("不支持的 Token 统计时间范围")
+        timestamp = time.time() if now is None else float(now)
+        if normalized == "custom":
+            raw_lower, upper = _custom_time_bounds(
+                start_at,
+                end_at,
+                max_seconds=TIMELINE_MAX_CUSTOM_SECONDS,
+            )
+        else:
+            raw_lower = _usage_window_cutoff(normalized, timestamp)
+            upper = timestamp
+        clauses: list[str] = []
+        params: list[Any] = []
+        if provider_id is not None:
+            clauses.append("provider_id = ?")
+            params.append(str(provider_id))
+        with self._lock, closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            if raw_lower is None:
+                earliest = connection.execute(
+                    "SELECT MIN(recorded_at) AS earliest FROM request_usage"
+                ).fetchone()["earliest"]
+                raw_lower = None if earliest is None else float(earliest)
+            if raw_lower is None:
+                return {
+                    "window": normalized,
+                    "granularity": "day",
+                    "start_at": None,
+                    "end_at": round(upper * 1000) - 1,
+                    "provider_id": None if provider_id is None else str(provider_id),
+                    "buckets": [],
+                    "total": dict.fromkeys(TIMELINE_BUCKET_FIELDS, 0),
+                }
+            granularity = _timeline_granularity(upper - raw_lower)
+            step = _timeline_bucket_seconds(granularity)
+            anchor = _align_timeline_start(raw_lower, granularity)
+            clauses.insert(0, "recorded_at >= ?")
+            params.insert(0, raw_lower)
+            clauses.append("recorded_at < ?")
+            params.append(upper)
+            rows = connection.execute(
+                f"""
+                SELECT CAST((recorded_at - ?) / ? AS INTEGER) AS bucket_index,
+                       COUNT(*) AS request_count,
+                       COALESCE(
+                           SUM(CASE WHEN succeeded = 1 THEN 1 ELSE 0 END), 0
+                       ) AS successful_requests,
+                       COALESCE(
+                           SUM(CASE WHEN succeeded = 1 THEN 0 ELSE 1 END), 0
+                       ) AS failed_requests,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens
+                FROM request_usage
+                WHERE {" AND ".join(clauses)}
+                GROUP BY bucket_index
+                """,
+                (anchor, step, *params),
+            ).fetchall()
+        grouped = {int(row["bucket_index"]): row for row in rows}
+        buckets: list[dict[str, Any]] = []
+        total = dict.fromkeys(TIMELINE_BUCKET_FIELDS, 0)
+        index = 0
+        bucket_start = anchor
+        while bucket_start < upper:
+            row = grouped.get(index)
+            bucket = {
+                "start_at": round(bucket_start * 1000),
+                "end_at": round((bucket_start + step) * 1000) - 1,
+            }
+            for field in TIMELINE_BUCKET_FIELDS:
+                value = int(row[field]) if row is not None else 0
+                bucket[field] = value
+                total[field] += value
+            buckets.append(bucket)
+            index += 1
+            bucket_start += step
+        return {
+            "window": normalized,
+            "granularity": granularity,
+            "start_at": round(anchor * 1000),
+            "end_at": round(upper * 1000) - 1,
+            "provider_id": None if provider_id is None else str(provider_id),
+            "buckets": buckets,
+            "total": total,
+        }
+
 
 class RecoveryHistoryStore:
     """Persist sanitized recovery events without request or response content."""
@@ -1718,6 +1830,23 @@ def _custom_time_bounds(
     if max_seconds is not None and end - start > max_seconds:
         raise ValueError(f"自定义时间范围不能超过 {round(max_seconds / 86400)} 天")
     return start, end
+
+
+def _timeline_granularity(span_seconds: float) -> str:
+    return "hour" if span_seconds <= TIMELINE_HOURLY_SPAN_SECONDS else "day"
+
+
+def _timeline_bucket_seconds(granularity: str) -> int:
+    return 3600 if granularity == "hour" else 24 * 3600
+
+
+def _align_timeline_start(timestamp: float, granularity: str) -> float:
+    if granularity == "hour":
+        return math.floor(timestamp / 3600) * 3600
+    local = time.localtime(timestamp)
+    return time.mktime(
+        (local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1)
+    )
 
 
 def _query_time_range(
@@ -3241,6 +3370,39 @@ def create_proxy_app(
         except (OSError, sqlite3.Error):
             return JSONResponse(status_code=503, content={"detail": "无法读取请求记录"})
         return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
+
+    @app.get("/control/api/usage-timeline", include_in_schema=False)
+    async def control_usage_timeline(request: Request):
+        provider_id = request.query_params.get("provider_id", "").strip() or None
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="24h",
+                allowed_windows=USAGE_WINDOWS,
+                max_custom_seconds=TIMELINE_MAX_CUSTOM_SECONDS,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        if provider_id and not any(
+            provider.provider_id == provider_id for provider in router.providers()
+        ):
+            return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+        if usage_store is None:
+            return JSONResponse(status_code=503, content={"detail": "Token 记录功能不可用"})
+        try:
+            payload = await asyncio.to_thread(
+                usage_store.timeline,
+                window,
+                start_at=start_at,
+                end_at=end_at,
+                provider_id=provider_id,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取用量趋势"})
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     @app.get("/control/api/requests", include_in_schema=False)
     async def control_requests(request: Request):

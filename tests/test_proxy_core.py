@@ -37,6 +37,7 @@ from local_proxy.core import (
     _sse_preflight_decision,
     _strip_input_item_ids,
     _rewrite_request_model,
+    _align_timeline_start,
     _public_control_status,
     _public_requests,
     _request_reasoning_effort,
@@ -1055,6 +1056,212 @@ class UsageTests(unittest.TestCase):
                 for row in connection.execute("PRAGMA table_info(request_history)")
             }
         self.assertNotIn("request_body", columns)
+
+    def test_timeline_today_buckets_hourly_with_zero_fill_and_totals(self) -> None:
+        now = time.time()
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(100, 40, 140),
+            status_code=200,
+            recorded_at=now - 60,
+        )
+        self.store.record(
+            provider_id="provider-b",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(50, 10, 60, cached_tokens=20),
+            status_code=200,
+            recorded_at=now - 120,
+        )
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(10, 5, 15),
+            status_code=500,
+            recorded_at=now - 3 * 3600,
+        )
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(999, 1, 1000),
+            status_code=200,
+            recorded_at=now - 3 * 86400,
+        )
+
+        payload = self.store.timeline("today", now=now)
+
+        self.assertEqual(payload["window"], "today")
+        self.assertEqual(payload["granularity"], "hour")
+        self.assertEqual(len(payload["buckets"]), time.localtime(now).tm_hour + 1)
+        for bucket in payload["buckets"]:
+            self.assertEqual(bucket["end_at"] - bucket["start_at"], 3_600_000 - 1)
+        non_empty = [
+            bucket for bucket in payload["buckets"] if bucket["request_count"]
+        ]
+        self.assertEqual(len(non_empty), 2)
+        self.assertEqual(
+            {bucket["request_count"] for bucket in non_empty},
+            {1, 2},
+        )
+        current = non_empty[-1]
+        self.assertEqual(current["input_tokens"], 150)
+        self.assertEqual(current["total_tokens"], 200)
+        self.assertEqual(current["successful_requests"], 2)
+        older = non_empty[0]
+        self.assertEqual(older["total_tokens"], 15)
+        self.assertEqual(older["failed_requests"], 1)
+        self.assertEqual(payload["total"]["request_count"], 3)
+        self.assertEqual(payload["total"]["total_tokens"], 215)
+        self.assertEqual(payload["total"]["cached_tokens"], 20)
+        for field in (
+            "request_count",
+            "successful_requests",
+            "failed_requests",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+        ):
+            self.assertEqual(
+                payload["total"][field],
+                sum(bucket[field] for bucket in payload["buckets"]),
+            )
+
+    def test_timeline_24h_aligns_to_whole_hours_and_supports_provider_filter(
+        self,
+    ) -> None:
+        now = time.time()
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(100, 40, 140),
+            status_code=200,
+            recorded_at=now - 60,
+        )
+        self.store.record(
+            provider_id="provider-b",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(20, 5, 25),
+            status_code=200,
+            recorded_at=now - 90,
+        )
+
+        payload = self.store.timeline(
+            "24h",
+            provider_id="provider-a",
+            now=now,
+        )
+
+        self.assertEqual(payload["granularity"], "hour")
+        self.assertEqual(payload["provider_id"], "provider-a")
+        self.assertLessEqual(len(payload["buckets"]), 25)
+        self.assertGreaterEqual(len(payload["buckets"]), 24)
+        self.assertEqual(payload["buckets"][0]["start_at"] % 3_600_000, 0)
+        self.assertEqual(payload["total"]["request_count"], 1)
+        self.assertEqual(payload["total"]["total_tokens"], 140)
+
+    def test_timeline_7d_buckets_by_local_day_and_includes_alignment_head(self) -> None:
+        now = time.time()
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(30, 10, 40),
+            status_code=200,
+            recorded_at=now - 6 * 86400 - 3600,
+        )
+
+        payload = self.store.timeline("7d", now=now)
+
+        self.assertEqual(payload["granularity"], "day")
+        self.assertEqual(len(payload["buckets"]), 8)
+        for bucket in payload["buckets"]:
+            self.assertEqual(bucket["end_at"] - bucket["start_at"], 86_400_000 - 1)
+        local = time.localtime(now)
+        self.assertEqual(
+            payload["buckets"][-1]["start_at"],
+            round(
+                time.mktime(
+                    (local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1)
+                )
+                * 1000
+            ),
+        )
+        self.assertEqual(payload["total"]["total_tokens"], 40)
+
+    def test_timeline_all_starts_from_earliest_record_and_empty_returns_no_buckets(
+        self,
+    ) -> None:
+        now = time.time()
+        empty = self.store.timeline("all", now=now)
+
+        self.assertEqual(empty["buckets"], [])
+        self.assertIsNone(empty["start_at"])
+        self.assertEqual(empty["total"]["request_count"], 0)
+
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(11, 4, 15),
+            status_code=200,
+            recorded_at=now - 5 * 86400,
+        )
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(5, 5, 10),
+            status_code=200,
+            recorded_at=now - 60,
+        )
+
+        payload = self.store.timeline("all", now=now)
+
+        self.assertEqual(payload["granularity"], "day")
+        self.assertEqual(len(payload["buckets"]), 6)
+        self.assertEqual(
+            payload["buckets"][0]["start_at"],
+            round(_align_timeline_start(now - 5 * 86400, "day") * 1000),
+        )
+        self.assertEqual(payload["total"]["total_tokens"], 25)
+
+    def test_timeline_custom_range_granularity_and_limits(self) -> None:
+        now = 1_800_000_000.0
+        self.store.record(
+            provider_id="provider-a",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(7, 3, 10),
+            status_code=200,
+            recorded_at=now - 1800,
+        )
+
+        hourly = self.store.timeline(
+            "custom",
+            start_at=now - 2 * 3600,
+            end_at=now,
+            now=now,
+        )
+        daily = self.store.timeline(
+            "custom",
+            start_at=now - 3 * 86400,
+            end_at=now,
+            now=now,
+        )
+
+        self.assertEqual(hourly["granularity"], "hour")
+        self.assertEqual(hourly["total"]["total_tokens"], 10)
+        self.assertEqual(daily["granularity"], "day")
+        self.assertEqual(daily["total"]["total_tokens"], 10)
+        with self.assertRaisesRegex(ValueError, "开始时间必须早于结束时间"):
+            self.store.timeline("custom", start_at=now, end_at=now, now=now)
+        with self.assertRaisesRegex(ValueError, "90 天"):
+            self.store.timeline(
+                "custom",
+                start_at=now - 91 * 86400,
+                end_at=now,
+                now=now,
+            )
+        with self.assertRaisesRegex(ValueError, "不支持的 Token 统计时间范围"):
+            self.store.timeline("yesterday", now=now)
 
 
 class SSEPreflightTests(unittest.IsolatedAsyncioTestCase):
@@ -2423,6 +2630,82 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["total"]["failed_tokens"], 20)
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(invalid_cursor.status_code, 422)
+
+    async def test_usage_timeline_endpoint_returns_bucketed_series(self) -> None:
+        temp_context = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_context.cleanup)
+        usage_store = UsageStore(Path(temp_context.name) / "usage.sqlite3")
+        now = time.time()
+        usage_store.record(
+            provider_id="selected",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(100, 40, 140),
+            status_code=200,
+            recorded_at=now - 60,
+        )
+        usage_store.record(
+            provider_id="other",
+            model="gpt-5.6-sol",
+            usage=TokenUsage(20, 5, 25),
+            status_code=200,
+            recorded_at=now - 90,
+        )
+        upstream_client = httpx.AsyncClient()
+        app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True), provider("other"))),
+            client=upstream_client,
+            usage_store=usage_store,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(client.aclose)
+        self.addAsyncCleanup(upstream_client.aclose)
+
+        response = await client.get(
+            "/control/api/usage-timeline",
+            params={"usage_window": "today"},
+        )
+        filtered = await client.get(
+            "/control/api/usage-timeline",
+            params={"usage_window": "today", "provider_id": "selected"},
+        )
+        invalid_window = await client.get(
+            "/control/api/usage-timeline",
+            params={"usage_window": "yesterday"},
+        )
+        missing = await client.get(
+            "/control/api/usage-timeline",
+            params={"usage_window": "today", "provider_id": "missing"},
+        )
+        default_window = await client.get("/control/api/usage-timeline")
+
+        bare_upstream_client = httpx.AsyncClient()
+        bare_app = create_proxy_app(
+            ProviderRouter((provider("selected", current=True),)),
+            client=bare_upstream_client,
+        )
+        bare_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=bare_app), base_url="http://testserver"
+        )
+        self.addAsyncCleanup(bare_client.aclose)
+        self.addAsyncCleanup(bare_upstream_client.aclose)
+        unavailable = await bare_client.get("/control/api/usage-timeline")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        payload = response.json()
+        self.assertEqual(payload["window"], "today")
+        self.assertEqual(payload["granularity"], "hour")
+        self.assertEqual(payload["total"]["request_count"], 2)
+        self.assertEqual(payload["total"]["total_tokens"], 165)
+        self.assertEqual(filtered.json()["total"]["total_tokens"], 140)
+        self.assertEqual(filtered.json()["provider_id"], "selected")
+        self.assertEqual(default_window.status_code, 200)
+        self.assertEqual(default_window.json()["window"], "24h")
+        self.assertEqual(invalid_window.status_code, 422)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(unavailable.status_code, 503)
 
     async def test_status_summarizes_history_and_detail_endpoint_returns_all(self) -> None:
         temp_context = tempfile.TemporaryDirectory()
