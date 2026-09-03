@@ -75,4 +75,4 @@ status = "verified"
 
 ## PR
 
-本轮按用户要求仅完成开发与验证，未创建 PR。
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/74
