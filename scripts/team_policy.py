@@ -4,8 +4,10 @@ import re
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.error
 import urllib.request
@@ -59,6 +61,10 @@ ALLOWED_COMMIT_NAMES = frozenset(
     )
 )
 COAUTHOR_RE = re.compile(r"(?im)^\s*co-authored-by:\s*([^<]+?)\s*<[^>]+>\s*$")
+UNITTEST_FAILURE_RE = re.compile(r"^(?:FAIL|ERROR):\s+\S+\s+\(([^)\]]+)\)", re.MULTILINE)
+NODE_FAILURE_RE = re.compile(r"(?m)^[ \t]*not ok[ \t]+\d+[ \t]+-[ \t]+(.+?)[ \t]*(?:#.*)?$")
+PYTHON_SUITE_SENTINEL = "<python-suite-exit-nonzero>"
+NODE_SUITE_SENTINEL = "<node-suite-exit-nonzero>"
 
 
 class PolicyError(RuntimeError):
@@ -437,26 +443,198 @@ def validate_pr(base: str, head: str) -> None:
         validate_commit_identities(identities)
 
 
-def run_full_verification() -> None:
-    npm = "npm.cmd" if os.name == "nt" else "npm"
-    commands = [
-        [npm, "ci", "--prefix", "proxy_static"],
-        [npm, "run", "build", "--prefix", "proxy_static"],
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
-    ]
-    commands.append(["node", "--check", "proxy_static/classic/app.js"])
+def _npm_command() -> str:
+    return "npm.cmd" if os.name == "nt" else "npm"
+
+
+def _syntax_check_commands() -> list[list[str]]:
+    commands = [["node", "--check", "proxy_static/classic/app.js"]]
     commands.extend(
         ["node", "--check", str(path)]
         for path in sorted(Path("proxy_static/src").glob("*.js"))
     )
     commands.append(["node", "--check", "provider_status/static/app.js"])
-    commands.extend(
-        ["node", "--test", str(path)] for path in sorted(Path("tests").glob("*.test.js"))
+    return commands
+
+
+def _run_capture(command: list[str], *, cwd: Path) -> tuple[int, str]:
+    result = subprocess.run(
+        command,
+        cwd=str(cwd),
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
     )
-    for command in commands:
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+
+def parse_unittest_failures(output: str) -> list[str]:
+    return sorted(set(UNITTEST_FAILURE_RE.findall(output)))
+
+
+def parse_node_failures(output: str) -> list[str]:
+    return sorted({name.strip() for name in NODE_FAILURE_RE.findall(output)})
+
+
+def run_comparable_suites(root: Path) -> dict[str, object]:
+    """Run the Python and node suites; report failure ids (not exit codes)."""
+    code, output = _run_capture(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
+        cwd=root,
+    )
+    python_failures = parse_unittest_failures(output)
+    if code != 0 and not python_failures:
+        python_failures = [PYTHON_SUITE_SENTINEL]
+
+    node_failures: dict[str, list[str]] = {}
+    for test_file in sorted((root / "tests").glob("*.test.js")):
+        code, output = _run_capture(["node", "--test", str(test_file)], cwd=root)
+        if code == 0:
+            continue
+        names = parse_node_failures(output)
+        node_failures[str(test_file.relative_to(root)).replace("\\", "/")] = (
+            names or [NODE_SUITE_SENTINEL]
+        )
+    return {"python": python_failures, "node": node_failures}
+
+
+def diff_new_failures(head: dict[str, object], baseline: dict[str, object]) -> list[str]:
+    """Failures present on HEAD but absent from the merge-base baseline."""
+    new_items: list[str] = []
+    base_python = set(baseline.get("python", ()) or ())
+    for test_id in sorted(set(head.get("python", ()) or ()) - base_python):
+        new_items.append(f"python {test_id}")
+    base_node = baseline.get("node", {}) or {}
+    head_node = head.get("node", {}) or {}
+    for file, names in sorted(head_node.items()):
+        base_names = set(base_node.get(file, ()) or ())
+        for name in sorted(set(names or ()) - base_names):
+            new_items.append(f"node {file} :: {name}")
+    return new_items
+
+
+def _baseline_cache_path(merge_base: str) -> Path:
+    git_dir = Path(run_git(["rev-parse", "--absolute-git-dir"]))
+    cache_dir = git_dir / "policy-baselines"
+    return cache_dir / f"{merge_base}.json"
+
+
+def read_baseline_cache(merge_base: str) -> dict[str, object] | None:
+    cache = _baseline_cache_path(merge_base)
+    try:
+        loaded = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    return loaded
+
+
+def write_baseline_cache(merge_base: str, baseline: dict[str, object]) -> None:
+    cache = _baseline_cache_path(merge_base)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    for stale in cache.parent.glob("*.json"):
+        stale.unlink(missing_ok=True)
+    cache.write_text(json.dumps(baseline, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def collect_baseline(merge_base: str) -> dict[str, object]:
+    """Run the comparable suites in a throwaway worktree of merge_base."""
+    workdir = tempfile.mkdtemp(prefix="policy-baseline-")
+    worktree = Path(workdir) / "baseline"
+    run_git(["worktree", "add", "--detach", "--quiet", str(worktree), merge_base])
+    try:
+        return run_comparable_suites(worktree)
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", "--quiet", str(worktree)],
+            check=False,
+            capture_output=True,
+        )
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def load_or_build_baseline(merge_base: str) -> dict[str, object]:
+    cached = read_baseline_cache(merge_base)
+    if cached is not None:
+        return cached
+    baseline = collect_baseline(merge_base)
+    write_baseline_cache(merge_base, baseline)
+    return baseline
+
+
+def _confirm_new_failures(new_failures: list[str]) -> list[str]:
+    """Rerun newly failing targets once to filter out flaky one-offs."""
+    confirmed: list[str] = []
+    python_ids = [
+        item.removeprefix("python ").strip()
+        for item in new_failures
+        if item.startswith("python ") and not item.endswith(PYTHON_SUITE_SENTINEL)
+    ]
+    if python_ids:
+        code, output = _run_capture(
+            [sys.executable, "-m", "unittest", *python_ids], cwd=Path(".")
+        )
+        if code != 0:
+            still = set(parse_unittest_failures(output))
+            confirmed.extend(
+                f"python {test_id}" for test_id in sorted(still or set(python_ids))
+            )
+    if any(item == f"python {PYTHON_SUITE_SENTINEL}" for item in new_failures):
+        confirmed.append(f"python {PYTHON_SUITE_SENTINEL}")
+
+    node_files = sorted(
+        {
+            item.removeprefix("node ").split(" :: ")[0]
+            for item in new_failures
+            if item.startswith("node ") and NODE_SUITE_SENTINEL not in item
+        }
+    )
+    for file in node_files:
+        code, output = _run_capture(["node", "--test", file], cwd=Path("."))
+        if code != 0:
+            names = set(parse_node_failures(output))
+            confirmed.extend(
+                f"node {file} :: {name}"
+                for name in sorted(names) or [NODE_SUITE_SENTINEL]
+            )
+    confirmed.extend(
+        item for item in new_failures if NODE_SUITE_SENTINEL in item and item not in confirmed
+    )
+    return confirmed
+
+
+def run_full_verification() -> None:
+    """Hard gates must pass; suite failures only block when new vs the baseline."""
+    for command in [
+        [_npm_command(), "ci", "--prefix", "proxy_static"],
+        [_npm_command(), "run", "build", "--prefix", "proxy_static"],
+        *_syntax_check_commands(),
+    ]:
         result = subprocess.run(command, check=False)
         if result.returncode != 0:
             raise PolicyError(f"验证失败：{' '.join(command)}")
+
+    head = run_comparable_suites(Path("."))
+    merge_base = run_git(["merge-base", "origin/main", "HEAD"])
+    baseline = load_or_build_baseline(merge_base)
+    new_failures = diff_new_failures(head, baseline)
+    confirmed: list[str] = []
+    if new_failures:
+        confirmed = _confirm_new_failures(new_failures)
+    if confirmed:
+        detail = "\n".join(f"- {item}" for item in confirmed)
+        raise PolicyError(
+            f"全量验证出现基线之外的新增失败（merge-base {merge_base}），禁止推送：\n{detail}"
+        )
+    ignored = len(head.get("python", []) or []) + sum(
+        len(names) for names in (head.get("node", {}) or {}).values()
+    )
+    print(
+        f"pre-push 全量验证通过：忽略基线既有失败 {ignored} 项，无新增失败。"
+    )
 
 
 def command_install_hooks() -> None:

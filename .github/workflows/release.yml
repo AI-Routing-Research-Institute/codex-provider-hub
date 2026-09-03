@@ -1,9 +1,7 @@
-name: Automatic Release
+name: Manual Release
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
