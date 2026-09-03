@@ -1086,7 +1086,16 @@ def _register_control_routes(
     async def control_update_status():
         if update_controller is None:
             return JSONResponse(
-                content={"supported": False, "current_version": None, "has_update": False},
+                content={
+                    "supported": False,
+                    "current_version": None,
+                    "has_update": False,
+                    "update_available": False,
+                    "newer_available": False,
+                    "latest_version": None,
+                    "release_url": RELEASES_PAGE,
+                    "notes": "",
+                },
                 headers={"Cache-Control": "no-store"},
             )
         return JSONResponse(

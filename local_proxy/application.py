@@ -620,14 +620,27 @@ class UpdateController:
         self._last_info: Any = None
         self._downloaded: Path | None = None
 
+    def _refresh_current_version(self) -> None:
+        try:
+            refreshed = resolve_app_version(self.current_version)
+        except Exception:
+            return
+        if refreshed:
+            self.current_version = refreshed
+
     def status(self) -> dict[str, Any]:
         from local_proxy.updater import RELEASES_PAGE
 
+        self._refresh_current_version()
         info = self._last_info
+        has_update = bool(info is not None and info.has_update)
+        newer_available = bool(info is not None and info.newer_available)
         payload: dict[str, Any] = {
             "supported": self.supported,
             "current_version": self.current_version,
-            "has_update": bool(info is not None and info.has_update),
+            "has_update": has_update,
+            "update_available": has_update,
+            "newer_available": newer_available,
             "latest_version": info.latest_version if info is not None else None,
             "release_url": info.release_url if info is not None else RELEASES_PAGE,
             "notes": info.notes if info is not None else "",
@@ -637,6 +650,7 @@ class UpdateController:
     def check(self) -> dict[str, Any]:
         from local_proxy import updater
 
+        self._refresh_current_version()
         info = updater.check_for_update(self.current_version)
         with self._lock:
             self._last_info = info

@@ -552,6 +552,8 @@ class FakeUpdateController:
             "supported": self.supported,
             "current_version": "0.7.1",
             "has_update": True,
+            "update_available": True,
+            "newer_available": True,
             "latest_version": "0.8.0",
             "release_url": "https://example/release",
             "notes": "",
@@ -609,6 +611,9 @@ class UpdateRouteTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["supported"])
+        self.assertFalse(response.json()["has_update"])
+        self.assertFalse(response.json()["update_available"])
+        self.assertIsNone(response.json()["latest_version"])
 
     async def test_check_returns_update_info(self) -> None:
         client = self._build(FakeUpdateController())
@@ -621,6 +626,8 @@ class UpdateRouteTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["latest_version"], "0.8.0")
+        self.assertTrue(response.json()["has_update"])
+        self.assertTrue(response.json()["update_available"])
 
     async def test_check_requires_control_header(self) -> None:
         client = self._build(FakeUpdateController())
