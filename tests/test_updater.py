@@ -72,11 +72,58 @@ class ParseReleaseTests(unittest.TestCase):
             payload, "0.7.1", asset_name="CodexLocalProxy-win-x64.exe"
         )
         self.assertFalse(info.has_update)
+        self.assertTrue(info.newer_available)
         self.assertIsNone(info.asset_url)
+
+    def test_newer_available_tracks_remote_newness(self):
+        newer = updater.parse_release(
+            release_payload("v0.7.2"), "0.7.1", asset_name="CodexLocalProxy-win-x64.exe"
+        )
+        self.assertTrue(newer.newer_available)
+        self.assertTrue(newer.has_update)
+        same = updater.parse_release(
+            release_payload("v0.7.1"), "0.7.1", asset_name="CodexLocalProxy-win-x64.exe"
+        )
+        self.assertFalse(same.newer_available)
+        self.assertFalse(same.has_update)
 
     def test_missing_tag_raises(self):
         with self.assertRaisesRegex(UpdateError, "tag_name"):
             updater.parse_release({"assets": []}, "0.7.1")
+
+
+class UpdateControllerContractTests(unittest.TestCase):
+    def test_status_exposes_compat_alias_and_newer_flag(self):
+        from local_proxy import application
+
+        original = application.resolve_app_version
+        application.resolve_app_version = lambda fallback: fallback
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                controller = application.UpdateController(
+                    current_version="0.7.1",
+                    supported=False,
+                    updates_dir=Path(tmp),
+                    on_ready=lambda path: None,
+                )
+                payload = controller.status()
+                self.assertEqual(payload["current_version"], "0.7.1")
+                self.assertFalse(payload["has_update"])
+                self.assertFalse(payload["update_available"])
+                self.assertFalse(payload["newer_available"])
+                self.assertIsNone(payload["latest_version"])
+                controller._last_info = updater.parse_release(
+                    release_payload("v0.7.2", asset="OtherName.exe"),
+                    "0.7.1",
+                    asset_name="CodexLocalProxy-win-x64.exe",
+                )
+                payload = controller.status()
+                self.assertFalse(payload["has_update"])
+                self.assertFalse(payload["update_available"])
+                self.assertTrue(payload["newer_available"])
+                self.assertEqual(payload["latest_version"], "0.7.2")
+        finally:
+            application.resolve_app_version = original
 
 
 class FetchTests(unittest.TestCase):
