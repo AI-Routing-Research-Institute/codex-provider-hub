@@ -180,7 +180,7 @@ RELEASE_NOTE_GROUPS = (
 )
 
 
-def _plain_sentence(text: str, limit: int = 60) -> str:
+def _plain_sentence(text: str, limit: int = 60, *, cut_at_separators: bool = True) -> str:
     """Collapse a section into one short plain sentence for release notes."""
     collapsed = re.sub(r"\s+", " ", text).strip()
     collapsed = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", collapsed)
@@ -191,10 +191,11 @@ def _plain_sentence(text: str, limit: int = 60) -> str:
     collapsed = collapsed.replace("（，", "（").replace("（ ", "（")
     collapsed = re.sub(r"^[-*•\d.\s]+", "", collapsed)
     cut = len(collapsed)
-    for separator in ("。", "；", "：", "！", "？"):
-        index = collapsed.find(separator)
-        if index != -1:
-            cut = min(cut, index)
+    if cut_at_separators:
+        for separator in ("。", "；", "：", "！", "？"):
+            index = collapsed.find(separator)
+            if index != -1:
+                cut = min(cut, index)
     sentence = collapsed[:cut].strip(" ，,")
     if len(sentence) > limit:
         trimmed = sentence[:limit]
@@ -210,7 +211,7 @@ def _plain_sentence(text: str, limit: int = 60) -> str:
 def _record_headline(record: ChangeRecord) -> str:
     headline = record.metadata.get("headline", "").strip()
     if headline:
-        return _plain_sentence(headline, limit=80)
+        return _plain_sentence(headline, limit=80, cut_at_separators=False)
     return _plain_sentence(record.sections.get("目标", ""))
 
 
