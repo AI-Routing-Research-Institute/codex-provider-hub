@@ -76,6 +76,7 @@ class ChangeRecord:
     path: Path
     metadata: dict[str, str]
     sections: dict[str, str]
+    title: str = ""
 
 
 def parse_change_record(path: Path) -> ChangeRecord:
@@ -97,7 +98,13 @@ def parse_change_record(path: Path) -> ChangeRecord:
         value_start = match.end()
         value_end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
         sections[match.group(1).strip()] = body[value_start:value_end].strip()
-    return ChangeRecord(path=path, metadata=metadata, sections=sections)
+    title_match = re.search(r"(?m)^#\s+(?!\#)([^\r\n]+?)\s*$", body)
+    return ChangeRecord(
+        path=path,
+        metadata=metadata,
+        sections=sections,
+        title=title_match.group(1).strip() if title_match else "",
+    )
 
 
 def validate_change_record(record: ChangeRecord, *, required_status: str) -> None:
@@ -165,24 +172,75 @@ def build_release_plan(base_tag: str, records: list[ChangeRecord]) -> dict[str, 
     }
 
 
+RELEASE_REPO_URL = "https://github.com/AI-Routing-Research-Institute/codex-provider-hub"
+RELEASE_NOTE_GROUPS = (
+    ("✨ 新功能", ("feature",)),
+    ("🐞 问题修复", ("fix",)),
+    ("🛠️ 其他改进", ("chore", "docs", "refactor", "style", "performance", "build", "test")),
+)
+
+
+def _plain_sentence(text: str, limit: int = 60) -> str:
+    """Collapse a section into one short plain sentence for release notes."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    collapsed = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", collapsed)
+    collapsed = collapsed.replace("**", "").replace("`", "")
+    collapsed = re.sub(r"[A-Za-z]:\\[^\s，。）)（]*", "", collapsed)
+    collapsed = re.sub(r"(?:~|／|/)[^\s，。）)（]*\.(?:md|html|py|js|vue|yml)", "", collapsed)
+    collapsed = re.sub(r"（[，、\s]*）", "", collapsed)
+    collapsed = collapsed.replace("（，", "（").replace("（ ", "（")
+    collapsed = re.sub(r"^[-*•\d.\s]+", "", collapsed)
+    cut = len(collapsed)
+    for separator in ("。", "；", "：", "！", "？"):
+        index = collapsed.find(separator)
+        if index != -1:
+            cut = min(cut, index)
+    sentence = collapsed[:cut].strip(" ，,")
+    if len(sentence) > limit:
+        trimmed = sentence[:limit]
+        depth = trimmed.count("（") + trimmed.count("(") - trimmed.count("）") - trimmed.count(")")
+        if depth > 0:
+            bracket = max(trimmed.rfind("（", 0, limit), trimmed.rfind("(", 0, limit))
+            if bracket > 20:
+                trimmed = trimmed[:bracket]
+        sentence = trimmed.rstrip(" ，,（(") + "…"
+    return sentence
+
+
+def _record_headline(record: ChangeRecord) -> str:
+    headline = record.metadata.get("headline", "").strip()
+    if headline:
+        return _plain_sentence(headline, limit=80)
+    return _plain_sentence(record.sections.get("目标", ""))
+
+
+def _record_title(record: ChangeRecord) -> str:
+    title = record.title or record.metadata.get("id", "")
+    if len(title) > 30:
+        title = title[:30].rstrip() + "…"
+    return title
+
+
 def render_release_notes(tag: str, records: list[ChangeRecord]) -> str:
-    lines = [f"# Codex Provider Hub {tag}", "", "本版本由已验证的功能变更说明自动生成。", ""]
+    lines = [
+        f"# Codex 本地中转 {tag}",
+        "",
+        f"本次更新 {len(records)} 项改进。",
+        "",
+    ]
+    for group_title, type_names in RELEASE_NOTE_GROUPS:
+        grouped = [record for record in records if record.metadata.get("type") in type_names]
+        if not grouped:
+            continue
+        lines.append(f"## {group_title}")
+        for record in grouped:
+            lines.append(f"- **{_record_title(record)}**：{_record_headline(record)}")
+        lines.append("")
+    lines.extend(["## 技术细节", ""])
     for record in records:
-        metadata = record.metadata
-        lines.extend(
-            [
-                f"## {metadata['id']}",
-                f"- 类型：{metadata['type']}",
-                f"- 发布级别：{metadata['release_bump']}",
-                f"- 目标：{record.sections['目标']}",
-                f"- 实际改动：{record.sections['实际改动']}",
-                f"- 兼容性：{record.sections['兼容性']}",
-                f"- 风险：{record.sections['风险']}",
-                f"- 验证结果：{record.sections['验证结果']}",
-                f"- PR：{record.sections['PR']}",
-                "",
-            ]
-        )
+        title = _record_title(record)
+        path = str(record.path).replace("\\", "/")
+        lines.append(f"- [{title}]({RELEASE_REPO_URL}/blob/{tag}/{path})")
     return "\n".join(lines)
 
 
