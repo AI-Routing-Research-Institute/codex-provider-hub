@@ -28,6 +28,7 @@ from local_proxy.core import (
     RECOVERY_HISTORY_API_LIMIT,
     REQUEST_HISTORY_HOURS,
     REQUEST_HISTORY_WINDOWS,
+    TIMELINE_MAX_CUSTOM_SECONDS,
     USAGE_WINDOWS,
     HealthStatusUrlStore,
     InputItemIdCompatibilityStore,
@@ -507,6 +508,38 @@ def _register_control_routes(
         except (OSError, sqlite3.Error):
             return JSONResponse(status_code=503, content={"detail": "无法读取请求记录"})
         return JSONResponse(content=history, headers={"Cache-Control": "no-store"})
+
+    async def control_usage_timeline(request: Request):
+        provider_id = request.query_params.get("provider_id", "").strip() or None
+        try:
+            window, start_at, end_at = _query_time_range(
+                request,
+                window_param="usage_window",
+                default_window="24h",
+                allowed_windows=USAGE_WINDOWS,
+                max_custom_seconds=TIMELINE_MAX_CUSTOM_SECONDS,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        if provider_id and not any(
+            provider.provider_id == provider_id for provider in profile.router.providers()
+        ):
+            return JSONResponse(status_code=404, content={"detail": "供应商不存在"})
+        if profile.usage_store is None:
+            return JSONResponse(status_code=503, content={"detail": "Token 记录功能不可用"})
+        try:
+            payload = await asyncio.to_thread(
+                profile.usage_store.timeline,
+                window,
+                start_at=start_at,
+                end_at=end_at,
+                provider_id=provider_id,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取用量趋势"})
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     async def control_requests(request: Request):
         if profile.usage_store is None:
@@ -1168,6 +1201,7 @@ def _register_control_routes(
     app.add_api_route(f"{prefix}/api/status", control_status, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/recovery-history", control_recovery_history, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/usage-history", control_usage_history, methods=["GET"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/usage-timeline", control_usage_timeline, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/requests", control_requests, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/sessions", control_sessions, methods=["GET"], include_in_schema=False)
     app.add_api_route(
