@@ -68,6 +68,7 @@ status = "verified"
 - `Get-ChildItem tests -Filter *.test.js | ForEach-Object { node --test $_.FullName }`：全部通过，0 fail。
 - 行为核验：`resolve_app_version('0.1.7')` → `1.6.2`；模拟 `v1.6.2` 发布包：`1.6.1→has_update True/newer True`（提示发现新版本），`1.6.2→False/False`（已是最新），无产物→`has False/newer True`（手动下载分支）。
 - 显示修正后复验：全量 534 单测 OK（38s），JS 全量 0 fail，版本行恢复单行当前版、无截断风险（样式未动）。
+- rebase 到 `origin/main b99fd2f`（#68）后复验：全量 543 单测 OK，JS 全量 0 fail；`dist` 在新基线上重新构建并验证 bundle 含修复。
 
 ## PR
 
