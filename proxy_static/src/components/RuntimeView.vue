@@ -18,7 +18,7 @@
       <div class="settings-actions"><span>{{ runtimeSummary }}</span><button class="primary-button" type="submit" :disabled="saving">{{ saving ? '保存中...' : '保存设置' }}</button></div>
     </form>
     <div class="settings-form update-panel">
-      <div class="setting-row setting-readonly-row"><span><strong>版本与更新</strong><small>{{ update.hint || '检测最新发布版本' }}</small></span><div class="setting-control-with-action"><code>当前 {{ update.current_version || '—' }} / 最新 {{ update.latest_version || '—' }}</code><button class="secondary-button setting-action-button" type="button" @click="checkUpdate">检查更新</button><button v-if="updateAvailable && update.supported" class="primary-button setting-action-button" type="button" @click="applyUpdate">更新并重启</button></div></div>
+      <div class="setting-row setting-readonly-row"><span><strong>版本与更新</strong><small>{{ update.hint || '检测最新发布版本' }}</small></span><div class="setting-control-with-action"><code>{{ update.current_version || '—' }}</code><button class="secondary-button setting-action-button" type="button" @click="checkUpdate">检查更新</button><button v-if="updateAvailable && update.supported" class="primary-button setting-action-button" type="button" @click="applyUpdate">更新并重启</button></div></div>
       <div v-if="updateMessage" class="setting-notice">{{ updateMessage }}</div>
     </div>
   </section>
