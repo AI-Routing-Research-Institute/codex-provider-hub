@@ -2961,6 +2961,41 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 7)
         self.assertEqual(observed_models, ["upstream-test"] * 7)
 
+    async def test_unmapped_model_passes_through_when_mappings_exist(self) -> None:
+        observed_models: list[str] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            body = json.loads(await request.aread())
+            observed_models.append(body.get("model"))
+            return httpx.Response(200, content=b"ok")
+
+        async def run_case(**provider_kwargs) -> None:
+            observed_models.clear()
+            upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = create_proxy_app(
+                ProviderRouter((provider("selected", current=True, **provider_kwargs),)),
+                client=upstream_client,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            )
+            self.addAsyncCleanup(client.aclose)
+            self.addAsyncCleanup(upstream_client.aclose)
+            response = await client.post("/v1/responses", json={"model": "luna"})
+            self.assertEqual(response.status_code, 200)
+
+        # 映射表非空但未匹配：透传原值，不被单值 model 压回（sol→luna 切换生效）
+        await run_case(model="legacy-sol", model_mappings={"sol": "upstream-sol"})
+        self.assertEqual(observed_models, ["luna"])
+
+        # 映射表为空：保留 v1.5 单值改写行为
+        await run_case(model="legacy-sol")
+        self.assertEqual(observed_models, ["legacy-sol"])
+
+        # 映射命中：改写为上游名
+        await run_case(model="legacy-sol", model_mappings={"luna": "upstream-luna"})
+        self.assertEqual(observed_models, ["upstream-luna"])
+
     async def test_model_mapping_is_not_applied_outside_responses_requests(self) -> None:
         observed_body = b""
 
