@@ -55,7 +55,7 @@ status = "verified"
 - GitHub 按钮实测：版本号/检查更新/GitHub 三者文字中心两两差值 0；href 为仓库主页；`target=_blank` + `rel=noreferrer noopener`；链接渲染为按钮样式。
 - `node --test tests/local_proxy_vue_ui.test.js tests/local_proxy_console_ui.test.js`：26 tests 通过；JS 全量 0 fail。
 - 改动文件换行符检查通过（全 LF）。
-- rebase 到 `origin/main 9302d55`（#78/#79）后复验见推送门禁；`dist/index.html` 入库归一为 LF（`--ignore-cr-at-eol` 为空）。
+- 落到 `origin/main cded4f3`（#85-#89）后复验：Python 全量 560 OK，JS 全量 0 fail；浏览器重测三控件对齐（0/0）与链接正确；`dist` 在新基线重建（含居中规则与仓库地址，`index.html` 归一 LF，忽略换行后仅 bundle 名差异）。
 
 ## PR
 
