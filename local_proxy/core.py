@@ -4790,7 +4790,7 @@ async def _forward_request_with_lease(
                     mapped_body,
                 )
                 mapping_applied = True
-        if not mapping_applied and provider.model:
+        if not mapping_applied and provider.model and not provider.model_mappings:
             rewritten_body = await asyncio.to_thread(
                 _rewrite_request_model,
                 request_body,
