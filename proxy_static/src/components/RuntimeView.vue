@@ -20,7 +20,7 @@
       <div class="settings-actions"><span>{{ runtimeSummary }}</span><button class="primary-button" type="submit" :disabled="saving">{{ saving ? '保存中...' : '保存设置' }}</button></div>
     </form>
     <div class="settings-form update-panel">
-      <div class="setting-row setting-readonly-row"><span><strong>版本与更新</strong><small>{{ update.hint || '检测最新发布版本' }}</small></span><div class="setting-control-with-action"><code>{{ update.current_version || '—' }}</code><button class="secondary-button setting-action-button" type="button" @click="checkUpdate">检查更新</button><button v-if="updateAvailable && update.supported" class="primary-button setting-action-button" type="button" @click="applyUpdate">更新并重启</button></div></div>
+      <div class="setting-row setting-readonly-row"><span><strong>版本与更新</strong><small>{{ update.hint || '检测最新发布版本' }}</small></span><div class="setting-control-with-action"><code>{{ update.current_version || '—' }}</code><span class="update-actions"><button class="secondary-button setting-action-button" type="button" @click="checkUpdate">检查更新</button><a class="secondary-button setting-action-button" href="https://github.com/AI-Routing-Research-Institute/codex-provider-hub" target="_blank" rel="noreferrer noopener">GitHub</a><button v-if="updateAvailable && update.supported" class="primary-button setting-action-button" type="button" @click="applyUpdate">更新并重启</button></span></div></div>
       <div v-if="updateMessage" class="setting-notice">{{ updateMessage }}</div>
     </div>
   </section>

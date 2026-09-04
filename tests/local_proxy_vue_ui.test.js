@@ -312,6 +312,8 @@ test("Vue runtime settings switch between classic and modern consoles", () => {
   assert.match(runtime, /window\.location\.href = nextUrl\.toString\(\)/);
   assert.match(runtime, /nextUrl\.toString\(\) === window\.location\.href/);
   assert.match(runtime, /window\.location\.reload\(\)/);
+  assert.match(runtime, /href="https:\/\/github\.com\/AI-Routing-Research-Institute\/codex-provider-hub"/);
+  assert.match(runtime, />GitHub<\/a>/);
   assert.match(styles, /\.setting-segmented/);
 });
 
@@ -450,6 +452,8 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /\.provider-row\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
   assert.match(styles, /\.settings-form\s*\{[^}]*border-radius:\s*var\(--panel-radius\)/s);
   assert.match(styles, /\.settings-form\.update-panel\s*\{[^}]*margin-top:\s*10px/s);
+  assert.match(styles, /\.setting-readonly-row\s+code\s*\{[^}]*align-self:\s*center/s);
+  assert.match(styles, /\.update-actions\s*\{[^}]*display:\s*flex/s);
   assert.match(styles, /\.brand-icon\s*\{[^}]*width:\s*24px[^}]*height:\s*24px/s);
   assert.match(styles, /--font-body:\s*13px/);
   assert.match(styles, /--font-meta:\s*12px/);
