@@ -4,19 +4,21 @@
 
 <div align="center">
 
-在一个本地程序中管理 Codex 与 Claude Code 的多个 API 供应商，支持网页切换、失败重试、请求记录、Token 统计和远程健康监控。
+在一个本地程序中管理 Codex 与 Claude Code 的多个 API 供应商：网页一键切换、失败自动重试、请求记录与 Token 统计、六种用量趋势图表、今日战报分享卡片，以及远程健康监控。
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-4b5563?style=flat-square)
 [![License](https://img.shields.io/badge/License-AGPL--3.0--or--later-663399?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/AI-Routing-Research-Institute/codex-provider-hub?style=flat-square)](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest)
+[![Linux.do](https://img.shields.io/badge/社区-Linux.do-0088cc?style=flat-square)](https://linux.do/)
 
 </div>
 
 ## 目录
 
 - [适合谁](#适合谁)
+- [功能特性](#功能特性)
 - [五分钟快速开始](#五分钟快速开始)
 - [推荐搭配 CC Switch](#推荐搭配-cc-switch)
 - [配置 Codex](#配置-codex)
@@ -28,6 +30,7 @@
 - [其他安装方式](#其他安装方式)
 - [开发与部署](#开发与部署)
 - [安全边界](#安全边界)
+- [社区与支持](#社区与支持)
 - [开源与商业授权](#开源与商业授权)
 
 ## 适合谁
@@ -47,6 +50,51 @@ Codex Provider Hub 适合以下用户：
 Codex       http://127.0.0.1:17890/control/codex/
 Claude Code http://127.0.0.1:17890/control/claude/
 ```
+
+## 功能特性
+
+**双协议本地中转**
+
+- 同一进程同时服务 Codex（OpenAI Responses 协议）与 Claude Code（Anthropic Messages 协议），各自独立控制台与供应商目录。
+- 只监听回环地址，客户端配置一次指向本地，之后切换供应商无需再动 `config.toml`。
+
+**供应商管理与无缝切换**
+
+- 网页一键切换供应商，只影响后续请求，正在输出的流不被中断。
+- 与 CC Switch 联动：Codex 初始化导入后独立管理，Claude Code 实时读取数据源；支持"仅新增/覆盖已有"再同步。
+- 拖拽排序、隐藏、新增、编辑（名称、Base URL、API Key、请求头、查询参数、传输方式）。
+- "复制临时启动命令"可单次绕过本地中转直连某供应商。
+
+**智能重试与会话接管**
+
+- 建连失败、首字前流中断、HTTP 429/5xx 自动重试；支持固定/递增等待、熔断与无限重试策略。
+- 已向客户端输出内容后不跨供应商重放，避免重复回答与计费。
+
+**模型映射与重写**
+
+- 每个供应商可配置"模型映射表"（本地模型名 → 上游模型名），切换供应商后请求模型自动翻译，CLI 无感。
+- 映射未命中的模型原样透传；未配置映射表时可启用单值"模型重写"作为固定模型兜底。
+
+**用量分析与战报分享**
+
+- Token 统计优先使用上游 `usage`，缺失时 tiktoken 估算；请求历史含成功/失败、耗时、会话与映射模型。
+- 用量趋势视图提供六种图表：时序趋势、GitHub 风格日历热力、累计冲击线、星期×小时时段节律、供应商构成点阵、发丝线条码；支持 Tokens/请求数/成功率指标切换与自动轮播，并遵循系统减少动态效果设置。
+- "今日 Token 战报"一键生成终端风分享卡片（含时段分布与供应商构成），导出自带深色底板，粘贴到微信等即时通讯工具不会出现透明角变白。
+
+**远程健康监控**
+
+- 供应商可经受限 SSH 导入器上报独立状态服务；"监控管理"查看、排序、立即检测或删除监控项。
+- 状态服务部署模板（systemd + Nginx）位于 `deploy/`。
+
+**控制台与交付**
+
+- 现代版（Vue 3）与经典版双控制台，明暗主题，可随时切换。
+- Windows/macOS 双平台安装包，托盘常驻、开机自启、在线检查并更新版本。
+
+**安全边界**
+
+- 本地中转不保存请求正文与回答正文；状态与编辑接口不回显完整 Key。
+- 详见[安全边界](#安全边界)一节。
 
 ## 五分钟快速开始
 
@@ -190,6 +238,7 @@ claude
 - 隐藏暂时不用的供应商。
 - 新增本地供应商。
 - 编辑名称、Base URL、API Key、请求头、查询参数和请求传输方式。
+- 维护"模型映射"（本地模型名 → 上游模型名，逐条增删改）。
 - 删除非当前供应商。
 - 从 CC Switch 仅新增或覆盖导入。
 
@@ -227,6 +276,18 @@ Claude Code 上游统一使用 `curl_cffi`，Claude 控制台没有这个选择�
 - 支持今日、近 24 小时、近 7 日、近 30 日和自定义时间范围。
 - 本地数据库不保存请求正文和回答正文。
 
+### 用量趋势与战报卡片
+
+- "用量趋势"视图提供六种可切换图表：**趋势**（输入/输出面积 + 合计线）、**日历**（GitHub 风格周×星期圆点热力，今天/24 小时为小时方格）、**累计**（冲击线 + 滚动大数字）、**节律**（星期×24 小时消耗点阵）、**构成**（供应商占比点阵）、**发丝线**（逐分桶条码）。
+- 趋势与累计支持 Tokens / 请求数 / 成功率三种指标手动切换与自动轮播（悬停暂停）；所有图表带入场动画并遵循系统"减少动态效果"设置。
+- 供应商页"分享卡片"一键生成"今日 Token 战报"：终端风卡片含当日汇总、昨日对比、时段分布与供应商构成，可下载或复制；导出图自带深色底板，粘贴到微信等工具不会出现透明角变白。
+
+### 模型映射
+
+- 每个供应商可维护一张"模型映射表"：左列本地模型名，右列该供应商认识的上游模型名；请求转发时按当前供应商的表自动翻译，CLI 无需改动。
+- 映射未命中的模型名**原样透传**给上游（v1.10.3 起的语义）；仅在供应商完全没有配置映射表时，才使用单值"模型重写"作为固定模型兜底。
+- 请求页"模型"列旁的"映射模型"列显示每条请求实际发送的上游模型名，便于核对翻译是否生效。
+
 ### 远程监控
 
 Codex 供应商可以通过受限 SSH 导入器上传到独立状态服务，并在“监控管理”中查看服务器上的全部监控配置、排序、立即检测或删除。服务器部署模板位于 `deploy/`，公开示例位于 `config/providers.example.toml`。
@@ -254,7 +315,7 @@ Codex 供应商可以通过受限 SSH 导入器上传到独立状态服务，并
 
 这是上游供应商的业务状态。切换 `httpx/curl_cffi` 不会解决真实的模型缺失、分组无渠道、额度不足或供应商维护。可以手动切换到支持该模型的供应商，再由原有重试逻辑接管尚未输出的请求。
 
-如果报错是“模型名不被上游接受”（例如 `The supported API model names are ... but you passed ...`），说明客户端发送的模型名与当前供应商不匹配。在 Codex 控制台编辑该供应商并填写“模型重写”，本地中转会在转发前把请求中的模型名改写为该值；从 CC Switch 导入的供应商会自动携带各自配置中的模型名。配置后同一会话内切换供应商无需重启 Codex。
+如果报错是“模型名不被上游接受”（例如 `The supported API model names are ... but you passed ...`），说明客户端发送的模型名与当前供应商不匹配。优先为该供应商配置**模型映射**（本地模型名 → 上游模型名，未命中的模型会原样透传）；也可以在供应商编辑中填写单值“模型重写”，本地中转会在转发前把请求中的模型名改写为该值（仅在未配置映射表时生效）。从 CC Switch 导入的供应商会自动携带各自配置中的模型名。配置后同一会话内切换供应商无需重启 Codex。
 
 ### 控制台页面打不开
 
@@ -388,6 +449,12 @@ Get-ChildItem tests -Filter *.test.js | ForEach-Object { node --test $_.FullName
 - Token 统计和请求记录不保存请求正文或回答正文。
 - 私有配置、数据库、日志、探测报告、虚拟环境、证书和密钥默认不纳入版本控制。
 - `config/providers.example.toml` 只包含示例域名，不包含真实供应商或凭据。
+
+## 社区与支持
+
+- **[Linux.do](https://linux.do/)**：欢迎在 Linux.do 社区讨论使用经验、反馈问题与分享供应商配置技巧。
+- [GitHub Issues](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/issues)：缺陷报告与功能建议。
+- [Releases](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases)：版本更新说明（通俗摘要格式）与双平台安装包。
 
 ## 开源与商业授权
 

@@ -4,19 +4,21 @@
 
 <div align="center">
 
-Manage multiple API providers for Codex and Claude Code in one local application, with browser-based switching, pre-output retries, request history, token usage, and remote health monitoring.
+Manage multiple API providers for Codex and Claude Code in one local application: browser-based one-click switching, pre-output retries, request history and token usage, six usage-trend charts, a daily token report card, and remote health monitoring.
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-4b5563?style=flat-square)
 [![License](https://img.shields.io/badge/License-AGPL--3.0--or--later-663399?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/AI-Routing-Research-Institute/codex-provider-hub?style=flat-square)](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases/latest)
+[![Linux.do](https://img.shields.io/badge/Community-Linux.do-0088cc?style=flat-square)](https://linux.do/)
 
 </div>
 
 ## Contents
 
 - [Who this is for](#who-this-is-for)
+- [Feature overview](#feature-overview)
 - [Five-minute quick start](#five-minute-quick-start)
 - [Recommended with CC Switch](#recommended-with-cc-switch)
 - [Configure Codex](#configure-codex)
@@ -28,6 +30,7 @@ Manage multiple API providers for Codex and Claude Code in one local application
 - [Other installation methods](#other-installation-methods)
 - [Development and deployment](#development-and-deployment)
 - [Security boundaries](#security-boundaries)
+- [Community and support](#community-and-support)
 - [Open-source and commercial licensing](#open-source-and-commercial-licensing)
 
 ## Who this is for
@@ -47,6 +50,51 @@ The application listens only on `127.0.0.1:17890` by default. One process serves
 Codex       http://127.0.0.1:17890/control/codex/
 Claude Code http://127.0.0.1:17890/control/claude/
 ```
+
+## Feature overview
+
+**Dual-protocol local proxy**
+
+- One process serves Codex (OpenAI Responses protocol) and Claude Code (Anthropic Messages protocol), each with an independent console and provider catalog.
+- Loopback-only listener; point clients at the local proxy once and never touch `config.toml` again when switching providers.
+
+**Provider management and seamless switching**
+
+- Switch providers in the browser; only subsequent requests are affected, in-flight streams are never interrupted.
+- CC Switch integration: Codex providers initialize from CC Switch and are then managed locally; Claude Code providers read the CC Switch source live; re-sync with add-only or overwrite modes.
+- Drag-to-reorder, hide, create, and edit providers (name, base URL, API key, headers, query params, transport).
+- "Copy temporary launch command" starts Codex once with a specific provider, bypassing the proxy.
+
+**Smart retries and session takeover**
+
+- Automatic retries for connection failures, pre-output stream drops, and HTTP 429/5xx; fixed/incremental backoff, circuit breaking, and unlimited-retry policies.
+- Once content has been streamed to the client, requests are never replayed across providers, avoiding duplicate answers and billing.
+
+**Model mapping and rewrite**
+
+- Per-provider model mapping tables (local model name -> upstream model name) translate request models automatically after switching.
+- Unmapped model names pass through unchanged; a single-value "model rewrite" acts as a fixed-model fallback only when no mapping table is configured.
+
+**Usage analytics and report card**
+
+- Token usage prefers upstream `usage` fields with tiktoken estimation fallback; request history includes success/failure, latency, session, and mapped model.
+- The usage-trend view offers six chart types: trend, GitHub-style calendar heat, cumulative draw-in, weekday-by-hour rhythm, provider-composition waffle, and hairline barcode — with token/request/success-rate metric switching, auto-carousel, and reduced-motion support.
+- The daily "Token report card" generates a terminal-style shareable card (hourly distribution and provider composition) with a dark backdrop that stays clean when pasted into messengers such as WeChat.
+
+**Remote health monitoring**
+
+- Providers can be reported to a standalone status service via a restricted SSH importer; the monitoring panel lists, reorders, probes, or removes monitors.
+- Deployment templates (systemd + Nginx) live in `deploy/`.
+
+**Console and delivery**
+
+- Modern (Vue 3) and classic consoles with light/dark themes.
+- Windows/macOS installers, tray resident, auto-start, and in-app online updates.
+
+**Security boundaries**
+
+- No request or response bodies are stored; status and editing APIs never echo full keys.
+- See [Security boundaries](#security-boundaries).
 
 ## Five-minute quick start
 
@@ -227,6 +275,18 @@ Claude Code upstream requests always use `curl_cffi`, so the Claude control pane
 - Today, last 24 hours, last 7 days, last 30 days, and custom time ranges are supported.
 - The local database does not store request or response bodies.
 
+### Usage trends and report card
+
+- The usage-trend view offers six switchable chart types: **trend** (input/output areas plus total line), **calendar** (GitHub-style week-by-weekday dot heat; hourly grid for today/24h), **cumulative** (draw-in line with rolling counter), **rhythm** (weekday-by-hour dot matrix), **composition** (provider share waffle), and **hairline** (per-bucket barcode).
+- Trend and cumulative support Tokens / requests / success-rate metric switching with auto-carousel (pauses on hover); all charts animate on entry and respect the system reduced-motion setting.
+- The "Share card" button on the providers page generates the daily Token report card — a terminal-style card with daily totals, day-over-day comparison, hourly distribution, and provider composition — downloadable or copyable. The exported image carries a dark backdrop, so pasting into messengers such as WeChat never shows white corners.
+
+### Model mapping
+
+- Each provider can maintain a model mapping table: local model names on the left, upstream names this provider understands on the right. Requests are translated per the current provider's table automatically, with no CLI changes.
+- Model names that miss the mapping pass through **unchanged** (semantics since v1.10.3); the single-value "model rewrite" applies only when a provider has no mapping table at all.
+- The "mapped model" column next to "model" in the requests view shows the upstream model each request actually used, for verifying translations.
+
 ### Remote monitoring
 
 Codex providers can be uploaded through a restricted SSH importer to an independent status service. **Monitor management** lists all monitored server configurations and supports reordering, immediate probes, and deletion. Server deployment templates are under `deploy/`, and the public example is `config/providers.example.toml`.
@@ -254,7 +314,7 @@ A 401 means the upstream rejected the authentication attached to the current req
 
 This is an upstream provider state. Switching between `httpx` and `curl_cffi` cannot fix a missing model, an empty provider group, exhausted quota, or provider maintenance. Manually switch to a provider that supports the model; the existing retry behavior will handle attempts that have not produced output.
 
-If the upstream rejects the model name itself (for example `The supported API model names are ... but you passed ...`), the client is sending a model name the current provider does not know. Edit the provider in the Codex console and fill in the model rewrite field; the local proxy then rewrites the request model to that value before forwarding. Providers imported from CC Switch carry the model name from their own configuration automatically. With a model configured, switching providers inside one Codex session needs no Codex restart.
+If the upstream rejects the model name itself (for example `The supported API model names are ... but you passed ...`), the client is sending a model name the current provider does not know. Prefer configuring **model mappings** for the provider (local model name -> upstream model name; unmapped names pass through unchanged). Alternatively, fill in the single-value "model rewrite" in the provider editor — the local proxy rewrites the request model to that value, and it applies only when no mapping table is configured. Providers imported from CC Switch carry the model name from their own configuration automatically. With either configured, switching providers inside one Codex session needs no Codex restart.
 
 ### The control panel does not open
 
@@ -388,6 +448,12 @@ Get-ChildItem tests -Filter *.test.js | ForEach-Object { node --test $_.FullName
 - Token statistics and request history do not store request or response bodies.
 - Private configuration, databases, logs, probe reports, virtual environments, certificates, and keys are excluded from version control by default.
 - `config/providers.example.toml` contains example domains only, with no real providers or credentials.
+
+## Community and support
+
+- **[Linux.do](https://linux.do/)**: share usage experience, report issues, and exchange provider configuration tips in the Linux.do community.
+- [GitHub Issues](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/issues): bug reports and feature suggestions.
+- [Releases](https://github.com/AI-Routing-Research-Institute/codex-provider-hub/releases): plain-language release notes and installers for both platforms.
 
 ## Open-source and commercial licensing
 
