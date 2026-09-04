@@ -53,4 +53,4 @@ README 与项目当前功能对齐（用量趋势六图型、今日战报分享�
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/93
