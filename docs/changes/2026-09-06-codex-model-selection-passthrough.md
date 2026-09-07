@@ -82,4 +82,4 @@ Codex 桌面端、CLI 或 IDE 已在 Responses 请求体中明确选择模型时
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/94

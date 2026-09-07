@@ -62,4 +62,4 @@ Codex profile 声明了 deepseek_compatibility 功能，但 control/ui-config �
 
 ## PR
 
-不创建；用户要求不提交 Git。
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/94

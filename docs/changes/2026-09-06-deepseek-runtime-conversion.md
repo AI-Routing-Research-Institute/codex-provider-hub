@@ -83,4 +83,4 @@ status = "verified"
 
 ## PR
 
-不创建；用户明确要求不提交 Git。
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/94

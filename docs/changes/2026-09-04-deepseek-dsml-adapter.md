@@ -84,4 +84,4 @@ DSML 格式可能存在未覆盖变体，或普通文本中偶然出现相似标
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/94

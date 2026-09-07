@@ -59,4 +59,4 @@ status = "verified"
 
 ## PR
 
-不创建；沿用用户不提交 Git 的要求。
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/94
