@@ -43,6 +43,7 @@ from local_proxy.core import (
     UPSTREAM_RESPONSE_HEADERS_TIMEOUT_SECONDS,
     UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
     UsageStore,
+    RequestDebugStore,
     _empty_usage_summary,
     _diagnostic_active_requests,
     _event_loop_heartbeat,
@@ -92,6 +93,7 @@ UI_FEATURE_FIELDS = frozenset(
         "provider_launch_command",
         "status_upload",
         "provider_catalog",
+        "deepseek_compatibility",
     }
 )
 
@@ -105,6 +107,7 @@ class ProxyProfile:
     client_selector: Callable[[ProxyProvider], Any] | None = None
     additional_owned_clients: tuple[Any, ...] = ()
     protocol_adapter: Any | None = None
+    protocol_adapter_resolver: Callable[[ProxyProvider], Any | None] | None = None
     allowed_proxy_paths: frozenset[str] | None = None
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None
     on_provider_selected: Callable[[str], None] | None = None
@@ -118,6 +121,7 @@ class ProxyProfile:
     retry_policy: RetryPolicy | None = None
     on_retry_policy_changed: Callable[[RetryPolicy], None] | None = None
     usage_store: UsageStore | None = None
+    request_debug_store: RequestDebugStore | None = None
     recovery_history_store: RecoveryHistoryStore | None = None
     health_status_url_store: HealthStatusUrlStore | None = None
     runtime_settings_snapshot: Callable[[], dict[str, Any]] | None = None
@@ -327,8 +331,10 @@ def create_unified_proxy_app(
             retry_policy=profile.retry_policy_store.get(),
             retry_sleep=profile.retry_sleep,
             usage_store=profile.usage_store,
+            request_debug_store=profile.request_debug_store,
             recovery_history_store=profile.recovery_history_store,
             protocol_adapter=profile.protocol_adapter,
+            protocol_adapter_resolver=profile.protocol_adapter_resolver,
             session_name_resolver=profile.session_name_resolver,
             input_item_id_compatibility_store=profile.input_item_id_compatibility_store,
             session_request_coordinator=session_request_coordinators[profile.service_id],
@@ -606,6 +612,35 @@ def _register_control_routes(
             return JSONResponse(status_code=422, content={"detail": str(exc)})
         except (OSError, sqlite3.Error):
             return JSONResponse(status_code=503, content={"detail": "无法读取本地请求记录"})
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+    async def control_request_debug(request: Request):
+        if profile.request_debug_store is None:
+            return JSONResponse(status_code=503, content={"detail": "请求调试记录功能不可用"})
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+            payload = await asyncio.to_thread(profile.request_debug_store.list, limit=limit)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=422, content={"detail": "调试记录数量无效"})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取请求调试记录"})
+        return JSONResponse(
+            content={
+                "retention": profile.request_debug_store.retention,
+                "items": payload,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def control_request_debug_detail(debug_id: str):
+        if profile.request_debug_store is None:
+            return JSONResponse(status_code=503, content={"detail": "请求调试记录功能不可用"})
+        try:
+            payload = await asyncio.to_thread(profile.request_debug_store.get, debug_id)
+        except (OSError, sqlite3.Error, ValueError):
+            return JSONResponse(status_code=503, content={"detail": "无法读取请求调试记录"})
+        if payload is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到请求调试记录"})
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
     async def control_sessions():
@@ -1236,6 +1271,8 @@ def _register_control_routes(
     app.add_api_route(f"{prefix}/api/usage-timeline", control_usage_timeline, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/usage-weekday-hour", control_usage_weekday_hour, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/requests", control_requests, methods=["GET"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/request-debug", control_request_debug, methods=["GET"], include_in_schema=False)
+    app.add_api_route(f"{prefix}/api/request-debug/{{debug_id:path}}", control_request_debug_detail, methods=["GET"], include_in_schema=False)
     app.add_api_route(f"{prefix}/api/sessions", control_sessions, methods=["GET"], include_in_schema=False)
     app.add_api_route(
         f"{prefix}/api/session-routes/{{session_key}}",

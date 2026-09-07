@@ -70,10 +70,11 @@ Claude Code http://127.0.0.1:17890/control/claude/
 - Automatic retries for connection failures, pre-output stream drops, and HTTP 429/5xx; fixed/incremental backoff, circuit breaking, and unlimited-retry policies.
 - Once content has been streamed to the client, requests are never replayed across providers, avoiding duplicate answers and billing.
 
-**Model mapping and rewrite**
+**Model selection and mapping**
 
 - Per-provider model mapping tables (local model name -> upstream model name) translate request models automatically after switching.
-- Unmapped model names pass through unchanged; a single-value "model rewrite" acts as a fixed-model fallback only when no mapping table is configured.
+- Only exact mapping matches rewrite a model. With no mapping or no match, the model selected in Codex passes through unchanged.
+- A provider's single model value is a launch default and does not override an explicit request model.
 
 **Usage analytics and report card**
 
@@ -284,7 +285,8 @@ Claude Code upstream requests always use `curl_cffi`, so the Claude control pane
 ### Model mapping
 
 - Each provider can maintain a model mapping table: local model names on the left, upstream names this provider understands on the right. Requests are translated per the current provider's table automatically, with no CLI changes.
-- Model names that miss the mapping pass through **unchanged** (semantics since v1.10.3); the single-value "model rewrite" applies only when a provider has no mapping table at all.
+- Only exact mapping matches rewrite a model. With no mapping or no match, model names pass through **unchanged**.
+- The provider editor's "launch default model" preserves the configured default but does not override the explicit model in the current Codex request.
 - The "mapped model" column next to "model" in the requests view shows the upstream model each request actually used, for verifying translations.
 
 ### Remote monitoring
@@ -314,7 +316,7 @@ A 401 means the upstream rejected the authentication attached to the current req
 
 This is an upstream provider state. Switching between `httpx` and `curl_cffi` cannot fix a missing model, an empty provider group, exhausted quota, or provider maintenance. Manually switch to a provider that supports the model; the existing retry behavior will handle attempts that have not produced output.
 
-If the upstream rejects the model name itself (for example `The supported API model names are ... but you passed ...`), the client is sending a model name the current provider does not know. Prefer configuring **model mappings** for the provider (local model name -> upstream model name; unmapped names pass through unchanged). Alternatively, fill in the single-value "model rewrite" in the provider editor — the local proxy rewrites the request model to that value, and it applies only when no mapping table is configured. Providers imported from CC Switch carry the model name from their own configuration automatically. With either configured, switching providers inside one Codex session needs no Codex restart.
+If the upstream rejects the model name itself (for example `The supported API model names are ... but you passed ...`), the client is sending a model name the current provider does not know. Configure an explicit **model mapping** for the provider (local model name -> upstream model name); unmapped names pass through unchanged. The provider's launch default model never rewrites the current request implicitly.
 
 ### The control panel does not open
 

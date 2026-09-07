@@ -8,6 +8,21 @@ from local_proxy.core import ProxyProvider
 
 
 class CodexProfileTests(unittest.TestCase):
+    def test_protocol_adapter_detects_dsml_for_any_responses_provider(self) -> None:
+        protocol = object()
+        provider = ProxyProvider(
+            provider_id="relay",
+            name="Relay",
+            base_url="https://relay.example.test/v1",
+            is_cc_switch_current=False,
+            wire_api="responses",
+        )
+
+        self.assertIs(
+            codex_profile._resolve_codex_protocol_adapter(provider, protocol),
+            protocol,
+        )
+
     def test_status_upload_visibility_defaults_on_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "codex-data"

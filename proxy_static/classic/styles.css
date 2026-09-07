@@ -983,6 +983,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .settings-heading p { margin-top: 4px; color: var(--muted); font-size: 11px; }
 .settings-form { width: min(720px, 100%); margin: 0 auto; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .setting-row { min-height: 66px; display: grid; grid-template-columns: minmax(0, 1fr) 190px; align-items: center; gap: 24px; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+.setting-row[hidden] { display: none; }
 .setting-row strong, .setting-row small { display: block; }
 .setting-row strong { font-size: 13px; }
 .setting-row small { margin-top: 4px; color: var(--muted); font-size: 11px; }

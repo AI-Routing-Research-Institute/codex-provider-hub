@@ -32,6 +32,7 @@ from local_proxy.control_ui import (
     select_control_ui,
 )
 from local_proxy.diagnostics import DiagnosticLog, EventLoopWatchdog
+from local_proxy.request_debug import RequestDebugAttempt, RequestDebugSession, RequestDebugStore
 
 
 try:
@@ -50,6 +51,7 @@ RETRY_ERROR_HISTORY_LIMIT = 5
 
 RETRY_ERROR_MESSAGE_CHARS = 220
 RETRY_ERROR_READ_TIMEOUT_SECONDS = 0.25
+PRE_RESPONSE_DISCONNECT_GRACE_SECONDS = 0.1
 INPUT_ITEM_ID_COMPATIBILITY_TTL_SECONDS = 24 * 3600
 INPUT_ITEM_ID_COMPATIBILITY_MAX_ENTRIES = 4096
 MAX_INPUT_ITEM_ID_REPAIRS_PER_REQUEST = 8
@@ -388,6 +390,92 @@ class DisconnectAwareStreamingResponse(StreamingResponse):
             with suppress(asyncio.CancelledError, Exception):
                 await close_task
             raise
+
+
+class PreResponseClientDisconnected(Exception):
+    """Raised when the downstream closes before a response object is returned."""
+
+
+async def _await_cancellation_safe(awaitable: Awaitable[Any]) -> Any:
+    """Let a required cleanup operation finish before propagating cancellation."""
+    task = asyncio.create_task(awaitable)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+        raise
+
+
+class PreResponseDisconnectMonitor:
+    """Watch ASGI disconnects while the proxy is still preparing a response."""
+
+    def __init__(self, receive: Callable[[], Awaitable[dict[str, Any]]]) -> None:
+        self._receive = receive
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._wait_for_disconnect())
+
+    async def _wait_for_disconnect(self) -> None:
+        await asyncio.sleep(PRE_RESPONSE_DISCONNECT_GRACE_SECONDS)
+        while True:
+            message = await self._receive()
+            if message.get("type") == "http.disconnect":
+                return
+
+    async def run(self, awaitable: Awaitable[Any]) -> Any:
+        disconnect_task = self._task
+        if disconnect_task is None:
+            return await awaitable
+        operation = asyncio.ensure_future(awaitable)
+        try:
+            done, _ = await asyncio.wait(
+                {operation, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                if not operation.done():
+                    operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+                raise PreResponseClientDisconnected
+            return await operation
+        except BaseException:
+            if not operation.done():
+                operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+            raise
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _debug_capture_stream(
+    stream: AsyncIterator[bytes],
+    attempt: RequestDebugAttempt,
+) -> AsyncIterator[bytes]:
+    """Capture raw upstream bytes while keeping persistence off the event loop."""
+    try:
+        async for chunk in stream:
+            attempt.response(chunk)
+            if attempt.should_flush():
+                try:
+                    await asyncio.to_thread(attempt.flush)
+                except Exception:
+                    pass
+            yield chunk
+    finally:
+        try:
+            await asyncio.to_thread(attempt.flush)
+        except Exception:
+            pass
 
 
 class SessionRequestLease:
@@ -2398,8 +2486,10 @@ class ActiveRequest:
 class ForwardRequestLifecycle:
     router: "ProviderRouter"
     usage_store: UsageStore | None
+    request_debug: RequestDebugSession | None
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None
     thread_id: str | None
+    debug_attempt: RequestDebugAttempt | None = None
     snapshot: RouteSnapshot | None = None
     model: str = "unknown"
     upstream_model: str | None = None
@@ -2408,44 +2498,85 @@ class ForwardRequestLifecycle:
     upstream_response: httpx.Response | None = None
     stream: AsyncIterator[bytes] | None = None
     cleaned: bool = False
+    cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def record_superseded(self) -> None:
-        if self.cleaned:
-            return
-        self.cleaned = True
-        response = self.upstream_response
-        try:
+        await self._record_cancelled(
+            kind="session_superseded",
+            summary="已由同会话新请求接管",
+        )
+
+    async def record_cancelled(
+        self,
+        *,
+        kind: str = "client_disconnected",
+        summary: str = "客户端取消",
+    ) -> None:
+        await self._record_cancelled(kind=kind, summary=summary)
+
+    async def _record_cancelled(self, *, kind: str, summary: str) -> None:
+        async with self.cleanup_lock:
+            if self.cleaned:
+                return
+            response = self.upstream_response
+            snapshot = self.snapshot
+            status_code = None if response is None else response.status_code
+
+            if snapshot is not None:
+                self.router.finish_request(
+                    snapshot,
+                    status_code=status_code,
+                    error=kind,
+                )
+            self.cleaned = True
+
+            if snapshot is not None:
+                await _record_request_event_async(
+                    self.usage_store,
+                    snapshot=snapshot,
+                    thread_id=self.thread_id,
+                    session_name_resolver=self.session_name_resolver,
+                    model=self.model,
+                    upstream_model=self.upstream_model,
+                    reasoning_effort=self.reasoning_effort,
+                    status_code=status_code,
+                    successful=False,
+                    outcome="cancelled",
+                    retry_count=self.retry_count,
+                    error_kind=kind,
+                    error_summary=summary,
+                )
+
             close_stream = getattr(self.stream, "aclose", None)
             if close_stream is not None:
-                with suppress(Exception):
+                with suppress(asyncio.CancelledError, Exception):
                     await close_stream()
-        finally:
             if response is not None:
-                with suppress(Exception):
+                with suppress(asyncio.CancelledError, Exception):
                     await response.aclose()
-        if self.snapshot is None:
-            return
-        status_code = None if response is None else response.status_code
-        self.router.finish_request(
-            self.snapshot,
-            status_code=status_code,
-            error="session_superseded",
-        )
-        await _record_request_event_async(
-            self.usage_store,
-            snapshot=self.snapshot,
-            thread_id=self.thread_id,
-            session_name_resolver=self.session_name_resolver,
-            model=self.model,
-            upstream_model=self.upstream_model,
-            reasoning_effort=self.reasoning_effort,
-            status_code=status_code,
-            successful=False,
-            outcome="cancelled",
-            retry_count=self.retry_count,
-            error_kind="session_superseded",
-            error_summary="已由同会话新请求接管",
-        )
+
+            await _debug_attempt_finish_async(
+                self.debug_attempt,
+                state="cancelled",
+                error_kind=kind,
+                error_summary=summary,
+            )
+            await _debug_finish_async(
+                self.request_debug,
+                finished_at=time.time(),
+                state="cancelled",
+                outcome="cancelled",
+                status_code=status_code,
+                provider_id=(
+                    None if snapshot is None else snapshot.provider.provider_id
+                ),
+                model=self.model,
+                upstream_model=self.upstream_model,
+                reasoning_effort=self.reasoning_effort,
+                phase="failed",
+                error_kind=kind,
+                error_summary=summary,
+            )
 
 
 @dataclass(frozen=True)
@@ -3160,6 +3291,7 @@ def create_proxy_app(
     client_factory: Callable[[], Any] | None = None,
     client_selector: Callable[[ProxyProvider], Any] | None = None,
     protocol_adapter: Any | None = None,
+    protocol_adapter_resolver: Callable[[ProxyProvider], Any | None] | None = None,
     reload_providers: Callable[[], tuple[ProxyProvider, ...]] | None = None,
     on_provider_selected: Callable[[str], None] | None = None,
     on_session_provider_override_changed: Callable[[str, str | None], None] | None = None,
@@ -3173,6 +3305,7 @@ def create_proxy_app(
     retry_policy_store: RetryPolicyStore | None = None,
     on_retry_policy_changed: Callable[[RetryPolicy], None] | None = None,
     usage_store: UsageStore | None = None,
+    request_debug_store: RequestDebugStore | None = None,
     recovery_history_store: RecoveryHistoryStore | None = None,
     health_status_url: str | None = None,
     health_status_url_store: HealthStatusUrlStore | None = None,
@@ -3561,6 +3694,34 @@ def create_proxy_app(
             return JSONResponse(status_code=503, content={"detail": "无法读取本地请求记录"})
         return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
+    @app.get("/control/api/request-debug", include_in_schema=False)
+    async def control_request_debug(request: Request):
+        if request_debug_store is None:
+            return JSONResponse(status_code=503, content={"detail": "请求调试记录功能不可用"})
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+            items = await asyncio.to_thread(request_debug_store.list, limit=limit)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=422, content={"detail": "调试记录数量无效"})
+        except (OSError, sqlite3.Error):
+            return JSONResponse(status_code=503, content={"detail": "无法读取请求调试记录"})
+        return JSONResponse(
+            content={"retention": request_debug_store.retention, "items": items},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/control/api/request-debug/{debug_id:path}", include_in_schema=False)
+    async def control_request_debug_detail(debug_id: str):
+        if request_debug_store is None:
+            return JSONResponse(status_code=503, content={"detail": "请求调试记录功能不可用"})
+        try:
+            item = await asyncio.to_thread(request_debug_store.get, debug_id)
+        except (OSError, sqlite3.Error, ValueError):
+            return JSONResponse(status_code=503, content={"detail": "无法读取请求调试记录"})
+        if item is None:
+            return JSONResponse(status_code=404, content={"detail": "未找到请求调试记录"})
+        return JSONResponse(content=item, headers={"Cache-Control": "no-store"})
+
     @app.get("/control/api/sessions", include_in_schema=False)
     async def control_sessions():
         if session_catalog is None:
@@ -3844,8 +4005,10 @@ def create_proxy_app(
             retry_policy=active_retry_policy_store.get(),
             retry_sleep=retry_sleep,
             usage_store=usage_store,
+            request_debug_store=request_debug_store,
             recovery_history_store=recovery_history_store,
             protocol_adapter=protocol_adapter,
+            protocol_adapter_resolver=protocol_adapter_resolver,
             session_name_resolver=session_name_resolver,
             input_item_id_compatibility_store=active_input_item_id_compatibility_store,
             session_request_coordinator=session_request_coordinator,
@@ -4448,7 +4611,57 @@ async def _record_request_event_async(
 ) -> None:
     if store is None:
         return
-    await asyncio.to_thread(_record_request_event, store, **event)
+    await _await_cancellation_safe(
+        asyncio.to_thread(_record_request_event, store, **event)
+    )
+
+
+async def _debug_update_async(
+    session: RequestDebugSession | None,
+    **fields: Any,
+) -> None:
+    if session is None:
+        return
+    try:
+        await asyncio.to_thread(session.update, **fields)
+    except Exception:
+        pass
+
+
+async def _debug_finish_async(
+    session: RequestDebugSession | None,
+    **fields: Any,
+) -> None:
+    if session is None:
+        return
+    try:
+        await asyncio.to_thread(session.finish, **fields)
+    except Exception:
+        pass
+
+
+async def _debug_body_async(
+    session: RequestDebugSession | None,
+    body: bytes,
+) -> None:
+    if session is None:
+        return
+    try:
+        await asyncio.to_thread(session.body, body)
+    except Exception:
+        pass
+
+
+async def _debug_attempt_finish_async(
+    attempt: RequestDebugAttempt | None,
+    **fields: Any,
+) -> None:
+    if attempt is None:
+        return
+    try:
+        await asyncio.to_thread(attempt.finish, **fields)
+    except Exception:
+        pass
 
 
 def _record_stream_completion(
@@ -4529,11 +4742,13 @@ async def _record_stream_completion_async(
 ) -> None:
     if usage_store is None and recovery_history_store is None:
         return
-    await asyncio.to_thread(
-        _record_stream_completion,
-        usage_store,
-        recovery_history_store,
-        **event,
+    await _await_cancellation_safe(
+        asyncio.to_thread(
+            _record_stream_completion,
+            usage_store,
+            recovery_history_store,
+            **event,
+        )
     )
 
 
@@ -4547,8 +4762,10 @@ async def _forward_request(
     retry_policy: RetryPolicy,
     retry_sleep: Callable[[float], Awaitable[None]],
     usage_store: UsageStore | None = None,
+    request_debug_store: RequestDebugStore | None = None,
     recovery_history_store: RecoveryHistoryStore | None = None,
     protocol_adapter: Any | None = None,
+    protocol_adapter_resolver: Callable[[ProxyProvider], Any | None] | None = None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
     session_request_coordinator: SessionRequestCoordinator | None = None,
@@ -4558,9 +4775,11 @@ async def _forward_request(
     thread_id = _codex_thread_id(request.headers)
     coordinator = session_request_coordinator or SessionRequestCoordinator()
     lease = await coordinator.acquire(thread_id)
+    disconnect_monitor = PreResponseDisconnectMonitor(request.receive)
     lifecycle = ForwardRequestLifecycle(
         router=router,
         usage_store=usage_store,
+        request_debug=None,
         session_name_resolver=session_name_resolver,
         thread_id=thread_id,
     )
@@ -4574,25 +4793,42 @@ async def _forward_request(
             thread_id=thread_id,
             lease=lease,
             lifecycle=lifecycle,
+            disconnect_monitor=disconnect_monitor,
             client_selector=client_selector,
             retry_policy=retry_policy,
             retry_sleep=retry_sleep,
             usage_store=usage_store,
+            request_debug_store=request_debug_store,
             recovery_history_store=recovery_history_store,
             protocol_adapter=protocol_adapter,
+            protocol_adapter_resolver=protocol_adapter_resolver,
             session_name_resolver=session_name_resolver,
             input_item_id_compatibility_store=input_item_id_compatibility_store,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
             upstream_response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
         )
+    except PreResponseClientDisconnected:
+        await _await_cancellation_safe(lifecycle.record_cancelled())
+        await lease.release()
+        raise asyncio.CancelledError
     except asyncio.CancelledError:
         if lease.superseded:
-            await lifecycle.record_superseded()
+            await _await_cancellation_safe(lifecycle.record_superseded())
+        else:
+            await _await_cancellation_safe(lifecycle.record_cancelled())
         await lease.release()
         raise
     except BaseException:
+        await _await_cancellation_safe(
+            lifecycle.record_cancelled(
+                kind="request_aborted",
+                summary="请求在响应建立前异常终止",
+            )
+        )
         await lease.release()
         raise
+    finally:
+        await disconnect_monitor.stop()
     if not isinstance(response, DisconnectAwareStreamingResponse):
         await lease.release()
     return response
@@ -4607,12 +4843,15 @@ async def _forward_request_with_lease(
     thread_id: str | None,
     lease: SessionRequestLease,
     lifecycle: ForwardRequestLifecycle,
+    disconnect_monitor: PreResponseDisconnectMonitor,
     client_selector: Callable[[ProxyProvider], Any] | None = None,
     retry_policy: RetryPolicy,
     retry_sleep: Callable[[float], Awaitable[None]],
     usage_store: UsageStore | None = None,
+    request_debug_store: RequestDebugStore | None = None,
     recovery_history_store: RecoveryHistoryStore | None = None,
     protocol_adapter: Any | None = None,
+    protocol_adapter_resolver: Callable[[ProxyProvider], Any | None] | None = None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None = None,
     input_item_id_compatibility_store: InputItemIdCompatibilityStore | None = None,
     stream_idle_timeout_seconds: float | None = UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS,
@@ -4633,6 +4872,28 @@ async def _forward_request_with_lease(
         )
     lifecycle.snapshot = snapshot
     provider = snapshot.provider
+    if request_debug_store is not None:
+        try:
+            debug_session_name = "未知会话"
+            if thread_id is not None and session_name_resolver is not None:
+                debug_session_name = session_name_resolver((thread_id,)).get(
+                    thread_id,
+                    debug_session_name,
+                )
+            lifecycle.request_debug = await asyncio.to_thread(
+                request_debug_store.start_request,
+                run_id=request_debug_store.run_id,
+                request_id=snapshot.request_id,
+                started_at=snapshot.started_wall_at,
+                method=request.method,
+                path=request.url.path,
+                query=request.url.query,
+                thread_id=thread_id,
+                session_name=debug_session_name,
+                headers=request.headers,
+            )
+        except Exception:
+            lifecycle.request_debug = None
     await _start_inflight_request_async(
         usage_store,
         snapshot=snapshot,
@@ -4641,6 +4902,15 @@ async def _forward_request_with_lease(
     )
     if not provider.has_credentials:
         router.finish_request(snapshot, status_code=503, error="credential_missing")
+        await _debug_finish_async(
+            lifecycle.request_debug,
+            finished_at=time.time(),
+            state="failed",
+            outcome="rejected",
+            status_code=503,
+            error_kind="credential_missing",
+            error_summary="当前供应商没有可用认证配置",
+        )
         await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
@@ -4661,6 +4931,15 @@ async def _forward_request_with_lease(
 
     if _would_proxy_to_itself(provider, request):
         router.finish_request(snapshot, status_code=508, error="proxy_loop")
+        await _debug_finish_async(
+            lifecycle.request_debug,
+            finished_at=time.time(),
+            state="failed",
+            outcome="rejected",
+            status_code=508,
+            error_kind="proxy_loop",
+            error_summary="当前供应商地址指向本地中转自身",
+        )
         await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
@@ -4683,6 +4962,15 @@ async def _forward_request_with_lease(
         request_body = await _read_request_body(request)
     except ValueError:
         router.finish_request(snapshot, status_code=413, error="request_too_large")
+        await _debug_finish_async(
+            lifecycle.request_debug,
+            finished_at=time.time(),
+            state="failed",
+            outcome="rejected",
+            status_code=413,
+            error_kind="request_too_large",
+            error_summary="请求体超过本地中转允许的大小",
+        )
         await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
@@ -4701,6 +4989,15 @@ async def _forward_request_with_lease(
             content={"error": {"message": "请求体超过本地中转允许的大小"}},
         )
     model, reasoning_effort = await asyncio.to_thread(_request_metadata, request_body)
+    if lifecycle.request_debug is not None:
+        with suppress(Exception):
+            await asyncio.to_thread(lifecycle.request_debug.body, request_body)
+            await asyncio.to_thread(
+                lifecycle.request_debug.update,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                phase="connecting",
+            )
     lifecycle.model = model
     lifecycle.reasoning_effort = reasoning_effort
     router.update_request_model(
@@ -4731,6 +5028,7 @@ async def _forward_request_with_lease(
     reroute_before_attempt = True
     recorded_model = model
     while True:
+        debug_attempt: RequestDebugAttempt | None = None
         lifecycle.retry_count = max(0, attempt - 1)
         response_body_decoded = False
         if attempt > 1 and reroute_before_attempt:
@@ -4738,6 +5036,11 @@ async def _forward_request_with_lease(
             lifecycle.snapshot = snapshot
         reroute_before_attempt = True
         provider = snapshot.provider
+        attempt_protocol_adapter = (
+            protocol_adapter_resolver(provider)
+            if protocol_adapter_resolver is not None
+            else protocol_adapter
+        )
         router.update_request_phase(snapshot, "connecting")
         await _update_inflight_request_async(
             usage_store,
@@ -4757,14 +5060,14 @@ async def _forward_request_with_lease(
             break
 
         url = (
-            protocol_adapter.upstream_url(provider, upstream_path)
-            if protocol_adapter is not None
-            and hasattr(protocol_adapter, "upstream_url")
+            attempt_protocol_adapter.upstream_url(provider, upstream_path)
+            if attempt_protocol_adapter is not None
+            and hasattr(attempt_protocol_adapter, "upstream_url")
             else _upstream_url(provider, upstream_path)
         )
         headers = (
-            protocol_adapter.request_headers(request.headers, provider)
-            if protocol_adapter is not None
+            attempt_protocol_adapter.request_headers(request.headers, provider)
+            if attempt_protocol_adapter is not None
             else _upstream_request_headers(request.headers, provider)
         )
         query_items = list(request.query_params.multi_items())
@@ -4790,15 +5093,6 @@ async def _forward_request_with_lease(
                     mapped_body,
                 )
                 mapping_applied = True
-        if not mapping_applied and provider.model and not provider.model_mappings:
-            rewritten_body = await asyncio.to_thread(
-                _rewrite_request_model,
-                request_body,
-                provider.model,
-            )
-            if rewritten_body is not None:
-                request_body_for_attempt = rewritten_body
-                attempt_model = provider.model
         if mapping_applied:
             upstream_model = attempt_model if attempt_model != model else None
             lifecycle.upstream_model = upstream_model
@@ -4834,6 +5128,13 @@ async def _forward_request_with_lease(
                     model=attempt_model,
                     reasoning_effort=reasoning_effort,
                 )
+        prepare_request_body = getattr(attempt_protocol_adapter, "prepare_request_body", None)
+        if responses_request and prepare_request_body is not None:
+            transformed_body = await asyncio.to_thread(
+                prepare_request_body, request_body_for_attempt, model=attempt_model,
+            )
+            if transformed_body is not None:
+                request_body_for_attempt = transformed_body
         repaired_indexes = repaired_item_indexes_by_provider.get(provider.provider_id, set())
         strip_all_input_item_ids = (
             responses_request
@@ -4852,6 +5153,27 @@ async def _forward_request_with_lease(
             )
             if transformed_body is not None:
                 request_body_for_attempt = transformed_body
+        if lifecycle.request_debug is not None:
+            try:
+                debug_attempt = await asyncio.to_thread(
+                    lifecycle.request_debug.attempt,
+                    attempt=attempt,
+                    provider_id=provider.provider_id,
+                    url=str(httpx.URL(url, params=query_items)),
+                    headers=headers,
+                    body=request_body_for_attempt,
+                )
+                await _debug_update_async(
+                    lifecycle.request_debug,
+                    provider_id=provider.provider_id,
+                    model=model,
+                    upstream_model=upstream_model,
+                    reasoning_effort=reasoning_effort,
+                    phase="connecting",
+                )
+            except Exception:
+                debug_attempt = None
+        lifecycle.debug_attempt = debug_attempt
         retry_kind: str | None = None
         retry_summary: str | None = None
         retry_delay = retry_policy.backoff(attempt - 1)
@@ -4874,12 +5196,27 @@ async def _forward_request_with_lease(
                     response_headers_timeout_seconds=upstream_response_headers_timeout_seconds,
                     stream_idle_timeout_seconds=stream_idle_timeout_seconds,
                 )
-            upstream_response = await _send_upstream_response(
-                attempt_client,
-                upstream_request,
-                timeout_seconds=upstream_response_headers_timeout_seconds,
+            disconnect_monitor.start()
+            upstream_response = await disconnect_monitor.run(
+                _send_upstream_response(
+                    attempt_client,
+                    upstream_request,
+                    timeout_seconds=upstream_response_headers_timeout_seconds,
+                )
             )
             lifecycle.upstream_response = upstream_response
+            if debug_attempt is not None:
+                with suppress(Exception):
+                    await asyncio.to_thread(
+                        debug_attempt.set_response,
+                        status_code=upstream_response.status_code,
+                        headers=upstream_response.headers,
+                    )
+            await _debug_update_async(
+                lifecycle.request_debug,
+                phase="waiting_first_chunk",
+                status_code=upstream_response.status_code,
+            )
             router.update_request_phase(snapshot, "waiting_first_chunk")
             await _update_inflight_request_async(
                 usage_store,
@@ -4889,8 +5226,8 @@ async def _forward_request_with_lease(
             retry_kind = None
             if retry_policy.enabled:
                 retry_kind = (
-                    protocol_adapter.retry_kind(upstream_response)
-                    if protocol_adapter is not None
+                    attempt_protocol_adapter.retry_kind(upstream_response)
+                    if attempt_protocol_adapter is not None
                     else _retry_kind(upstream_response)
                 )
             if retry_kind is None:
@@ -4898,6 +5235,8 @@ async def _forward_request_with_lease(
                     first_chunk = upstream_response.content or None
                     stream = _empty_async_iterator()
                     lifecycle.stream = stream
+                    if debug_attempt is not None and first_chunk:
+                        await asyncio.to_thread(debug_attempt.response, first_chunk)
                     response_body_decoded = "content-encoding" in upstream_response.headers
                 else:
                     response_body_decoded = "content-encoding" in upstream_response.headers
@@ -4909,9 +5248,11 @@ async def _forward_request_with_lease(
                         stream,
                         timeout_seconds=stream_idle_timeout_seconds,
                     )
+                    if debug_attempt is not None:
+                        stream = _debug_capture_stream(stream, debug_attempt)
                     lifecycle.stream = stream
                     try:
-                        first_chunk = await anext(stream)
+                        first_chunk = await disconnect_monitor.run(anext(stream))
                     except StopAsyncIteration:
                         first_chunk = None
                     except httpx.HTTPError as exc:
@@ -4922,11 +5263,11 @@ async def _forward_request_with_lease(
                     retry_kind is None
                     and first_chunk is None
                     and retry_policy.enabled
-                    and protocol_adapter is not None
-                    and hasattr(protocol_adapter, "empty_response_decision")
+                    and attempt_protocol_adapter is not None
+                    and hasattr(attempt_protocol_adapter, "empty_response_decision")
                 ):
                     action, retry_kind, retry_summary = (
-                        protocol_adapter.empty_response_decision(upstream_response)
+                        attempt_protocol_adapter.empty_response_decision(upstream_response)
                     )
                     if action != "retry":
                         retry_kind = None
@@ -4946,11 +5287,13 @@ async def _forward_request_with_lease(
                 ):
                     assert stream is not None
                     first_chunk, stream, retry_kind, retry_summary, repair_index = (
-                        await _inspect_http_400_before_output(
-                            upstream_response,
-                            first_chunk,
-                            stream,
-                            detect_retryable=retry_policy.enabled,
+                        await disconnect_monitor.run(
+                            _inspect_http_400_before_output(
+                                upstream_response,
+                                first_chunk,
+                                stream,
+                                detect_retryable=retry_policy.enabled,
+                            )
                         )
                     )
                     lifecycle.stream = stream
@@ -5003,14 +5346,16 @@ async def _forward_request_with_lease(
                         phase="preflighting_sse",
                     )
                     first_chunk, retry_kind, retry_summary = (
-                        await _inspect_sse_before_output(
-                            first_chunk,
-                            stream,
-                            decision=(
-                                protocol_adapter.sse_preflight_decision
-                                if protocol_adapter is not None
-                                else _sse_preflight_decision
-                            ),
+                        await disconnect_monitor.run(
+                            _inspect_sse_before_output(
+                                first_chunk,
+                                stream,
+                                decision=(
+                                    attempt_protocol_adapter.sse_preflight_decision
+                                    if attempt_protocol_adapter is not None
+                                    else _sse_preflight_decision
+                                ),
+                            )
                         )
                     )
                     lifecycle.stream = stream
@@ -5024,10 +5369,12 @@ async def _forward_request_with_lease(
                 ):
                     assert stream is not None
                     first_chunk, retry_kind, retry_summary = (
-                        await _inspect_html_404_before_output(
-                            upstream_response,
-                            first_chunk,
-                            stream,
+                        await disconnect_monitor.run(
+                            _inspect_html_404_before_output(
+                                upstream_response,
+                                first_chunk,
+                                stream,
+                            )
                         )
                     )
                     lifecycle.stream = stream
@@ -5077,6 +5424,18 @@ async def _forward_request_with_lease(
             upstream_response = None
             lifecycle.upstream_response = None
             lifecycle.stream = None
+        await _debug_attempt_finish_async(
+            debug_attempt,
+            state="retrying" if can_retry else "failed",
+            error_kind=retry_kind,
+            error_summary=retry_summary,
+        )
+        await _debug_update_async(
+            lifecycle.request_debug,
+            phase="retrying" if can_retry else "failed",
+            error_kind=retry_kind,
+            error_summary=retry_summary,
+        )
         if not can_retry:
             if retry_kind is not None:
                 await _record_recovery_event_async(
@@ -5138,12 +5497,26 @@ async def _forward_request_with_lease(
         if retry_kind == "request_item_id_repair":
             reroute_before_attempt = False
         else:
-            await retry_sleep(retry_delay)
+            await disconnect_monitor.run(retry_sleep(retry_delay))
             attempt += 1
 
     if upstream_response is None or stream is None:
         router.record_outcome(snapshot, transient_failure=True, policy=retry_policy)
         router.finish_request(snapshot, status_code=502, error=final_error)
+        await _debug_finish_async(
+            lifecycle.request_debug,
+            finished_at=time.time(),
+            state="failed",
+            outcome="exhausted",
+            status_code=502,
+            provider_id=snapshot.provider.provider_id,
+            model=model,
+            upstream_model=upstream_model,
+            reasoning_effort=reasoning_effort,
+            phase="failed",
+            error_kind=final_error,
+            error_summary=final_summary or _retry_kind_summary(final_error),
+        )
         await _record_request_event_async(
             usage_store,
             snapshot=snapshot,
@@ -5166,6 +5539,9 @@ async def _forward_request_with_lease(
 
     router.record_outcome(snapshot, transient_failure=False, policy=retry_policy)
 
+    # Pair both directions for this attempt even if settings change in flight.
+    selected_protocol_adapter = attempt_protocol_adapter
+
     response_headers = {
         key: value
         for key, value in upstream_response.headers.items()
@@ -5178,8 +5554,8 @@ async def _forward_request_with_lease(
     usage_capture = None
     if usage_store is not None:
         usage_capture = await asyncio.to_thread(
-            protocol_adapter.usage_capture
-            if protocol_adapter is not None
+            selected_protocol_adapter.usage_capture
+            if selected_protocol_adapter is not None
             else UsageCapture,
             request_body,
             upstream_path,
@@ -5190,43 +5566,58 @@ async def _forward_request_with_lease(
         and _is_event_stream(upstream_response)
     ):
         failure_capture = (
-            protocol_adapter.failure_capture()
-            if protocol_adapter is not None
-            and hasattr(protocol_adapter, "failure_capture")
+            selected_protocol_adapter.failure_capture()
+            if selected_protocol_adapter is not None
+            and hasattr(selected_protocol_adapter, "failure_capture")
             else SSEFailureCapture()
         )
     terminal_capture = (
         SSETerminalCapture() if _is_event_stream(upstream_response) else None
     )
+    transformed_stream: AsyncIterator[bytes] | None = None
+    if selected_protocol_adapter is not None and first_chunk is not None:
+        if _is_event_stream(upstream_response) and hasattr(
+            selected_protocol_adapter,
+            "transform_stream",
+        ):
+            transformed_stream = selected_protocol_adapter.transform_stream(
+                first_chunk,
+                stream,
+                request_body=request_body_for_attempt,
+                model=attempt_model,
+            )
+        elif not _is_event_stream(upstream_response) and hasattr(
+            selected_protocol_adapter,
+            "transform_body",
+        ):
+            transformed_stream = selected_protocol_adapter.transform_body(
+                first_chunk,
+                stream,
+                request_body=request_body_for_attempt,
+                model=attempt_model,
+            )
+    output_stream = (
+        transformed_stream
+        if transformed_stream is not None
+        else _resume_async_iterator(stream, prefix=first_chunk or b"")
+    )
 
     async def response_body() -> AsyncIterator[bytes]:
         stream_failure: tuple[str, str] | None = None
         stream_completed = False
+        debug_receiving_marked = False
         history_kind: str | None = None
         history_summary: str | None = None
         persistence_ready = False
+        successful = False
         try:
-            if first_chunk is not None:
-                terminal_event = await asyncio.to_thread(
-                    _feed_stream_captures,
-                    usage_capture,
-                    failure_capture,
-                    terminal_capture,
-                    first_chunk,
-                )
-                router.update_request_phase(snapshot, "receiving", activity=True)
-                await _update_inflight_request_async(
-                    usage_store,
-                    snapshot.request_id,
-                    phase="receiving",
-                )
-                if terminal_event is not None:
-                    stream_completed = True
-                yield first_chunk
-                if terminal_event is not None:
-                    return
-            assert stream is not None
-            async for chunk in stream:
+            async for chunk in output_stream:
+                if not debug_receiving_marked:
+                    await _debug_update_async(
+                        lifecycle.request_debug,
+                        phase="receiving",
+                    )
+                    debug_receiving_marked = True
                 terminal_event = await asyncio.to_thread(
                     _feed_stream_captures,
                     usage_capture,
@@ -5234,6 +5625,11 @@ async def _forward_request_with_lease(
                     terminal_capture,
                     chunk,
                 )
+                if debug_attempt is not None:
+                    debug_attempt.forwarded(chunk)
+                    if debug_attempt.should_flush():
+                        with suppress(Exception):
+                            await asyncio.to_thread(debug_attempt.flush)
                 router.update_request_phase(snapshot, "receiving", activity=True)
                 if terminal_event is not None:
                     stream_completed = True
@@ -5255,6 +5651,23 @@ async def _forward_request_with_lease(
             raise
         finally:
             usage: TokenUsage | None = None
+            persistence_ready = True
+            successful = (
+                stream_completed
+                and stream_failure is None
+                and 200 <= upstream_response.status_code < 300
+            )
+            if not successful and history_kind is None:
+                if not stream_completed:
+                    if lease.superseded:
+                        history_kind = "session_superseded"
+                        history_summary = "已由同会话新请求接管"
+                    else:
+                        history_kind = "client_disconnected"
+                        history_summary = "客户端取消"
+                else:
+                    history_kind = f"http_{upstream_response.status_code}"
+                    history_summary = f"HTTP {upstream_response.status_code}"
             try:
                 if usage_capture is not None or failure_capture is not None:
                     usage, embedded_failure = await asyncio.to_thread(
@@ -5265,6 +5678,19 @@ async def _forward_request_with_lease(
                     )
                     if embedded_failure is not None:
                         stream_failure = embedded_failure
+                terminal_event_kind = (
+                    terminal_capture.terminal_event
+                    if terminal_capture is not None
+                    else None
+                )
+                if (
+                    stream_failure is None
+                    and terminal_event_kind in {"error", "response.failed", "response.incomplete"}
+                ):
+                    stream_failure = (
+                        "malformed_response",
+                        terminal_capture.error_summary or f"上游以 {terminal_event_kind} 结束响应",
+                    )
                 successful = (
                     (
                         stream_completed
@@ -5277,6 +5703,11 @@ async def _forward_request_with_lease(
                         )
                     )
                     and stream_failure is None
+                    and terminal_event_kind not in {
+                        "error",
+                        "response.failed",
+                        "response.incomplete",
+                    }
                     and 200 <= upstream_response.status_code < 300
                 )
                 history_kind = stream_failure[0] if stream_failure else None
@@ -5292,23 +5723,27 @@ async def _forward_request_with_lease(
                     else:
                         history_kind = f"http_{upstream_response.status_code}"
                         history_summary = f"HTTP {upstream_response.status_code}"
-                persistence_ready = True
             finally:
                 try:
-                    close_stream = getattr(stream, "aclose", None)
-                    if close_stream is not None:
-                        await close_stream()
+                    close_output_stream = getattr(output_stream, "aclose", None)
+                    if close_output_stream is not None:
+                        await close_output_stream()
                 finally:
                     try:
-                        await upstream_response.aclose()
+                        close_stream = getattr(stream, "aclose", None)
+                        if close_stream is not None and stream is not output_stream:
+                            await close_stream()
                     finally:
-                        router.finish_request(
-                            snapshot,
-                            status_code=upstream_response.status_code,
-                            error=history_kind,
-                        )
-                        if persistence_ready:
-                            try:
+                        try:
+                            await upstream_response.aclose()
+                        finally:
+                            router.finish_request(
+                                snapshot,
+                                status_code=upstream_response.status_code,
+                                error=history_kind,
+                            )
+                            lifecycle.cleaned = True
+                            if persistence_ready:
                                 await _record_stream_completion_async(
                                     usage_store,
                                     recovery_history_store,
@@ -5332,8 +5767,38 @@ async def _forward_request_with_lease(
                                     attempt=attempt,
                                     max_attempts=retry_policy.max_attempts,
                                 )
-                            finally:
-                                lifecycle.cleaned = True
+                            await _debug_attempt_finish_async(
+                                debug_attempt,
+                                state=(
+                                    "cancelled"
+                                    if history_kind in {"client_disconnected", "session_superseded"}
+                                    else "succeeded" if successful else "failed"
+                                ),
+                                error_kind=history_kind,
+                                error_summary=history_summary,
+                            )
+                            await _debug_finish_async(
+                                lifecycle.request_debug,
+                                finished_at=time.time(),
+                                state=(
+                                    "cancelled"
+                                    if history_kind in {"client_disconnected", "session_superseded"}
+                                    else "succeeded" if successful else "failed"
+                                ),
+                                outcome=(
+                                    "cancelled"
+                                    if history_kind in {"client_disconnected", "session_superseded"}
+                                    else "succeeded" if successful else "failed"
+                                ),
+                                status_code=upstream_response.status_code,
+                                provider_id=snapshot.provider.provider_id,
+                                model=model,
+                                upstream_model=upstream_model,
+                                reasoning_effort=reasoning_effort,
+                                phase="completed" if successful else "failed",
+                                error_kind=history_kind,
+                                error_summary=history_summary,
+                            )
 
     return DisconnectAwareStreamingResponse(
         response_body(),
@@ -5719,6 +6184,7 @@ class SSETerminalCapture:
     def __init__(self) -> None:
         self._parser = SSEPreflightEventParser()
         self._terminal_event: str | None = None
+        self.error_summary: str | None = None
 
     @property
     def terminal_event(self) -> str | None:
@@ -5742,6 +6208,11 @@ class SSETerminalCapture:
             )
             if event_type in self._TERMINAL_EVENTS:
                 self._terminal_event = event_type
+                response = root.get("response")
+                error = response.get("error") if isinstance(response, dict) else root.get("error")
+                if isinstance(error, dict) and isinstance(error.get("message"), str):
+                    origin = "本地 DeepSeek 兼容转换失败" if error.get("type") == "deepseek_protocol_error" else "上游响应失败"
+                    self.error_summary = _sanitize_retry_summary(origin + "：" + error["message"])
                 break
         return self._terminal_event
 

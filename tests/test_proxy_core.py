@@ -2037,7 +2037,7 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts[1]["previous_response_id"], "resp_old")
         self.assertEqual(attempts[1]["input"][1]["call_id"], "call_1")
 
-    async def test_provider_model_is_rewritten_for_upstream(self) -> None:
+    async def test_provider_default_model_does_not_override_explicit_request(self) -> None:
         attempts: list[dict] = []
 
         async def upstream(request: httpx.Request) -> httpx.Response:
@@ -2063,9 +2063,82 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"ok")
         self.assertEqual(len(attempts), 1)
-        self.assertEqual(attempts[0]["model"], "deepseek-v4-pro")
+        self.assertEqual(attempts[0]["model"], "gpt-5.6-sol")
 
-    async def test_provider_model_rewrite_follows_rerouted_provider(self) -> None:
+    async def test_provider_default_model_keeps_request_records_on_client_model(self) -> None:
+        upstream_started = asyncio.Event()
+        release_upstream = asyncio.Event()
+        observed_models: list[str] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            observed_models.append(json.loads(await request.aread())["model"])
+            upstream_started.set()
+            await release_upstream.wait()
+            return httpx.Response(
+                200,
+                json={
+                    "id": "response-fixture",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 4,
+                        "output_tokens": 2,
+                        "total_tokens": 6,
+                    },
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            usage_store = UsageStore(Path(temp_dir) / "usage.sqlite3")
+            router = ProviderRouter(
+                (provider("selected", current=True, model="gpt-5.6-sol"),)
+            )
+            upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = create_proxy_app(
+                router,
+                client=upstream_client,
+                usage_store=usage_store,
+            )
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            )
+            request_task = asyncio.create_task(
+                client.post(
+                    "/v1/responses",
+                    headers={
+                        "x-codex-turn-metadata": json.dumps(
+                            {"thread_id": "thread-client-model"}
+                        )
+                    },
+                    json={"model": "gpt-6-astra", "input": []},
+                )
+            )
+            try:
+                await asyncio.wait_for(upstream_started.wait(), timeout=2)
+                running = await client.get(
+                    "/control/api/requests",
+                    params={"status": "running"},
+                )
+                running_item = running.json()["active"][0]
+                self.assertEqual(running_item["model"], "gpt-6-astra")
+                self.assertIsNone(running_item["upstream_model"])
+
+                release_upstream.set()
+                response = await request_task
+                history = await client.get("/control/api/requests")
+            finally:
+                release_upstream.set()
+                await asyncio.gather(request_task, return_exceptions=True)
+                await client.aclose()
+                await upstream_client.aclose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed_models, ["gpt-6-astra"])
+        history_item = history.json()["items"][0]
+        self.assertEqual(history_item["model"], "gpt-6-astra")
+        self.assertIsNone(history_item["upstream_model"])
+
+    async def test_provider_default_model_does_not_change_retry_model(self) -> None:
         attempts: list[dict] = []
         router = ProviderRouter(
             (
@@ -2101,8 +2174,8 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(attempts), 2)
-        self.assertEqual(attempts[0]["model"], "gpt-5.6-sol")
-        self.assertEqual(attempts[1]["model"], "glm-5.3")
+        self.assertEqual(attempts[0]["model"], "codex-default")
+        self.assertEqual(attempts[1]["model"], "codex-default")
         self.assertIn("primary", attempts[0]["url"])
         self.assertIn("fallback", attempts[1]["url"])
 
@@ -2988,9 +3061,9 @@ class ProxyAppTests(unittest.IsolatedAsyncioTestCase):
         await run_case(model="legacy-sol", model_mappings={"sol": "upstream-sol"})
         self.assertEqual(observed_models, ["luna"])
 
-        # 映射表为空：保留 v1.5 单值改写行为
+        # 映射表为空：供应商默认模型不覆盖客户端的显式选择
         await run_case(model="legacy-sol")
-        self.assertEqual(observed_models, ["legacy-sol"])
+        self.assertEqual(observed_models, ["luna"])
 
         # 映射命中：改写为上游名
         await run_case(model="legacy-sol", model_mappings={"luna": "upstream-luna"})

@@ -19,6 +19,7 @@ from local_proxy.core import (
     HealthStatusUrlStore,
     ProviderRouter,
     RecoveryHistoryStore,
+    RequestDebugStore,
     RetryPolicyStore,
     UsageStore,
     filter_self_referencing_providers,
@@ -28,6 +29,10 @@ from local_proxy.paths import display_path
 from local_proxy.server import ProxyProfile
 from local_proxy.transports.curl import CurlClient
 from local_proxy.provider_catalog import ProviderCatalog
+from local_proxy.protocols.deepseek_dsml import (
+    DeepSeekDSMLProtocol,
+    is_deepseek_provider,
+)
 from local_proxy.status_upload import (
     StatusUploadManager,
     build_provider_upload_payload,
@@ -46,6 +51,15 @@ from local_proxy.shared_settings import (
 
 
 SETTINGS_VERSION = PROTOCOL_SETTINGS_VERSION
+
+
+def _resolve_codex_protocol_adapter(provider: Any, protocol: Any) -> Any | None:
+    """Apply response-level DSML detection to every Codex Responses provider."""
+    if is_deepseek_provider(provider):
+        return protocol
+    if str(getattr(provider, "wire_api", "")).casefold() == "responses":
+        return protocol
+    return None
 
 
 def _merge_session_catalogs(
@@ -138,6 +152,7 @@ def codex_ui_config(port: int, root: Path | None = None) -> dict[str, Any]:
             "provider_launch_command": True,
             "status_upload": True,
             "provider_catalog": True,
+            "deepseek_compatibility": True,
         },
     }
 
@@ -188,6 +203,11 @@ def build_codex_profile(
     )
     session_name_index = CodexSessionNameIndex()
     usage_store = UsageStore(active_usage_path)
+    request_debug_store = RequestDebugStore(
+        root / "codex-request-debug.sqlite3",
+        service_id="codex",
+    )
+    deepseek_protocol = DeepSeekDSMLProtocol()
 
     def session_catalog(since: float) -> tuple[dict[str, Any], ...]:
         return _merge_session_catalogs(
@@ -239,19 +259,27 @@ def build_codex_profile(
         with settings_lock:
             show_launch_command = settings.get("show_provider_launch_command", True)
             show_status_upload = settings.get("show_status_upload", True)
+            compatibility = settings.get("deepseek_compatibility_enabled", False)
         return {
             "data_directory": display_path(root),
             "settings_file": display_path(active_settings_path),
             "usage_database": display_path(active_usage_path),
+            "request_debug_database": display_path(request_debug_store.path),
             "provider_catalog": display_path(provider_catalog.path),
             "provider_catalog_source": display_path(active_database_path),
             "codex_config_file": "~/.codex/config.toml",
             "show_provider_launch_command": bool(show_launch_command),
             "show_status_upload": bool(show_status_upload),
+            "deepseek_compatibility_enabled": bool(compatibility),
         }
 
     def apply_runtime_preferences(payload: Mapping[str, Any]) -> None:
         changes: dict[str, bool] = {}
+        if "deepseek_compatibility_enabled" in payload:
+            compatibility = payload["deepseek_compatibility_enabled"]
+            if not isinstance(compatibility, bool):
+                raise ValueError("DeepSeek 兼容转换设置必须是布尔值")
+            changes["deepseek_compatibility_enabled"] = compatibility
         if "show_provider_launch_command" in payload:
             show_launch_command = payload["show_provider_launch_command"]
             if not isinstance(show_launch_command, bool):
@@ -264,6 +292,11 @@ def build_codex_profile(
             changes["show_status_upload"] = show_status_upload
         if changes:
             persist(**changes)
+
+    def resolve_protocol_adapter(provider: Any) -> Any | None:
+        with settings_lock:
+            enabled = settings.get("deepseek_compatibility_enabled", False)
+        return _resolve_codex_protocol_adapter(provider, deepseek_protocol) if enabled else None
 
     standard_client = httpx.AsyncClient(
         timeout=httpx.Timeout(
@@ -290,6 +323,7 @@ def build_codex_profile(
             else standard_client
         ),
         additional_owned_clients=(compatible_client,),
+        protocol_adapter_resolver=resolve_protocol_adapter,
         reload_providers=prepared_providers,
         on_provider_selected=lambda provider_id: persist(selected_provider_id=provider_id),
         on_session_provider_override_changed=persist_session_provider_override,
@@ -301,6 +335,7 @@ def build_codex_profile(
         provider_launch_command=codex_cli_launch_command,
         retry_policy_store=retry_policy_store or RetryPolicyStore(),
         usage_store=usage_store,
+        request_debug_store=request_debug_store,
         recovery_history_store=RecoveryHistoryStore(active_usage_path),
         health_status_url_store=health_status_url_store or HealthStatusUrlStore(),
         status_upload_manager=status_upload_manager,

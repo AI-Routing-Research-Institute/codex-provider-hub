@@ -99,7 +99,7 @@
         <label class="provider-editor-field"><span>Base URL</span><input v-model.trim="form.base_url" type="url" required spellcheck="false" autocomplete="off" placeholder="https://api.example.com/v1" /></label>
         <label class="provider-editor-field"><span>Wire API</span><UiSelect v-model="form.wire_api" aria-label="Wire API" :options="wireApiOptions" /></label>
         <label class="provider-editor-field"><span>请求传输方式</span><UiSelect v-model="form.transport" aria-label="请求传输方式" :options="transportOptions" /></label>
-        <label class="provider-editor-field"><span>模型重写 <small>留空则透传客户端模型名</small></span><input v-model.trim="form.model" type="text" maxlength="240" spellcheck="false" autocomplete="off" placeholder="例如 deepseek-v4-pro" /></label>
+        <label class="provider-editor-field"><span>启动默认模型 <small>转发时不覆盖客户端模型</small></span><input v-model.trim="form.model" type="text" maxlength="240" spellcheck="false" autocomplete="off" placeholder="例如 deepseek-v4-pro" /></label>
         <label class="provider-editor-field"><span>API Key</span><input v-model="form.api_key" type="password" autocomplete="new-password" placeholder="新增时填写，编辑时留空表示保留" /></label>
         <label v-if="editingId" class="provider-editor-check"><input v-model="form.clear_api_key" type="checkbox" /><span>清除已保存的 API Key</span></label>
         <label class="provider-editor-field"><span>HTTP Headers <small>JSON 对象</small></span><textarea v-model="form.headers" rows="3" spellcheck="false" /></label>
