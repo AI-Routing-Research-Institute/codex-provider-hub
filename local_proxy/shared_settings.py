@@ -121,6 +121,7 @@ def default_protocol_settings() -> dict[str, Any]:
         "session_provider_overrides": {},
         "show_provider_launch_command": True,
         "show_status_upload": True,
+        "deepseek_compatibility_enabled": False,
     }
 
 
@@ -259,6 +260,9 @@ def load_protocol_settings(path: Path) -> dict[str, Any]:
     show_status_upload = payload.get("show_status_upload")
     if isinstance(show_status_upload, bool):
         settings["show_status_upload"] = show_status_upload
+    compatibility = payload.get("deepseek_compatibility_enabled")
+    if isinstance(compatibility, bool):
+        settings["deepseek_compatibility_enabled"] = compatibility
     return settings
 
 
@@ -293,6 +297,9 @@ def save_protocol_settings(settings: dict[str, Any], path: Path) -> None:
     show_status_upload = settings.get("show_status_upload")
     if isinstance(show_status_upload, bool):
         normalized["show_status_upload"] = show_status_upload
+    compatibility = settings.get("deepseek_compatibility_enabled")
+    if isinstance(compatibility, bool):
+        normalized["deepseek_compatibility_enabled"] = compatibility
     _write_json_object(path, normalized)
 
 
@@ -506,6 +513,12 @@ class SharedRuntimeCoordinator:
             and not isinstance(payload["show_status_upload"], bool)
         ):
             raise ValueError("上传检测显示设置必须是布尔值")
+        if (
+            service_id == "codex"
+            and "deepseek_compatibility_enabled" in payload
+            and not isinstance(payload["deepseek_compatibility_enabled"], bool)
+        ):
+            raise ValueError("DeepSeek 兼容转换设置必须是布尔值")
         source, loaded = self._prepare_database(database_value)
         with self._lock:
             self.settings_store.replace_runtime(

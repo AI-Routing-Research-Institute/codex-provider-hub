@@ -13,6 +13,7 @@ from local_proxy.core import (
     HealthStatusUrlStore,
     ProviderRouter,
     RecoveryHistoryStore,
+    RequestDebugStore,
     RetryPolicyStore,
     UsageStore,
     filter_self_referencing_providers,
@@ -120,6 +121,10 @@ def build_claude_profile(
     root = (data_root or data_directory()).expanduser().resolve()
     active_settings_path = protocol_settings_path("claude", root)
     active_usage_path = protocol_usage_database_path("claude", root)
+    request_debug_store = RequestDebugStore(
+        root / "claude-request-debug.sqlite3",
+        service_id="claude",
+    )
     settings = (
         dict(settings_data)
         if settings_data is not None
@@ -189,6 +194,7 @@ def build_claude_profile(
             "data_directory": display_path(root),
             "settings_file": display_path(active_settings_path),
             "usage_database": display_path(active_usage_path),
+            "request_debug_database": display_path(request_debug_store.path),
             "claude_config_file": "~/.claude/settings.json",
             "show_status_upload": bool(show_status_upload),
         }
@@ -217,6 +223,7 @@ def build_claude_profile(
         config_fragment=lambda: json.dumps(claude_config_snippets(port), ensure_ascii=False),
         retry_policy_store=retry_policy_store or RetryPolicyStore(),
         usage_store=UsageStore(active_usage_path),
+        request_debug_store=request_debug_store,
         recovery_history_store=RecoveryHistoryStore(active_usage_path),
         health_status_url_store=health_status_url_store or HealthStatusUrlStore(),
         status_upload_manager=status_upload_manager,

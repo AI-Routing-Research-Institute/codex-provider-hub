@@ -13,6 +13,7 @@
       <div class="setting-row"><span><strong>控制台界面</strong><small>保存后刷新页面生效，不影响中转请求</small></span><div class="setting-segmented" role="radiogroup" aria-label="控制台界面"><label><input v-model="settings.console_ui" type="radio" value="classic" /><span>经典界面</span></label><label><input v-model="settings.console_ui" type="radio" value="modern" /><span>新版界面</span></label></div></div>
       <label v-if="config.features?.provider_launch_command" class="setting-row setting-toggle"><span><strong>供应商临时启动命令</strong><small>在供应商配置列显示“临时启动”按钮</small></span><input v-model="settings.show_provider_launch_command" type="checkbox" /></label>
       <label v-if="config.features?.status_upload" class="setting-row setting-toggle"><span><strong>供应商上传检测</strong><small>在供应商配置列显示“上传检测”按钮</small></span><input v-model="settings.show_status_upload" type="checkbox" /></label>
+      <label v-if="config.features?.deepseek_compatibility" class="setting-row setting-toggle"><span><strong>DeepSeek 兼容转换</strong><small>修复请求历史、工具调用和回复显示；关闭后停止这些转换。保存后对后续转发生效，模型映射独立生效</small></span><input v-model="settings.deepseek_compatibility_enabled" type="checkbox" /></label>
       <div class="setting-row setting-readonly-row"><span><strong>本地数据目录</strong><small>共享设置与两套协议数据均保存在此，不保存供应商 Key</small></span><div class="setting-path-value"><code>{{ settings.data_directory || '—' }}</code><button class="secondary-button setting-action-button" type="button" @click="copyPath">复制路径</button></div></div>
       <div class="setting-row setting-readonly-row"><span><strong>{{ config.config_location_label || '客户端配置文件' }}</strong><small>{{ config.config_location_hint || '配置片段的默认位置' }}</small></span><code>{{ settings.codex_config_file || config.config_location || '—' }}</code></div>
       <div v-if="settings.restart_required" class="setting-notice">{{ config.restart_config_text || '端口将在退出并重新启动本地中转后生效。' }}</div>
@@ -32,7 +33,7 @@ import { controlFetch, jsonOptions } from '../api.js'
 import UiSelect from './ui/UiSelect.vue'
 const props = defineProps({ config: { type: Object, required: true } })
 const emit = defineEmits(['launch-command-visibility-change', 'status-upload-visibility-change'])
-const settings = ref({ configured_port: 17890, active_port: 17890, database_path: '', health_status_url: '', console_ui: 'modern', show_provider_launch_command: true, show_status_upload: true })
+const settings = ref({ configured_port: 17890, active_port: 17890, database_path: '', health_status_url: '', console_ui: 'modern', show_provider_launch_command: true, show_status_upload: true, deepseek_compatibility_enabled: false })
 const timeoutOptions = [{ value: 60, label: '1 分钟' }, { value: 120, label: '2 分钟' }, { value: 300, label: '5 分钟' }, { value: 600, label: '10 分钟' }, { value: 1800, label: '30 分钟' }, { value: 3600, label: '1 小时' }, { value: 'custom', label: '自定义分钟' }, { value: 0, label: '永不' }]
 const timeoutPresetValues = new Set(timeoutOptions.filter(option => typeof option.value === 'number' && option.value > 0).map(option => option.value))
 const responseHeadersTimeoutSelection = ref(120)
@@ -64,7 +65,8 @@ async function saveSettings() {
       upstream_response_headers_timeout_seconds: timeoutSeconds(responseHeadersTimeoutSelection.value, responseHeadersTimeoutMinutes.value, '上游响应头超时'),
       upstream_stream_idle_timeout_seconds: timeoutSeconds(streamIdleTimeoutSelection.value, streamIdleTimeoutMinutes.value, 'SSE 流空闲超时'),
       ...(props.config.features?.provider_launch_command ? { show_provider_launch_command: settings.value.show_provider_launch_command } : {}),
-      ...(props.config.features?.status_upload ? { show_status_upload: settings.value.show_status_upload } : {})
+      ...(props.config.features?.status_upload ? { show_status_upload: settings.value.show_status_upload } : {}),
+      ...(props.config.features?.deepseek_compatibility ? { deepseek_compatibility_enabled: settings.value.deepseek_compatibility_enabled } : {})
     }
     settings.value = await controlFetch('/api/runtime-settings', jsonOptions('POST', payload))
     settings.value.health_status_url ||= ''

@@ -327,6 +327,32 @@ test("Vue runtime settings expose configurable upstream timeouts", () => {
   assert.match(runtime, /upstream_stream_idle_timeout_seconds/);
 });
 
+test("runtime conversion switch saves both boolean values and is omitted for Claude", async () => {
+  const runtime = fs.readFileSync(path.join(root, "components", "RuntimeView.vue"), "utf8");
+  const script = runtime.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import .*$/gm, "");
+  for (const supported of [true, false]) {
+    const sent = [];
+    const context = vm.createContext({
+      ref: value => ({ value }), computed: fn => ({ get value() { return fn(); } }), onMounted() {},
+      defineProps: () => ({ config: { features: { deepseek_compatibility: supported } } }),
+      defineEmits: () => () => {},
+      jsonOptions: (method, body) => ({ method, body }),
+      controlFetch: async (_url, options) => {
+        sent.push(options.body);
+        return { ...options.body, configured_port: options.body.port };
+      },
+    });
+    vm.runInContext(`${script}\nthis.runtime = { settings, saveSettings, message };`, context);
+    assert.equal(context.runtime.settings.value.deepseek_compatibility_enabled, false);
+    for (const enabled of [false, true]) {
+      context.runtime.settings.value.deepseek_compatibility_enabled = enabled;
+      await context.runtime.saveSettings();
+      assert.equal(context.runtime.message.value, "运行设置已保存。");
+      assert.equal(sent.at(-1).deepseek_compatibility_enabled, supported ? enabled : undefined);
+    }
+  }
+});
+
 test("shared time range selector uses day precision and stays anchored", async () => {
   const selector = fs.readFileSync(path.join(root, "components", "TimeRangeSelect.vue"), "utf8");
   const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
@@ -669,8 +695,11 @@ test("Vue provider health details use the clicked anchor and include model histo
   assert.doesNotMatch(styles, /provider-health-history\.full \.provider-health-mark \{ flex: 0 0 4px;/);
 });
 
-test("provider editor round-trips the model rewrite field", () => {
+test("provider editor labels the model as a launch default", () => {
   const providers = fs.readFileSync(path.join(root, "components", "ProvidersView.vue"), "utf8");
+  assert.match(providers, /启动默认模型/);
+  assert.match(providers, /转发时不覆盖客户端模型/);
+  assert.doesNotMatch(providers, /模型重写/);
   assert.match(providers, /v-model\.trim="form\.model"/);
   assert.match(providers, /model: detail\.model \|\| ''/);
   assert.match(providers, /model: form\.value\.model/);

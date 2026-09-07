@@ -134,6 +134,7 @@ let uiConfig = {
     session_routing: false,
     provider_launch_command: false,
     status_upload: false,
+    deepseek_compatibility: false,
     provider_catalog: false,
   },
 };
@@ -165,6 +166,7 @@ const runtimeStreamIdleTimeoutMinutesInput = document.querySelector("#runtime-st
 const runtimeConsoleUiInputs = [...document.querySelectorAll('input[name="runtime-console-ui"]')];
 const runtimeShowLaunchCommandInput = document.querySelector("#runtime-show-launch-command");
 const runtimeShowStatusUploadInput = document.querySelector("#runtime-show-status-upload");
+const runtimeDeepseekCompatibilityInput = document.querySelector("#runtime-deepseek-compatibility");
 const themeButton = document.querySelector("#theme-button");
 const themeMenu = document.querySelector("#theme-menu");
 const recovery = document.querySelector("#recovery");
@@ -426,6 +428,10 @@ function applyUiConfig(config) {
   document.querySelector("#runtime-status-upload-row")?.toggleAttribute(
     "hidden",
     uiConfig.features.status_upload !== true,
+  );
+  document.querySelector("#runtime-deepseek-compatibility-row")?.toggleAttribute(
+    "hidden",
+    uiConfig.features.deepseek_compatibility !== true,
   );
   renderProviderManagementState();
   const refreshButton = document.querySelector("#refresh-button");
@@ -1253,6 +1259,9 @@ function runtimePayloadFromForm() {
     ...(uiConfig.features.status_upload === true
       ? { show_status_upload: runtimeShowStatusUploadInput.checked }
       : {}),
+    ...(uiConfig.features.deepseek_compatibility === true
+      ? { deepseek_compatibility_enabled: runtimeDeepseekCompatibilityInput.checked }
+      : {}),
   };
 }
 
@@ -1287,6 +1296,7 @@ function renderRuntimeSettings(settings) {
   });
   runtimeShowLaunchCommandInput.checked = settings.show_provider_launch_command !== false;
   runtimeShowStatusUploadInput.checked = settings.show_status_upload !== false;
+  runtimeDeepseekCompatibilityInput.checked = settings.deepseek_compatibility_enabled === true;
   document.querySelector("#database-path").textContent = (
     uiConfig.features.provider_catalog === true
       ? settings.provider_catalog
