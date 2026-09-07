@@ -1,6 +1,36 @@
+* text=auto
+*.py text eol=lf
+*.pyi text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.vue text eol=lf
+*.ts text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.ps1 text eol=lf
+*.vbs text eol=lf
 *.sh text eol=lf
 .githooks/* text eol=lf
 deploy/systemd/*.service text eol=lf
 deploy/nginx/*.conf text eol=lf
 proxy_static/index.html text eol=lf
 proxy_static/dist/index.html text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.exe binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
