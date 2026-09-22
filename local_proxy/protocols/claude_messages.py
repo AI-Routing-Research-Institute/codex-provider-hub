@@ -175,6 +175,19 @@ class ClaudeUsageCapture:
         self._cached_tokens = 0
         self._saw_usage = False
         self._finalized = False
+        from local_proxy.response_models import UpstreamResponseModelObserver
+
+        self._response_model_observer = UpstreamResponseModelObserver(
+            protocol="anthropic"
+        )
+
+    @property
+    def upstream_response_model(self) -> str | None:
+        return self._response_model_observer.model
+
+    @property
+    def upstream_response_model_conflict(self) -> bool:
+        return self._response_model_observer.conflict
 
     def feed(self, chunk: bytes) -> None:
         if not self._finalized and chunk:
@@ -225,6 +238,7 @@ class ClaudeUsageCapture:
         )
 
     def _observe(self, root: dict[str, Any]) -> None:
+        self._response_model_observer.observe(root)
         usage: Any = root.get("usage")
         message = root.get("message")
         if isinstance(message, dict) and isinstance(message.get("usage"), dict):
