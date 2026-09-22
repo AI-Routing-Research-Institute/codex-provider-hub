@@ -65,4 +65,4 @@ SQLite 启动时通过增量列迁移兼容既有数据库；新增 API 字段�
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/97
