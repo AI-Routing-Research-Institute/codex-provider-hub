@@ -990,7 +990,7 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .request-filters .time-range-custom-fields input { width: 100%; min-width: 0; height: 30px; padding: 0 6px; box-sizing: border-box; }
 .request-filters select:focus-visible, .request-filters input:focus { border-color: var(--teal); outline: 2px solid var(--teal-soft); }
 .request-search { position: relative; }
-.request-table-shell { --request-columns: 72px 100px minmax(180px, 1.25fr) minmax(130px, .8fr) minmax(112px, .68fr) minmax(132px, .78fr) 78px 64px 82px minmax(104px, .66fr); min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-color: var(--line-strong) transparent; scrollbar-width: thin; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); }
+.request-table-shell { --request-columns: 72px 100px minmax(180px, 1.25fr) minmax(130px, .8fr) minmax(112px, .68fr) minmax(132px, .78fr) minmax(150px, .9fr) 78px 64px 82px minmax(104px, .66fr); min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-color: var(--line-strong) transparent; scrollbar-width: thin; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); }
 .requests-table-container { min-width: 0; min-height: 0; overflow: auto; }
 .request-table-header, .request-row { min-width: 1180px; display: grid; grid-template-columns: var(--request-columns); align-items: center; column-gap: 12px; }
 .request-table-header { position: sticky; top: 0; z-index: 1; padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--surface-soft); color: var(--muted); font-size: var(--font-meta); font-weight: 700; }
@@ -1022,13 +1022,17 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .request-time, .request-duration { color: var(--muted); font-size: var(--font-meta); }
 .request-time, .request-reasoning { text-align: center; }
 .request-duration { text-align: right; }
-.request-session, .request-model, .request-upstream-model, .request-result { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-session, .request-model, .request-upstream-model, .request-response-model, .request-result { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .request-session { font-size: var(--font-body); font-weight: 700; }
 .request-provider-cell { min-width: 0; display: grid; }
 .request-provider-actual { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--font-meta); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .request-model { color: var(--muted); }
 .request-upstream-model { color: var(--muted); }
 .request-upstream-model.mapped { color: var(--teal); font-weight: 700; }
+.request-response-model { display: flex; min-width: 0; flex-direction: column; gap: 2px; color: var(--muted); }
+.request-response-model > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-response-model.mismatch { color: var(--amber); font-weight: 700; }
+.request-response-model small { width: fit-content; padding: 1px 5px; border-radius: 999px; background: var(--amber-soft); color: var(--warning-text); font-size: 10px; font-weight: 700; line-height: 1.3; }
 .request-reasoning { overflow: hidden; color: var(--muted); font-size: var(--font-meta); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .request-token { color: var(--teal); font-weight: 700; text-align: right; }
 .request-row.failed .request-token { color: var(--red); }

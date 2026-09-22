@@ -33,6 +33,11 @@ from local_proxy.control_ui import (
 )
 from local_proxy.diagnostics import DiagnosticLog, EventLoopWatchdog
 from local_proxy.request_debug import RequestDebugAttempt, RequestDebugSession, RequestDebugStore
+from local_proxy.response_models import (
+    MAX_UPSTREAM_RESPONSE_MODEL_CHARS,
+    UpstreamResponseModelObserver,
+    upstream_model_mismatch,
+)
 
 
 try:
@@ -657,6 +662,8 @@ class UsageStore:
                     session_name TEXT NOT NULL,
                     model TEXT NOT NULL,
                     upstream_model TEXT,
+                    upstream_response_model TEXT,
+                    upstream_model_mismatch INTEGER,
                     reasoning_effort TEXT,
                     status_code INTEGER,
                     succeeded INTEGER NOT NULL,
@@ -693,6 +700,8 @@ class UsageStore:
                     session_name TEXT NOT NULL,
                     model TEXT NOT NULL,
                     upstream_model TEXT,
+                    upstream_response_model TEXT,
+                    upstream_model_mismatch INTEGER,
                     reasoning_effort TEXT,
                     phase TEXT NOT NULL,
                     request_body_bytes INTEGER NOT NULL DEFAULT 0,
@@ -721,6 +730,14 @@ class UsageStore:
                 connection.execute(
                     "ALTER TABLE request_history ADD COLUMN upstream_model TEXT"
                 )
+            if "upstream_response_model" not in history_columns:
+                connection.execute(
+                    "ALTER TABLE request_history ADD COLUMN upstream_response_model TEXT"
+                )
+            if "upstream_model_mismatch" not in history_columns:
+                connection.execute(
+                    "ALTER TABLE request_history ADD COLUMN upstream_model_mismatch INTEGER"
+                )
             if "last_activity_at" not in history_columns:
                 connection.execute(
                     "ALTER TABLE request_history ADD COLUMN last_activity_at REAL"
@@ -733,6 +750,18 @@ class UsageStore:
                 connection.execute(
                     "ALTER TABLE inflight_requests ADD COLUMN upstream_model TEXT"
                 )
+            if "upstream_response_model" not in inflight_columns:
+                connection.execute(
+                    "ALTER TABLE inflight_requests ADD COLUMN upstream_response_model TEXT"
+                )
+            if "upstream_model_mismatch" not in inflight_columns:
+                connection.execute(
+                    "ALTER TABLE inflight_requests ADD COLUMN upstream_model_mismatch INTEGER"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS request_history_upstream_model_mismatch "
+                "ON request_history(upstream_model_mismatch, finished_at)"
+            )
             connection.execute(
                 """
                 UPDATE request_usage
@@ -748,7 +777,8 @@ class UsageStore:
             """
             INSERT INTO request_history (
                 started_at, finished_at, last_activity_at, provider_id, thread_id, session_key,
-                session_name, model, upstream_model, reasoning_effort,
+                session_name, model, upstream_model, upstream_response_model,
+                upstream_model_mismatch, reasoning_effort,
                 status_code, succeeded,
                 outcome, duration_ms, retry_count, error_kind, error_summary,
                 usage_id, input_tokens, output_tokens, total_tokens,
@@ -757,7 +787,8 @@ class UsageStore:
             SELECT
                 started_at, ?, MIN(MAX(updated_at, started_at), ?), provider_id,
                 thread_id, session_key,
-                session_name, model, upstream_model, reasoning_effort, NULL, 0,
+                session_name, model, upstream_model, upstream_response_model,
+                upstream_model_mismatch, reasoning_effort, NULL, 0,
                 'interrupted',
                 CAST(MAX(0, (MIN(MAX(updated_at, started_at), ?) - started_at) * 1000) AS INTEGER),
                 retry_count, 'process_restarted',
@@ -780,6 +811,8 @@ class UsageStore:
         session_name: str = "未知会话",
         model: str = "unknown",
         upstream_model: str | None = None,
+        upstream_response_model: str | None = None,
+        upstream_model_mismatch: bool | None = None,
         reasoning_effort: str | None = None,
         phase: str = "accepted",
         request_body_bytes: int = 0,
@@ -798,6 +831,8 @@ class UsageStore:
             str(session_name or "未知会话")[:240],
             str(model or "unknown")[:240],
             None if not upstream_model else str(upstream_model)[:240],
+            _safe_upstream_response_model(upstream_response_model),
+            _mismatch_db_value(upstream_model_mismatch),
             _normalize_reasoning_effort(reasoning_effort),
             str(phase or "accepted")[:40],
             max(0, int(request_body_bytes)),
@@ -813,9 +848,10 @@ class UsageStore:
                 INSERT OR REPLACE INTO inflight_requests (
                     run_id, request_id, started_at, updated_at, provider_id,
                     thread_id, session_key, session_name, model,
-                    upstream_model, reasoning_effort, phase, request_body_bytes,
+                    upstream_model, upstream_response_model, upstream_model_mismatch,
+                    reasoning_effort, phase, request_body_bytes,
                     retry_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -827,6 +863,8 @@ class UsageStore:
         provider_id: str | None = None,
         model: str | None = None,
         upstream_model: str | None | object = _UNSET,
+        upstream_response_model: str | None | object = _UNSET,
+        upstream_model_mismatch: bool | None | object = _UNSET,
         reasoning_effort: str | None = None,
         phase: str | None = None,
         request_body_bytes: int | None = None,
@@ -858,6 +896,12 @@ class UsageStore:
             values.append(
                 None if not upstream_model else str(upstream_model)[:240]
             )
+        if upstream_response_model is not _UNSET:
+            assignments.append("upstream_response_model = ?")
+            values.append(_safe_upstream_response_model(upstream_response_model))
+        if upstream_model_mismatch is not _UNSET:
+            assignments.append("upstream_model_mismatch = ?")
+            values.append(_mismatch_db_value(upstream_model_mismatch))
         values.extend((self.run_id, int(request_id)))
         with (
             self._inflight_lock,
@@ -923,6 +967,8 @@ class UsageStore:
         outcome: str,
         retry_count: int,
         upstream_model: str | None = None,
+        upstream_response_model: str | None = None,
+        upstream_model_mismatch: bool | None = None,
         error_kind: str | None = None,
         error_summary: str | None = None,
         usage: TokenUsage | None = None,
@@ -945,6 +991,10 @@ class UsageStore:
             if not upstream_model or str(upstream_model) == safe_model
             else str(upstream_model)[:240]
         )
+        safe_upstream_response_model = _safe_upstream_response_model(
+            upstream_response_model
+        )
+        safe_model_mismatch = _mismatch_db_value(upstream_model_mismatch)
         safe_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
         safe_summary = (
             _sanitize_retry_summary(error_summary) if error_summary else None
@@ -960,6 +1010,8 @@ class UsageStore:
             safe_session_name,
             safe_model,
             safe_upstream_model,
+            safe_upstream_response_model,
+            safe_model_mismatch,
             safe_reasoning_effort,
             None if status_code is None else int(status_code),
             int(bool(successful)),
@@ -983,12 +1035,13 @@ class UsageStore:
                 INSERT INTO request_history (
                     started_at, finished_at, last_activity_at, provider_id,
                     thread_id, session_key,
-                    session_name, model, upstream_model, reasoning_effort,
+                    session_name, model, upstream_model, upstream_response_model,
+                    upstream_model_mismatch, reasoning_effort,
                     status_code, succeeded, outcome,
                     duration_ms, retry_count, error_kind, error_summary, usage_id,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
                     reasoning_tokens, usage_source, estimate_method
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -1051,11 +1104,12 @@ class UsageStore:
             clauses.append(
                 "(session_name LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' "
                 "OR COALESCE(upstream_model, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(upstream_response_model, '') LIKE ? ESCAPE '\\' "
                 "OR provider_id LIKE ? ESCAPE '\\' OR COALESCE(error_summary, '') LIKE ? ESCAPE '\\')"
             )
             escaped = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
-            params.extend((pattern, pattern, pattern, pattern, pattern))
+            params.extend((pattern, pattern, pattern, pattern, pattern, pattern))
         if cursor:
             try:
                 cursor_time_hex, cursor_id_text = cursor.rsplit("@", 1)
@@ -1073,6 +1127,7 @@ class UsageStore:
                 SELECT finished_at AS sort_at, id * 2 AS cursor_id,
                        started_at, finished_at, last_activity_at, provider_id, thread_id,
                        session_key, session_name, model, upstream_model,
+                       upstream_response_model, upstream_model_mismatch,
                        reasoning_effort,
                        status_code, succeeded,
                        outcome, duration_ms, retry_count, error_kind, error_summary,
@@ -1085,7 +1140,8 @@ class UsageStore:
                        NULL AS last_activity_at,
                        provider_id, NULL AS thread_id, NULL AS session_key,
                        '未知会话' AS session_name, model,
-                       NULL AS upstream_model, NULL AS reasoning_effort,
+                       NULL AS upstream_model, NULL AS upstream_response_model,
+                       NULL AS upstream_model_mismatch, NULL AS reasoning_effort,
                        status_code, succeeded,
                        CASE WHEN succeeded = 1 THEN 'succeeded' ELSE 'failed' END AS outcome,
                        NULL AS duration_ms, 0 AS retry_count, NULL AS error_kind,
@@ -1145,6 +1201,12 @@ class UsageStore:
                     "session_name": str(row["session_name"]),
                     "model": str(row["model"]),
                     "upstream_model": row["upstream_model"],
+                    "upstream_response_model": row["upstream_response_model"],
+                    "upstream_model_mismatch": (
+                        None
+                        if row["upstream_model_mismatch"] is None
+                        else bool(row["upstream_model_mismatch"])
+                    ),
                     "reasoning_effort": row["reasoning_effort"],
                     "status_code": None if row["status_code"] is None else int(row["status_code"]),
                     "succeeded": bool(row["succeeded"]),
@@ -2060,6 +2122,17 @@ class UsageCapture:
         self._upstream_usage: TokenUsage | None = None
         self._saw_successful_terminal_event = False
         self._finalized = False
+        self._response_model_observer = UpstreamResponseModelObserver(
+            protocol="openai"
+        )
+
+    @property
+    def upstream_response_model(self) -> str | None:
+        return self._response_model_observer.model
+
+    @property
+    def upstream_response_model_conflict(self) -> bool:
+        return self._response_model_observer.conflict
 
     @property
     def saw_successful_terminal_event(self) -> bool:
@@ -2124,6 +2197,7 @@ class UsageCapture:
     def _observe_json(self, root: Any) -> None:
         if not isinstance(root, dict):
             return
+        self._response_model_observer.observe(root)
         usage = _usage_from_payload(root)
         if usage is not None:
             self._upstream_usage = usage
@@ -2242,6 +2316,19 @@ def _rewrite_request_model(
         return json.dumps(root, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError):
         return None if isinstance(target, str) else payload
+
+
+def _safe_upstream_response_model(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized[:MAX_UPSTREAM_RESPONSE_MODEL_CHARS] or None
+
+
+def _mismatch_db_value(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(bool(value))
 
 
 def _normalize_reasoning_effort(value: Any) -> str | None:
@@ -2476,6 +2563,8 @@ class ActiveRequest:
     started_wall_at: float
     model: str = "unknown"
     upstream_model: str | None = None
+    upstream_response_model: str | None = None
+    upstream_model_mismatch: bool | None = None
     reasoning_effort: str | None = None
     request_body_bytes: int = 0
     phase: str = "requesting"
@@ -2493,6 +2582,8 @@ class ForwardRequestLifecycle:
     snapshot: RouteSnapshot | None = None
     model: str = "unknown"
     upstream_model: str | None = None
+    upstream_response_model: str | None = None
+    upstream_model_mismatch: bool | None = None
     reasoning_effort: str | None = None
     retry_count: int = 0
     upstream_response: httpx.Response | None = None
@@ -2538,6 +2629,8 @@ class ForwardRequestLifecycle:
                     session_name_resolver=self.session_name_resolver,
                     model=self.model,
                     upstream_model=self.upstream_model,
+                    upstream_response_model=self.upstream_response_model,
+                    upstream_model_mismatch=self.upstream_model_mismatch,
                     reasoning_effort=self.reasoning_effort,
                     status_code=status_code,
                     successful=False,
@@ -2913,6 +3006,8 @@ class ProviderRouter:
                 started_wall_at=detail.started_wall_at,
                 model=str(model or "unknown")[:240],
                 upstream_model=detail.upstream_model,
+                upstream_response_model=detail.upstream_response_model,
+                upstream_model_mismatch=detail.upstream_model_mismatch,
                 reasoning_effort=_normalize_reasoning_effort(reasoning_effort),
                 request_body_bytes=(
                     detail.request_body_bytes
@@ -2944,6 +3039,40 @@ class ProviderRouter:
                 started_wall_at=detail.started_wall_at,
                 model=detail.model,
                 upstream_model=normalized,
+                upstream_response_model=detail.upstream_response_model,
+                upstream_model_mismatch=detail.upstream_model_mismatch,
+                reasoning_effort=detail.reasoning_effort,
+                request_body_bytes=detail.request_body_bytes,
+                phase=detail.phase,
+                last_activity_wall_at=detail.last_activity_wall_at,
+            )
+
+    def update_request_upstream_response_model(
+        self,
+        snapshot: RouteSnapshot,
+        response_model: str | None,
+        mismatch: bool | None,
+    ) -> None:
+        with self._lock:
+            detail = self._active_request_details.get(snapshot.request_id)
+            if detail is None:
+                return
+            normalized = (
+                str(response_model)[:MAX_UPSTREAM_RESPONSE_MODEL_CHARS]
+                if isinstance(response_model, str) and response_model.strip()
+                else None
+            )
+            self._active_request_details[snapshot.request_id] = ActiveRequest(
+                request_id=detail.request_id,
+                provider_id=detail.provider_id,
+                thread_id=detail.thread_id,
+                started_wall_at=detail.started_wall_at,
+                model=detail.model,
+                upstream_model=detail.upstream_model,
+                upstream_response_model=normalized,
+                upstream_model_mismatch=(
+                    None if mismatch is None else bool(mismatch)
+                ),
                 reasoning_effort=detail.reasoning_effort,
                 request_body_bytes=detail.request_body_bytes,
                 phase=detail.phase,
@@ -2968,6 +3097,8 @@ class ProviderRouter:
                 started_wall_at=detail.started_wall_at,
                 model=detail.model,
                 upstream_model=detail.upstream_model,
+                upstream_response_model=detail.upstream_response_model,
+                upstream_model_mismatch=detail.upstream_model_mismatch,
                 reasoning_effort=detail.reasoning_effort,
                 request_body_bytes=detail.request_body_bytes,
                 phase=str(phase or "requesting")[:40],
@@ -3053,6 +3184,8 @@ class ProviderRouter:
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
                     upstream_model=detail.upstream_model,
+                    upstream_response_model=detail.upstream_response_model,
+                    upstream_model_mismatch=detail.upstream_model_mismatch,
                     reasoning_effort=detail.reasoning_effort,
                     request_body_bytes=detail.request_body_bytes,
                     phase=detail.phase,
@@ -3133,6 +3266,8 @@ class ProviderRouter:
                     started_wall_at=detail.started_wall_at,
                     model=detail.model,
                     upstream_model=detail.upstream_model,
+                    upstream_response_model=detail.upstream_response_model,
+                    upstream_model_mismatch=detail.upstream_model_mismatch,
                     reasoning_effort=detail.reasoning_effort,
                     request_body_bytes=detail.request_body_bytes,
                     phase="retrying",
@@ -3275,6 +3410,8 @@ def _diagnostic_active_requests(
             "provider_id": detail.provider_id,
             "model": detail.model,
             "upstream_model": detail.upstream_model,
+            "upstream_response_model": detail.upstream_response_model,
+            "upstream_model_mismatch": detail.upstream_model_mismatch,
             "phase": detail.phase,
             "request_body_bytes": detail.request_body_bytes,
             "age_ms": max(0, round((now - detail.started_wall_at) * 1000)),
@@ -4270,6 +4407,8 @@ def _public_requests(
                     "route_provider_id": route_provider_id,
                     "model": detail.model,
                     "upstream_model": detail.upstream_model,
+                    "upstream_response_model": detail.upstream_response_model,
+                    "upstream_model_mismatch": detail.upstream_model_mismatch,
                     "reasoning_effort": detail.reasoning_effort,
                     "phase": detail.phase,
                     "last_activity_at": (
@@ -4524,6 +4663,8 @@ def _record_request_event(
     outcome: str,
     retry_count: int,
     upstream_model: str | None = None,
+    upstream_response_model: str | None = None,
+    upstream_model_mismatch: bool | None = None,
     error_kind: str | None = None,
     error_summary: str | None = None,
     usage: TokenUsage | None = None,
@@ -4550,6 +4691,8 @@ def _record_request_event(
             session_name=session_name,
             model=model,
             upstream_model=upstream_model,
+            upstream_response_model=upstream_response_model,
+            upstream_model_mismatch=upstream_model_mismatch,
             reasoning_effort=reasoning_effort,
             status_code=status_code,
             successful=successful,
@@ -4673,6 +4816,8 @@ def _record_stream_completion(
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None,
     model: str,
     upstream_model: str | None,
+    upstream_response_model: str | None,
+    upstream_model_mismatch: bool | None,
     reasoning_effort: str | None,
     usage: TokenUsage | None,
     status_code: int,
@@ -4717,6 +4862,8 @@ def _record_stream_completion(
         session_name_resolver=session_name_resolver,
         model=model,
         upstream_model=upstream_model,
+        upstream_response_model=upstream_response_model,
+        upstream_model_mismatch=upstream_model_mismatch,
         reasoning_effort=reasoning_effort,
         status_code=status_code,
         successful=successful,
@@ -5512,6 +5659,8 @@ async def _forward_request_with_lease(
             provider_id=snapshot.provider.provider_id,
             model=model,
             upstream_model=upstream_model,
+            upstream_response_model=lifecycle.upstream_response_model,
+            upstream_model_mismatch=lifecycle.upstream_model_mismatch,
             reasoning_effort=reasoning_effort,
             phase="failed",
             error_kind=final_error,
@@ -5524,6 +5673,8 @@ async def _forward_request_with_lease(
             session_name_resolver=session_name_resolver,
             model=model,
             upstream_model=upstream_model,
+            upstream_response_model=lifecycle.upstream_response_model,
+            upstream_model_mismatch=lifecycle.upstream_model_mismatch,
             reasoning_effort=reasoning_effort,
             status_code=502,
             successful=False,
@@ -5602,6 +5753,35 @@ async def _forward_request_with_lease(
         else _resume_async_iterator(stream, prefix=first_chunk or b"")
     )
 
+    async def update_response_model_state() -> None:
+        response_model = (
+            getattr(usage_capture, "upstream_response_model", None)
+            if usage_capture is not None
+            else None
+        )
+        mismatch = upstream_model_mismatch(
+            upstream_model or model,
+            response_model,
+        )
+        if (
+            response_model == lifecycle.upstream_response_model
+            and mismatch == lifecycle.upstream_model_mismatch
+        ):
+            return
+        lifecycle.upstream_response_model = response_model
+        lifecycle.upstream_model_mismatch = mismatch
+        router.update_request_upstream_response_model(
+            snapshot,
+            response_model,
+            mismatch,
+        )
+        await _update_inflight_request_async(
+            usage_store,
+            snapshot.request_id,
+            upstream_response_model=response_model,
+            upstream_model_mismatch=mismatch,
+        )
+
     async def response_body() -> AsyncIterator[bytes]:
         stream_failure: tuple[str, str] | None = None
         stream_completed = False
@@ -5625,6 +5805,7 @@ async def _forward_request_with_lease(
                     terminal_capture,
                     chunk,
                 )
+                await update_response_model_state()
                 if debug_attempt is not None:
                     debug_attempt.forwarded(chunk)
                     if debug_attempt.should_flush():
@@ -5678,6 +5859,7 @@ async def _forward_request_with_lease(
                     )
                     if embedded_failure is not None:
                         stream_failure = embedded_failure
+                    await update_response_model_state()
                 terminal_event_kind = (
                     terminal_capture.terminal_event
                     if terminal_capture is not None
@@ -5756,6 +5938,8 @@ async def _forward_request_with_lease(
                                         else model
                                     ),
                                     upstream_model=upstream_model,
+                                    upstream_response_model=lifecycle.upstream_response_model,
+                                    upstream_model_mismatch=lifecycle.upstream_model_mismatch,
                                     reasoning_effort=reasoning_effort,
                                     usage=usage,
                                     status_code=upstream_response.status_code,
