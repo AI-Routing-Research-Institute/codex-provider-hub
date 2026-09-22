@@ -11,7 +11,7 @@
       <UiSelect v-model="providerFilter" aria-label="供应商" :options="providerOptions" @change="loadRequests" />
     </div>
     <div class="request-table-shell">
-      <div class="request-table-header" aria-hidden="true"><span class="request-column-status">状态</span><span class="request-column-time">开始时间</span><span>会话</span><span>供应商</span><span>模型</span><span>映射模型</span><span class="request-column-reasoning">推理强度</span><span class="request-column-duration">耗时</span><span class="request-column-token">Token</span><span class="request-column-result">结果</span></div>
+      <div class="request-table-header" aria-hidden="true"><span class="request-column-status">状态</span><span class="request-column-time">开始时间</span><span>会话</span><span>供应商</span><span>模型</span><span>映射模型</span><span>上游响应模型</span><span class="request-column-reasoning">推理强度</span><span class="request-column-duration">耗时</span><span class="request-column-token">Token</span><span class="request-column-result">结果</span></div>
       <div class="request-list" aria-live="polite">
         <div v-for="(item, index) in combinedItems" :key="requestKey(item, index)" class="request-row" :class="requestState(item)">
           <span class="request-state"><span class="request-state-dot" aria-hidden="true" /><span>{{ stateLabel(item) }}</span></span>
@@ -20,6 +20,7 @@
           <span class="request-provider-cell"><strong>{{ providerName(item.provider_id || item.actual_provider_id) }}</strong><small v-if="item.requested_provider_id && item.requested_provider_id !== item.provider_id">请求 {{ providerName(item.requested_provider_id) }}</small></span>
           <span class="request-model" :title="item.model || 'unknown'">{{ item.model || 'unknown' }}</span>
           <span class="request-upstream-model" :class="{ mapped: item.upstream_model }" :title="item.upstream_model ? `实际发送模型：${item.upstream_model}` : '未发生模型映射'">{{ item.upstream_model || '—' }}</span>
+          <span class="request-response-model" :class="{ mismatch: item.upstream_model_mismatch === true }" :title="item.upstream_response_model ? `上游响应模型：${item.upstream_response_model}` : '上游未声明模型'"><span>{{ item.upstream_response_model || '—' }}</span><small v-if="item.upstream_model_mismatch === true">模型不一致</small></span>
           <span class="request-reasoning">{{ reasoningLabel(item.reasoning_effort) }}</span>
           <span class="request-duration">{{ durationLabel(item) }}</span>
           <span class="request-token">{{ item.usage_source == null && !item.total_tokens ? '—' : formatTokenCount(item.total_tokens) }}</span>

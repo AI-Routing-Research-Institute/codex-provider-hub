@@ -425,6 +425,9 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(requests, /class="request-table-header"/);
   assert.match(requests, /class="request-row"/);
   assert.match(requests, />映射模型<\/span>/);
+  assert.match(requests, />上游响应模型<\/span>/);
+  assert.match(requests, /item\.upstream_response_model \|\| '—'/);
+  assert.match(requests, /item\.upstream_model_mismatch === true/);
   assert.match(requests, /item\.upstream_model \|\| '—'/);
   assert.ok(providers.indexOf('class="search"') < providers.indexOf('class="time-window-control usage-window-wrap"'));
   assert.ok(requests.indexOf('class="request-search"') < requests.indexOf('request-window-control'));
@@ -491,7 +494,7 @@ test("Vue templates preserve the original desktop console structure", () => {
   assert.match(styles, /\.request-row\s*\{[^}]*font-size:\s*var\(--font-body\)/s);
 
   const smallFontSizes = styles.match(/font-size:\s*(?:9|10|11)px/g) ?? [];
-  assert.equal(smallFontSizes.length, 2);
+  assert.equal(smallFontSizes.length, 3);
   assert.match(styles, /\.view-tab-count\s*\{[^}]*font-size:\s*9px/s);
   assert.match(styles, /\.provider-token-detail-icon\s*\{[^}]*font-size:\s*9px/s);
 });

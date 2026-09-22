@@ -44,13 +44,15 @@ test("labels request reasoning effort", () => {
   assert.equal(context.api.requestReasoningEffortLabel("custom"), "custom");
 });
 
-test("uses ten aligned request columns including the mapped model", () => {
-  assert.match(htmlSource, />模型<\/span><span>映射模型<\/span>/);
+test("uses eleven aligned request columns including response model audit", () => {
+  assert.match(htmlSource, />模型<\/span><span>映射模型<\/span><span>上游响应模型<\/span>/);
   assert.match(htmlSource, /request-column-reasoning">推理强度/);
   assert.match(source, /upstreamModel\.textContent = item\.upstream_model \|\| "—"/);
-  assert.match(source, /row\.append\(status, startedAt, session, route, model, upstreamModel, reasoning, duration, token, result\)/);
+  assert.match(source, /responseModel\.className = `request-response-model\$\{item\.upstream_model_mismatch === true/);
+  assert.match(source, /row\.append\(status, startedAt, session, route, model, upstreamModel, responseModel, reasoning, duration, token, result\)/);
   assert.match(stylesSource, /--request-columns:[^;]+;/);
   assert.match(stylesSource, /\.request-upstream-model\.mapped \{ color: var\(--teal\); font-weight: 700; \}/);
+  assert.match(stylesSource, /\.request-response-model\.mismatch \{ color: var\(--amber\); font-weight: 700; \}/);
   assert.match(stylesSource, /\.request-column-duration, \.request-column-token \{ text-align: right; \}/);
   assert.match(stylesSource, /\.request-column-status, \.request-column-time, \.request-column-reasoning, \.request-column-result \{ text-align: center; \}/);
   assert.doesNotMatch(stylesSource, /\.request-table-header span:nth-child/);

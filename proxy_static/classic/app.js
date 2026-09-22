@@ -1666,6 +1666,20 @@ function renderRequests() {
       ? `实际发送模型：${item.upstream_model}`
       : "未发生模型映射";
 
+    const responseModel = document.createElement("div");
+    responseModel.className = `request-response-model${item.upstream_model_mismatch === true ? " mismatch" : ""}`;
+    responseModel.title = item.upstream_response_model
+      ? `上游响应模型：${item.upstream_response_model}`
+      : "上游未声明模型";
+    const responseModelName = document.createElement("span");
+    responseModelName.textContent = item.upstream_response_model || "—";
+    responseModel.append(responseModelName);
+    if (item.upstream_model_mismatch === true) {
+      const mismatch = document.createElement("small");
+      mismatch.textContent = "模型不一致";
+      responseModel.append(mismatch);
+    }
+
     const reasoning = document.createElement("span");
     reasoning.className = "request-reasoning";
     reasoning.textContent = requestReasoningEffortLabel(item.reasoning_effort);
@@ -1696,7 +1710,7 @@ function renderRequests() {
           ? "已由同会话新请求接管"
           : "客户端在响应完成前结束连接"
         : result.textContent;
-    row.append(status, startedAt, session, route, model, upstreamModel, reasoning, duration, token, result);
+    row.append(status, startedAt, session, route, model, upstreamModel, responseModel, reasoning, duration, token, result);
     requestList.append(row);
   }
   if (requestTableShell) requestTableShell.scrollTop = previousScrollTop;
