@@ -63,8 +63,8 @@ v1.13.0 标签的 Windows 发布在 `AttributionProxyTests.test_main_summary_and
 - `python -c "from scripts.team_policy import run_full_verification; run_full_verification()"`：通过；包含 `npm ci --prefix proxy_static`、`npm run build --prefix proxy_static`、发布源码 JS 语法检查、Python 全量单测与逐文件 JS 全量测试；基线既有失败 0 项、新增失败 0 项。本地 Python 3.14.4 / Node.js 24.18.0；发布 runner 使用 Python 3.13 / Node.js 22，仍由两平台完整测试把关。
 - `rg --files -g '*.js' -g '!proxy_static/dist/**' -g '!**/node_modules/**'` 后逐文件 `node --check`：30 个文件全部通过；`node --test tests/*.test.js`：98 项通过，0 失败。
 - `npm ci` 报告既有审计提示（1 moderate、1 high），锁文件未变更，本次不升级无关依赖。
-- 准确提交 HEAD 推送前由 pre-push 再执行完整验证；PR URL 在创建后回填。平台发布结果由 Actions 与 GitHub Release 保留，不回写已交付说明。
+- `git fetch --no-tags origin main`、`git rebase origin/main`：分支已对齐最新主线；提交 `99517e64420433e4abf2cfa994334c4ec4ae6b38` 的 pre-push 完整验证通过，基线既有失败 0 项、新增失败 0 项。PR URL 回填后最终 HEAD 仍须通过同一完整门禁。平台发布结果由 Actions 与 GitHub Release 保留，不回写已交付说明。
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/99
