@@ -337,6 +337,8 @@ class AttributionPersistenceTests(AttributionFixture, unittest.TestCase):
 class AttributionProxyTests(AttributionFixture, unittest.IsolatedAsyncioTestCase):
     async def test_main_summary_and_agents_are_concurrent_and_cancel_is_isolated(self):
         started = {thread: asyncio.Event() for thread in ("root", "description", "a", "b")}
+        response_sent = {thread: asyncio.Event() for thread in started}
+        allow_response = asyncio.Event()
         released = {thread: asyncio.Event() for thread in started}
         closed = {thread: asyncio.Event() for thread in started}
         routed = {}
@@ -387,7 +389,11 @@ class AttributionProxyTests(AttributionFixture, unittest.IsolatedAsyncioTestCase
                 return {"type": "http.disconnect"}
 
             async def send(message):
+                if message["type"] == "http.response.start":
+                    await allow_response.wait()
                 responses.setdefault(thread, []).append(message)
+                if message["type"] == "http.response.body" and message.get("body"):
+                    response_sent[thread].set()
 
             scope = {
                 "type": "http", "asgi": {"spec_version": "2.4"}, "http_version": "1.1",
@@ -409,6 +415,11 @@ class AttributionProxyTests(AttributionFixture, unittest.IsolatedAsyncioTestCase
                 await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started.values())), 5)
             except TimeoutError:
                 self.fail(f"Requests did not start: {responses}; task errors: {[task.exception() for task in tasks.values() if task.done()]}")
+            # Upstream iteration can begin before the client receives a response.
+            # Keep that window deterministic, then cancel only after body delivery.
+            self.assertFalse(any(event.is_set() for event in response_sent.values()))
+            allow_response.set()
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in response_sent.values())), 5)
             payload = (await client.get("/control/api/requests")).json()
             self.assertEqual(len(payload["active"]), 4)
             self.assertEqual({item["session_display_name"] for item in payload["active"]}, {"主会话"})
@@ -435,6 +446,7 @@ class AttributionProxyTests(AttributionFixture, unittest.IsolatedAsyncioTestCase
                 self.assertFalse(any(key in item for key in ("thread_id", "parent_thread_id", "root_thread_id", "_thread_id", "_session_context", "session_context_json")))
             self.assertEqual(router._active_session_contexts, {})
         finally:
+            allow_response.set()
             for event in released.values():
                 event.set()
             for task in tasks.values():
