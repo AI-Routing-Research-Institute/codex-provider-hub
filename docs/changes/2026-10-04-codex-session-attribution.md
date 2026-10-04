@@ -202,4 +202,4 @@ API 为可选字段扩展；旧数据库通过幂等新增列兼容。旧客户�
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/98
