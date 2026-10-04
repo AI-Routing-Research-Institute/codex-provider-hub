@@ -16,7 +16,10 @@
         <div v-for="(item, index) in combinedItems" :key="requestKey(item, index)" class="request-row" :class="requestState(item)">
           <span class="request-state"><span class="request-state-dot" aria-hidden="true" /><span>{{ stateLabel(item) }}</span></span>
           <time class="request-time" :datetime="isoTime(item.started_at)">{{ formatTime(item.started_at) }}</time>
-          <strong class="request-session" :title="item.session_name || '未知会话'">{{ item.session_name || '未知会话' }}</strong>
+          <span class="request-session-cell" :title="item.session_tooltip || [item.session_display_name || item.session_name || '未知会话', item.session_label].filter(Boolean).join(' · ')">
+            <strong class="request-session">{{ item.session_display_name || item.session_name || '未知会话' }}</strong>
+            <small v-if="item.session_label" class="request-session-label">{{ item.session_label }}</small>
+          </span>
           <span class="request-provider-cell"><strong>{{ providerName(item.provider_id || item.actual_provider_id) }}</strong><small v-if="item.requested_provider_id && item.requested_provider_id !== item.provider_id">请求 {{ providerName(item.requested_provider_id) }}</small></span>
           <span class="request-model" :title="item.model || 'unknown'">{{ item.model || 'unknown' }}</span>
           <span class="request-upstream-model" :class="{ mapped: item.upstream_model }" :title="item.upstream_model ? `实际发送模型：${item.upstream_model}` : '未发生模型映射'">{{ item.upstream_model || '—' }}</span>

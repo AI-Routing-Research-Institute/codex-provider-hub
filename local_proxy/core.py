@@ -38,6 +38,10 @@ from local_proxy.response_models import (
     UpstreamResponseModelObserver,
     upstream_model_mismatch,
 )
+from local_proxy.session_attribution import (
+    ATTRIBUTION_COLUMNS, clean_context, context_values, decode_context,
+    display_attribution, request_context,
+)
 
 
 try:
@@ -606,8 +610,20 @@ class TokenUsage:
 class UsageStore:
     """Persist aggregate-safe request usage without request or response content."""
 
-    def __init__(self, path: Path, *, run_id: str | None = None) -> None:
+    def __init__(
+        self, path: Path, *, run_id: str | None = None,
+        session_attribution_resolver: Callable[[str | None, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        session_search_resolver: Callable[[str], Iterable[str]] | None = None,
+        historical_context_resolver: Callable[[str, float, str], Mapping[str, Any]] | None = None,
+    ) -> None:
         self.path = path
+        self.session_attribution_resolver = session_attribution_resolver
+        self.session_search_resolver = session_search_resolver
+        self.historical_context_resolver = historical_context_resolver
+        self._attribution_refresh_at = 0.0
+        self._attribution_cursor: int | None = None
+        self._attribution_unknown_phase = True
+        self._attribution_refresh_lock = threading.Lock()
         self.run_id = str(run_id or uuid.uuid4().hex)[:64]
         self._lock = threading.Lock()
         self._inflight_lock = threading.Lock()
@@ -758,6 +774,14 @@ class UsageStore:
                 connection.execute(
                     "ALTER TABLE inflight_requests ADD COLUMN upstream_model_mismatch INTEGER"
                 )
+            for table, existing in (("request_history", history_columns), ("inflight_requests", inflight_columns)):
+                for column in ATTRIBUTION_COLUMNS:
+                    if column not in existing:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS request_history_root_session_time "
+                "ON request_history(root_thread_id, finished_at)"
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS request_history_upstream_model_mismatch "
                 "ON request_history(upstream_model_mismatch, finished_at)"
@@ -782,7 +806,9 @@ class UsageStore:
                 status_code, succeeded,
                 outcome, duration_ms, retry_count, error_kind, error_summary,
                 usage_id, input_tokens, output_tokens, total_tokens,
-                cached_tokens, reasoning_tokens, usage_source, estimate_method
+                cached_tokens, reasoning_tokens, usage_source, estimate_method,
+                parent_thread_id, root_thread_id, root_session_name, session_kind,
+                request_kind, agent_name, agent_nickname, session_context_json
             )
             SELECT
                 started_at, ?, MIN(MAX(updated_at, started_at), ?), provider_id,
@@ -794,7 +820,9 @@ class UsageStore:
                 retry_count, 'process_restarted',
                 '本地中转在请求完成前退出或重启（阶段：' || phase ||
                     '，请求体：' || request_body_bytes || ' 字节）',
-                NULL, 0, 0, 0, 0, 0, NULL, NULL
+                NULL, 0, 0, 0, 0, 0, NULL, NULL,
+                parent_thread_id, root_thread_id, root_session_name, session_kind,
+                request_kind, agent_name, agent_nickname, session_context_json
             FROM inflight_requests
             """,
             (recovered_at, recovered_at, recovered_at),
@@ -817,6 +845,7 @@ class UsageStore:
         phase: str = "accepted",
         request_body_bytes: int = 0,
         retry_count: int = 0,
+        session_context: Mapping[str, Any] | None = None,
     ) -> None:
         timestamp = time.time()
         safe_thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
@@ -837,6 +866,7 @@ class UsageStore:
             str(phase or "accepted")[:40],
             max(0, int(request_body_bytes)),
             max(0, int(retry_count)),
+            *context_values(self.attribute(thread_id, session_context or {})),
         )
         with (
             self._inflight_lock,
@@ -850,8 +880,10 @@ class UsageStore:
                     thread_id, session_key, session_name, model,
                     upstream_model, upstream_response_model, upstream_model_mismatch,
                     reasoning_effort, phase, request_body_bytes,
-                    retry_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    retry_count,
+                    parent_thread_id, root_thread_id, root_session_name, session_kind,
+                    request_kind, agent_name, agent_nickname, session_context_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -976,6 +1008,7 @@ class UsageStore:
         finished_at: float | None = None,
         reasoning_effort: str | None = None,
         last_activity_at: float | None = None,
+        session_context: Mapping[str, Any] | None = None,
     ) -> None:
         completed_at = time.time() if finished_at is None else float(finished_at)
         started = min(float(started_at), completed_at)
@@ -996,6 +1029,14 @@ class UsageStore:
         )
         safe_model_mismatch = _mismatch_db_value(upstream_model_mismatch)
         safe_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+        if session_context is None and request_id is not None:
+            with self._inflight_lock, closing(self._connect_inflight()) as inflight:
+                row = inflight.execute(
+                    "SELECT session_context_json FROM inflight_requests WHERE run_id = ? AND request_id = ?",
+                    (self.run_id, int(request_id)),
+                ).fetchone()
+            session_context = decode_context(row[0]) if row else {}
+        attribution = self.attribute(thread_id, session_context or {})
         safe_summary = (
             _sanitize_retry_summary(error_summary) if error_summary else None
         )
@@ -1028,6 +1069,7 @@ class UsageStore:
             max(0, token_usage.reasoning_tokens),
             None if usage is None else token_usage.source,
             None if usage is None else token_usage.estimate_method,
+            *context_values(attribution),
         )
         with self._lock, closing(self._connect()) as connection, connection:
             connection.execute(
@@ -1040,8 +1082,10 @@ class UsageStore:
                     status_code, succeeded, outcome,
                     duration_ms, retry_count, error_kind, error_summary, usage_id,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
-                    reasoning_tokens, usage_source, estimate_method
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reasoning_tokens, usage_source, estimate_method,
+                    parent_thread_id, root_thread_id, root_session_name, session_kind,
+                    request_kind, agent_name, agent_nickname, session_context_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -1051,6 +1095,76 @@ class UsageStore:
                     (self.run_id, int(request_id)),
                 )
             self._cleanup_request_history_if_due(connection, completed_at)
+
+    def attribute(self, thread_id: str | None, context: Mapping[str, Any]) -> dict[str, str]:
+        safe = clean_context(context)
+        if self.session_attribution_resolver is not None:
+            try:
+                return clean_context(self.session_attribution_resolver(thread_id, safe))
+            except (OSError, sqlite3.Error, TypeError, ValueError):
+                pass
+        return safe
+
+    def _refresh_session_attributions(self) -> None:
+        if self.session_attribution_resolver is None or not self._attribution_refresh_lock.acquire(False):
+            return
+        try:
+            now = time.monotonic()
+            if now < self._attribution_refresh_at:
+                return
+            self._attribution_refresh_at = now + 2.0
+            with self._lock, closing(self._connect()) as conn:
+                conn.row_factory = sqlite3.Row
+                params: list[Any] = [time.time() - REQUEST_HISTORY_HOURS * 3600]
+                clauses = ["finished_at >= ?", "thread_id IS NOT NULL"]
+                if self._attribution_unknown_phase:
+                    clauses.append("session_name = '未知会话' AND root_session_name IS NULL")
+                else:
+                    clauses.append("session_context_json IS NULL")
+                if self._attribution_cursor is not None:
+                    clauses.append("id < ?")
+                    params.append(self._attribution_cursor)
+                rows = conn.execute(
+                    f"SELECT id,thread_id,started_at,model,session_context_json FROM request_history "
+                    f"WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT 200", params,
+                ).fetchall()
+            if not rows:
+                self._attribution_cursor = None
+                if self._attribution_unknown_phase:
+                    self._attribution_unknown_phase = False
+                else:
+                    self._attribution_unknown_phase = True
+                    self._attribution_refresh_at = now + 60.0
+                return
+            updates = []
+            processed_id = self._attribution_cursor
+            deadline = time.monotonic() + 0.25
+            for row in rows:
+                context = decode_context(row["session_context_json"])
+                if not context.get("attribution_origin") and self.historical_context_resolver is not None:
+                    try:
+                        recovered = clean_context(self.historical_context_resolver(
+                            row["thread_id"], row["started_at"], row["model"],
+                        ))
+                        if recovered:
+                            context.update(recovered)
+                            context["attribution_origin"] = "request_debug"
+                    except (OSError, sqlite3.Error, ValueError, TypeError):
+                        pass
+                context = self.attribute(row["thread_id"], context)
+                values = context_values(context)
+                if values[-1] != row["session_context_json"]:
+                    updates.append((*values, row["id"]))
+                processed_id = int(row["id"])
+                if time.monotonic() >= deadline:
+                    break
+            if updates:
+                with self._lock, closing(self._connect()) as conn, conn:
+                    assignments = ",".join(f"{k} = ?" for k in ATTRIBUTION_COLUMNS)
+                    conn.executemany(f"UPDATE request_history SET {assignments} WHERE id = ?", updates)
+            self._attribution_cursor = processed_id
+        finally:
+            self._attribution_refresh_lock.release()
 
     def request_history(
         self,
@@ -1072,6 +1186,7 @@ class UsageStore:
         if normalized_status not in {"all", "succeeded", "failed"}:
             raise ValueError("请求记录状态无效")
         timestamp = time.time() if now is None else float(now)
+        self._refresh_session_attributions()
         if normalized_window == "custom":
             cutoff, upper_bound = _custom_time_bounds(
                 start_at,
@@ -1100,16 +1215,39 @@ class UsageStore:
             clauses.append("provider_id = ?")
             params.append(str(provider_id))
         normalized_query = query.strip()[:100]
+        matched: tuple[str, ...] = ()
         if normalized_query:
             clauses.append(
                 "(session_name LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' "
                 "OR COALESCE(upstream_model, '') LIKE ? ESCAPE '\\' "
                 "OR COALESCE(upstream_response_model, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(root_session_name, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(agent_name, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(agent_nickname, '') LIKE ? ESCAPE '\\' "
+                "OR CASE session_kind WHEN 'thread_description' THEN '会话摘要' "
+                "WHEN 'thread_title' THEN '会话命名' WHEN 'subagent' THEN '子 agent' "
+                "WHEN 'guardian' THEN '自动审查' WHEN 'side_chat' THEN '侧边聊天' "
+                "WHEN 'fork' THEN '关联分支' ELSE '' END LIKE ? ESCAPE '\\' "
+                "OR CASE WHEN root_session_name IS NULL AND session_kind NOT IN ('main','unknown') "
+                "THEN '所属会话未识别' WHEN root_session_name IS NULL AND session_name = '未知会话' "
+                "AND session_context_json IS NOT NULL THEN '未识别会话 来源信息不足' ELSE '' END LIKE ? ESCAPE '\\' "
+                "OR CASE request_kind WHEN 'compaction' THEN '上下文压缩' ELSE '' END LIKE ? ESCAPE '\\' "
                 "OR provider_id LIKE ? ESCAPE '\\' OR COALESCE(error_summary, '') LIKE ? ESCAPE '\\')"
             )
             escaped = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
-            params.extend((pattern, pattern, pattern, pattern, pattern, pattern))
+            params.extend((pattern,) * 12)
+            if self.session_search_resolver is not None:
+                try:
+                    matched = tuple(thread for thread in self.session_search_resolver(normalized_query)
+                                    if isinstance(thread, str) and thread)
+                except (OSError, sqlite3.Error, TypeError, ValueError):
+                    matched = ()
+                if matched:
+                    clauses[-1] = (
+                        f"({clauses[-1]} OR thread_id IN (SELECT thread_id FROM matched_session_threads) "
+                        "OR root_thread_id IN (SELECT thread_id FROM matched_session_threads))"
+                    )
         if cursor:
             try:
                 cursor_time_hex, cursor_id_text = cursor.rsplit("@", 1)
@@ -1132,7 +1270,9 @@ class UsageStore:
                        status_code, succeeded,
                        outcome, duration_ms, retry_count, error_kind, error_summary,
                        input_tokens, output_tokens, total_tokens, cached_tokens,
-                       reasoning_tokens, usage_source, estimate_method
+                       reasoning_tokens, usage_source, estimate_method,
+                       parent_thread_id, root_thread_id, root_session_name, session_kind,
+                       request_kind, agent_name, agent_nickname, session_context_json
                 FROM request_history
                 UNION ALL
                 SELECT recorded_at AS sort_at, id * 2 + 1 AS cursor_id,
@@ -1147,7 +1287,11 @@ class UsageStore:
                        NULL AS duration_ms, 0 AS retry_count, NULL AS error_kind,
                        NULL AS error_summary, input_tokens, output_tokens,
                        total_tokens, cached_tokens, reasoning_tokens,
-                       usage_source, estimate_method
+                       usage_source, estimate_method,
+                       NULL AS parent_thread_id, NULL AS root_thread_id,
+                       NULL AS root_session_name, NULL AS session_kind,
+                       NULL AS request_kind, NULL AS agent_name, NULL AS agent_nickname,
+                       NULL AS session_context_json
                 FROM request_usage AS legacy
                 WHERE NOT EXISTS (
                     SELECT 1 FROM request_history AS history
@@ -1159,6 +1303,10 @@ class UsageStore:
         count_params = params[:-3] if cursor else params
         with self._lock, closing(self._connect()) as connection:
             connection.row_factory = sqlite3.Row
+            if matched:
+                # Connection-local data avoids variable limits and silently truncated searches.
+                connection.execute("CREATE TEMP TABLE matched_session_threads (thread_id TEXT PRIMARY KEY)")
+                connection.executemany("INSERT OR IGNORE INTO matched_session_threads VALUES (?)", ((thread,) for thread in matched))
             if self._request_history_cleanup_due(timestamp):
                 with connection:
                     self._delete_expired_request_history(connection, timestamp)
@@ -1197,6 +1345,7 @@ class UsageStore:
                     ),
                     "provider_id": str(row["provider_id"]),
                     "_thread_id": row["thread_id"],
+                    "_session_context": decode_context(row["session_context_json"]),
                     "session_key": row["session_key"],
                     "session_name": str(row["session_name"]),
                     "model": str(row["model"]),
@@ -2884,6 +3033,7 @@ class ProviderRouter:
         self._current_provider_id: str | None = None
         self._active: dict[str, int] = {}
         self._active_request_details: dict[int, ActiveRequest] = {}
+        self._active_session_contexts: dict[int, dict[str, str]] = {}
         self._total_requests = 0
         self._last_provider_id: str | None = None
         self._last_status_code: int | None = None
@@ -2907,6 +3057,15 @@ class ProviderRouter:
             and provider_id
         }
         self.replace_providers(providers, preferred_id=current_provider_id)
+
+    def set_request_session_context(self, snapshot: RouteSnapshot, context: Mapping[str, Any]) -> None:
+        with self._lock:
+            if snapshot.request_id in self._active_request_details:
+                self._active_session_contexts[snapshot.request_id] = clean_context(context)
+
+    def request_session_context(self, request_id: int) -> dict[str, str]:
+        with self._lock:
+            return dict(self._active_session_contexts.get(request_id, {}))
 
     def providers(self) -> tuple[ProxyProvider, ...]:
         with self._lock:
@@ -3223,6 +3382,7 @@ class ProviderRouter:
     ) -> None:
         with self._lock:
             detail = self._active_request_details.pop(snapshot.request_id, None)
+            self._active_session_contexts.pop(snapshot.request_id, None)
             if detail is None:
                 return
             provider_id = detail.provider_id
@@ -4381,10 +4541,22 @@ def _public_requests(
                 if detail.thread_id is not None
                 else "未知会话"
             )
+            context = router.request_session_context(detail.request_id)
+            if usage_store is not None:
+                context = usage_store.attribute(detail.thread_id, context)
+            attribution = display_attribution(detail.thread_id, session_name, context) if (
+                context or (usage_store is not None and usage_store.session_attribution_resolver is not None)
+            ) else {}
             provider = providers.get(detail.provider_id)
             searchable = " ".join(
                 (
                     session_name,
+                    attribution.get("session_display_name", ""),
+                    attribution.get("session_label", ""),
+                    attribution.get("root_session_name") or "",
+                    attribution.get("agent_name") or "",
+                    attribution.get("agent_nickname") or "",
+                    context.get("agent_path") or context.get("agent_name") or "",
                     detail.model,
                     detail.upstream_model or "",
                     detail.provider_id,
@@ -4404,6 +4576,7 @@ def _public_requests(
                     "provider_name": provider.name if provider else detail.provider_id,
                     "session_key": _session_key(detail.thread_id),
                     "session_name": session_name,
+                    **attribution,
                     "route_provider_id": route_provider_id,
                     "model": detail.model,
                     "upstream_model": detail.upstream_model,
@@ -4467,9 +4640,13 @@ def _public_requests(
     for raw in history["items"]:
         item = dict(raw)
         thread_id = item.pop("_thread_id", None)
+        context = item.pop("_session_context", {})
         current_name = history_session_names.get(thread_id)
         if current_name:
             item["session_name"] = current_name
+        context = usage_store.attribute(thread_id, context) if usage_store is not None else context
+        if context or (usage_store is not None and usage_store.session_attribution_resolver is not None):
+            item.update(display_attribution(thread_id, item["session_name"], context))
         provider = providers.get(item["provider_id"])
         item["provider_name"] = provider.name if provider else item["provider_id"]
         item["route_provider_id"] = router.session_provider_override(thread_id)
@@ -4614,6 +4791,7 @@ def _start_inflight_request(
     snapshot: RouteSnapshot,
     thread_id: str | None,
     session_name_resolver: Callable[[Iterable[str]], Mapping[str, str]] | None,
+    session_context: Mapping[str, Any] | None = None,
 ) -> None:
     if store is None:
         return
@@ -4633,6 +4811,7 @@ def _start_inflight_request(
             provider_id=snapshot.provider.provider_id,
             thread_id=thread_id,
             session_name=session_name,
+            session_context=session_context,
         )
     except (OSError, sqlite3.Error):
         pass
@@ -5018,6 +5197,8 @@ async def _forward_request_with_lease(
             content={"error": {"message": "本地中转尚未配置可用供应商"}},
         )
     lifecycle.snapshot = snapshot
+    context = request_context(request.headers)
+    router.set_request_session_context(snapshot, context)
     provider = snapshot.provider
     if request_debug_store is not None:
         try:
@@ -5046,6 +5227,7 @@ async def _forward_request_with_lease(
         snapshot=snapshot,
         thread_id=thread_id,
         session_name_resolver=session_name_resolver,
+        session_context=context,
     )
     if not provider.has_credentials:
         router.finish_request(snapshot, status_code=503, error="credential_missing")

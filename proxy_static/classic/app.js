@@ -1647,10 +1647,19 @@ function renderRequests() {
     startedAt.dateTime = new Date(Number(item.started_at)).toISOString();
     startedAt.textContent = formatRetryTime(item.started_at);
 
-    const session = document.createElement("strong");
-    session.className = "request-session";
-    session.textContent = item.session_name || "未知会话";
-    session.title = session.textContent;
+    const session = document.createElement("span");
+    session.className = "request-session-cell";
+    const sessionName = document.createElement("strong");
+    sessionName.className = "request-session";
+    sessionName.textContent = item.session_display_name || item.session_name || "未知会话";
+    session.append(sessionName);
+    if (item.session_label) {
+      const sessionLabel = document.createElement("small");
+      sessionLabel.className = "request-session-label";
+      sessionLabel.textContent = item.session_label;
+      session.append(sessionLabel);
+    }
+    session.title = item.session_tooltip || [sessionName.textContent, item.session_label].filter(Boolean).join(" · ");
 
     const route = createRequestProviderCell(item);
 

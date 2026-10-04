@@ -58,6 +58,50 @@ test("uses eleven aligned request columns including response model audit", () =>
   assert.doesNotMatch(stylesSource, /\.request-table-header span:nth-child/);
 });
 
+test("renders session attribution as two safe text lines with legacy fallback", () => {
+  const start = source.indexOf('const session = document.createElement("span");', source.indexOf("function renderRequests"));
+  const end = source.indexOf("const route = createRequestProviderCell(item);", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  function render(item) {
+    const document = {
+      createElement(tag) {
+        return { tag, children: [], append(child) { this.children.push(child); } };
+      },
+    };
+    const domContext = vm.createContext({ item, document });
+    vm.runInContext(`${source.slice(start, end)}\nthis.cell = session;`, domContext);
+    return domContext.cell;
+  }
+  const cell = render({ session_name: "未知会话", session_display_name: "主会话", session_label: "子 agent · review", session_tooltip: "主会话 · 直接父会话：中间任务" });
+  assert.equal(cell.children.length, 2);
+  assert.equal(cell.children[0].textContent, "主会话");
+  assert.equal(cell.children[1].textContent, "子 agent · review");
+  assert.equal(cell.title, "主会话 · 直接父会话：中间任务");
+  const legacy = render({ session_name: "旧接口名称" });
+  assert.equal(legacy.children.length, 1);
+  assert.equal(legacy.children[0].textContent, "旧接口名称");
+  assert.equal(render({}).children[0].textContent, "未知会话");
+  const unsafe = render({ session_display_name: '<img src=x onerror=alert(1)>', session_label: '<script>evil</script>' });
+  assert.equal(unsafe.children[0].textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(unsafe.children[0].innerHTML, undefined);
+  assert.equal(unsafe.children[1].innerHTML, undefined);
+});
+
+test("modern and classic session cells share backend fields and ellipsis styles", () => {
+  const modern = fs.readFileSync(path.join(__dirname, "..", "proxy_static", "src", "components", "RequestsView.vue"), "utf8");
+  const modernStyles = fs.readFileSync(path.join(__dirname, "..", "proxy_static", "src", "styles.css"), "utf8");
+  assert.match(modern, /class="request-session-cell"/);
+  assert.match(modern, /item\.session_display_name \|\| item\.session_name \|\| '未知会话'/);
+  assert.match(modern, /v-if="item\.session_label" class="request-session-label">\{\{ item\.session_label \}\}/);
+  assert.match(modern, /item\.session_tooltip \|\|/);
+  assert.doesNotMatch(modern, /v-html/);
+  for (const styles of [stylesSource, modernStyles]) {
+    assert.match(styles, /\.request-session-cell \{[^}]*min-width: 0/);
+    assert.match(styles, /\.request-session-label \{[^}]*text-overflow: ellipsis[^}]*white-space: nowrap/);
+  }
+});
+
 test("labels running, successful, and failed request results", () => {
   assert.equal(
     context.api.requestResultLabel({ state: "running", phase: "connecting" }),
