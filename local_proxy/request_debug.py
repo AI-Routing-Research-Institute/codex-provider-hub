@@ -93,6 +93,24 @@ class RequestDebugStore:
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
 
+    def session_context_at(self, thread_id: str, started_at: float, model: str) -> dict[str, str]:
+        """Read only bounded metadata from a uniquely matched retained request."""
+        from local_proxy.session_attribution import clean_context, request_context
+
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT substr(request_headers_json, 1, 262145) FROM debug_requests "
+                "WHERE thread_id = ? AND model = ? AND started_at BETWEEN ? AND ? LIMIT 2",
+                (thread_id, model, started_at - 0.5, started_at + 0.5),
+            ).fetchall()
+        if len(rows) != 1 or not isinstance(rows[0][0], str) or len(rows[0][0]) > 262144:
+            return {}
+        try:
+            headers = json.loads(rows[0][0])
+            return clean_context(request_context(headers)) if isinstance(headers, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
     @staticmethod
     def _key(run_id: str, request_id: int) -> str:
         return f"{str(run_id)[:64]}:{int(request_id)}"

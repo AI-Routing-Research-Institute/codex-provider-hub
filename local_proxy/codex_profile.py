@@ -202,11 +202,16 @@ def build_codex_profile(
         session_provider_overrides=settings.get("session_provider_overrides", {}),
     )
     session_name_index = CodexSessionNameIndex()
-    usage_store = UsageStore(active_usage_path)
+    usage_store = UsageStore(
+        active_usage_path,
+        session_attribution_resolver=session_name_index.attribute,
+        session_search_resolver=session_name_index.matching_thread_ids,
+    )
     request_debug_store = RequestDebugStore(
         root / "codex-request-debug.sqlite3",
         service_id="codex",
     )
+    usage_store.historical_context_resolver = request_debug_store.session_context_at
     deepseek_protocol = DeepSeekDSMLProtocol()
 
     def session_catalog(since: float) -> tuple[dict[str, Any], ...]:

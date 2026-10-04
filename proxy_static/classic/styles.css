@@ -916,6 +916,8 @@ button.provider-token-cell:disabled { border-color: transparent; background: tra
 .request-duration { text-align: right; }
 .request-session, .request-model, .request-upstream-model, .request-response-model, .request-result { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .request-session { font-size: 12px; font-weight: 700; }
+.request-session-cell { display: grid; min-width: 0; gap: 3px; }
+.request-session-label { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .request-provider-cell { min-width: 0; display: grid; }
 .request-provider-actual { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .request-model { color: var(--muted); }
