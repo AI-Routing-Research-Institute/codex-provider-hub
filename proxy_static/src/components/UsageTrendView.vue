@@ -173,7 +173,7 @@ const total = ref({})
 const granularity = ref('day')
 const windowName = ref(localStorage.getItem('local-proxy-usage-trend-window') || '24h')
 const chartName = ref(normalizeChart(localStorage.getItem('local-proxy-usage-trend-chart')))
-const customRange = ref(null)
+const customRange = ref(readCustomRange())
 const metricIndex = ref(0)
 const loading = ref(false)
 const error = ref('')
@@ -189,6 +189,7 @@ let carouselTimer
 let rafId = 0
 let lastReplayAt = 0
 let reloadAfterCurrent = false
+let disposed = false
 const windowOptions = [
   { value: 'today', label: '今天' },
   { value: '24h', label: '近 24 小时' },
@@ -668,14 +669,25 @@ function changeMetric(index) {
   metricIndex.value = index
   replayEntrance()
 }
+function readCustomRange() {
+  try {
+    const range = JSON.parse(localStorage.getItem('local-proxy-usage-trend-range') || 'null')
+    if (range && Number.isFinite(range.startAt) && Number.isFinite(range.endAt) && range.startAt < range.endAt) return range
+  } catch { /* Ignore corrupt or unavailable local storage. */ }
+  return null
+}
 function changeWindow(value) {
-  if (value !== 'custom') customRange.value = null
+  if (value !== 'custom') {
+    customRange.value = null
+    localStorage.removeItem('local-proxy-usage-trend-range')
+  }
   localStorage.setItem('local-proxy-usage-trend-window', value)
   loadAll()
 }
 function applyCustomRange(range) {
   customRange.value = range
   windowName.value = 'custom'
+  localStorage.setItem('local-proxy-usage-trend-range', JSON.stringify(range))
   localStorage.setItem('local-proxy-usage-trend-window', 'custom')
   loadAll()
 }
@@ -705,7 +717,6 @@ async function loadTimeline() {
   }
 }
 async function loadAuxData() {
-  error.value = ''
   try {
     if (chartName.value === 'punch') {
       const payload = await controlFetch(`/api/usage-weekday-hour?${windowParams()}`)
@@ -718,12 +729,13 @@ async function loadAuxData() {
   }
 }
 async function loadAll() {
-  if (document.hidden) return
+  if (document.hidden || disposed) return
   if (loading.value) { reloadAfterCurrent = true; return }
   if (windowName.value === 'custom' && !customRange.value) return
   loading.value = true
+  error.value = ''
   await loadTimeline()
-  await loadAuxData()
+  if (!disposed) await loadAuxData()
   loading.value = false
   if (reloadAfterCurrent) { reloadAfterCurrent = false; void loadAll() }
 }
@@ -736,6 +748,8 @@ onMounted(() => {
   }, CAROUSEL_MS)
 })
 onBeforeUnmount(() => {
+  disposed = true
+  reloadAfterCurrent = false
   window.clearInterval(timer)
   window.clearInterval(carouselTimer)
   cancelAnimationFrame(rafId)

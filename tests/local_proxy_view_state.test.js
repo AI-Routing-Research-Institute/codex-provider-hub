@@ -28,10 +28,12 @@ test("normalizes saved console views and unavailable requests", () => {
   assert.equal(typeof context.api.normalizeViewName, "function");
   assert.equal(context.api.normalizeViewName("providers", true), "providers");
   assert.equal(context.api.normalizeViewName("requests", true), "requests");
+  assert.equal(context.api.normalizeViewName("usage", true), "usage");
   assert.equal(context.api.normalizeViewName("settings", true), "settings");
   assert.equal(context.api.normalizeViewName("runtime", true), "runtime");
   assert.equal(context.api.normalizeViewName("invalid", true), "providers");
   assert.equal(context.api.normalizeViewName("requests", false), "providers");
+  assert.equal(context.api.normalizeViewName("usage", false), "providers");
 });
 
 test("namespaces the saved view by console service", () => {
