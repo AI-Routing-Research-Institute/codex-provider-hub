@@ -17,7 +17,13 @@ export default defineConfig(({ command }) => ({
     sourcemap: false,
     minify: 'esbuild',
     rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'index.html'),
+        'classic-features': resolve(__dirname, 'src/classic-features.js')
+      },
       output: {
+        entryFileNames: chunk => chunk.name === 'classic-features' ? 'static/assets/classic-features.js' : 'static/assets/[name]-[hash].js',
+        assetFileNames: asset => asset.name === 'classic-features.css' ? 'static/assets/classic-features.css' : 'static/assets/[name]-[hash][extname]',
         manualChunks: undefined
       }
     }

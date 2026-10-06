@@ -354,9 +354,9 @@ function viewStorageKey(serviceId = uiConfig.service_id || "local") {
 }
 
 function normalizeViewName(viewName, requestsEnabled = true) {
-  const allowed = ["providers", "requests", "settings", "runtime", "monitor"];
+  const allowed = ["providers", "requests", "usage", "settings", "runtime", "monitor"];
   if (!allowed.includes(viewName)) return "providers";
-  return viewName === "requests" && !requestsEnabled ? "providers" : viewName;
+  return ["requests", "usage"].includes(viewName) && !requestsEnabled ? "providers" : viewName;
 }
 
 function renderProviderManagementState() {
@@ -415,6 +415,9 @@ function applyUiConfig(config) {
     "hidden",
     uiConfig.features.usage_history === false,
   );
+  document.querySelector('[data-view="usage"]')?.toggleAttribute("hidden", uiConfig.features.usage_history === false);
+  document.querySelector("#usage-share-button")?.toggleAttribute("hidden", uiConfig.features.usage_history === false);
+  window.dispatchEvent(new CustomEvent("local-proxy:classic-view-change"));
   if (typeof sessionRouteSettingsButton !== "undefined" && sessionRouteSettingsButton) {
     sessionRouteSettingsButton.toggleAttribute(
       "hidden",
@@ -1819,6 +1822,7 @@ function switchView(viewName, { persist = true } = {}) {
   }
   document.querySelector("#providers-view").hidden = viewName !== "providers";
   document.querySelector("#requests-view").hidden = viewName !== "requests";
+  document.querySelector("#classic-usage-view").hidden = viewName !== "usage";
   document.querySelector("#settings-view").hidden = viewName !== "settings";
   document.querySelector("#runtime-view").hidden = viewName !== "runtime";
   document.querySelector("#monitor-view").hidden = viewName !== "monitor";
@@ -1830,6 +1834,7 @@ function switchView(viewName, { persist = true } = {}) {
   }
   if (viewName === "monitor" && !monitorManagementLoading) void loadMonitorManagement();
   if (persist) persistView(viewName);
+  window.dispatchEvent(new CustomEvent("local-proxy:classic-view-change"));
 }
 
 function monitorStateLabel(state) {
@@ -2079,6 +2084,7 @@ function usageWindowLabel(value) {
     "7d": "近 7 天",
     "30d": "近 30 天",
     all: "全部",
+    custom: "自定义时间",
   }[value] || "今日";
 }
 
@@ -2898,6 +2904,13 @@ function renderProviderList() {
 
     const requestCell = document.createElement("span");
     requestCell.className = "provider-request-cell";
+    if (uiConfig.features.usage_history !== false) {
+      const requestCount = document.createElement("strong");
+      requestCount.className = "provider-request-count";
+      requestCount.textContent = `${Number(usage.request_count || 0).toLocaleString("zh-CN")} 次`;
+      requestCount.title = `${usageWindowLabel(appliedTimeWindows.usage)}已记录请求次数；活动请求单独显示`;
+      requestCell.append(requestCount);
+    }
     if (provider.active_requests > 0) {
       const active = document.createElement("button");
       active.type = "button";

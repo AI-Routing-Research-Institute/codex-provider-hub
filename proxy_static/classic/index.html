@@ -19,6 +19,7 @@
     })();
   </script>
   <link rel="stylesheet" href="./static/styles.css?v=32">
+  <link rel="stylesheet" href="./static/assets/classic-features.css">
 </head>
 <body>
   <main class="stage">
@@ -59,6 +60,7 @@
       <nav class="view-tabs" aria-label="控制台页面">
         <button class="view-tab active" type="button" data-view="providers" aria-selected="true">供应商</button>
         <button class="view-tab" type="button" data-view="requests" aria-selected="false">请求 <span id="request-tab-count" class="view-tab-count" hidden>0</span></button>
+        <button class="view-tab" type="button" data-view="usage" aria-selected="false">用量趋势</button>
         <button class="view-tab" type="button" data-view="settings" aria-selected="false">重试设置</button>
         <button class="view-tab" type="button" data-view="runtime" aria-selected="false">运行设置</button>
         <button class="view-tab" type="button" data-view="monitor" aria-selected="false">监控管理</button>
@@ -119,11 +121,11 @@
             <div class="usage-metric"><span>输入</span><strong id="usage-input">0</strong></div>
             <div class="usage-metric"><span>输出</span><strong id="usage-output">0</strong></div>
             <div class="usage-metric"><span>缓存</span><strong id="usage-cached">0</strong></div>
-            <div class="usage-estimate-wrap"><span id="usage-range-label" class="time-range-label" hidden></span><span id="usage-estimated-note" hidden>含估算请求</span></div>
+            <div class="usage-estimate-wrap"><span id="usage-range-label" class="time-range-label" hidden></span><span id="usage-estimated-note" hidden>含估算请求</span><button id="usage-share-button" class="secondary-button usage-share-button" type="button" title="生成今日 00:00 至现在的 Token 战报，不跟随当前统计范围" aria-haspopup="dialog" disabled>今日战报</button></div>
           </div>
           <div class="provider-list-shell">
             <div class="manage-hint" id="manage-hint" hidden>拖动左侧手柄调整顺序；搜索时暂停拖动。隐藏的供应商仅在管理模式显示。</div>
-            <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>请求</span><span>服务器检测</span><span>Token 用量</span><span id="provider-meta-header">认证</span></div>
+            <div class="list-header" aria-hidden="true"><span>状态</span><span>名称和地址</span><span>请求次数</span><span>服务器检测</span><span>Token 用量</span><span id="provider-meta-header">认证</span></div>
             <div id="provider-list" class="provider-list" aria-live="polite"></div>
             <div id="empty-state" class="empty-state" hidden>没有匹配的供应商</div>
           </div>
@@ -156,6 +158,8 @@
           <div id="draining" class="draining"><strong>没有旧请求正在处理</strong><span>切换不会中断已经开始的流式响应。</span></div>
         </aside>
       </div>
+
+      <section id="classic-usage-view" class="classic-feature-surface view-panel" aria-label="用量趋势" hidden><p class="classic-feature-loading" role="status">正在加载用量趋势…若长时间未显示，请确认已执行前端构建后刷新页面。</p></section>
 
       <section id="requests-view" class="requests-view view-panel" aria-labelledby="requests-title" hidden>
         <div class="requests-heading">
@@ -483,6 +487,8 @@
     </div>
   </div>
 
-  <script src="./static/app.js?v=37" defer></script>
+  <div id="classic-features-host" class="classic-feature-surface"></div>
+  <script src="./static/app.js?v=38" defer></script>
+  <script type="module" src="./static/assets/classic-features.js"></script>
 </body>
 </html>

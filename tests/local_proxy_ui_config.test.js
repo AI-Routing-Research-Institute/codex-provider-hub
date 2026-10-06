@@ -31,13 +31,19 @@ test("applies service-specific UI configuration to the shared page", () => {
     ".console-link", "#proxy-url", "#wire-api", "#runtime-config-label",
     "#runtime-config-hint", "#runtime-port-hint", "#runtime-restart-notice",
     "#copy-config", "#footer-message", "#usage-history-popover",
+    '[data-view="usage"]', '#usage-share-button',
   ];
   const elements = Object.fromEntries(selectors.map((selector) => [selector, element()]));
   const document = {
     title: "",
     querySelector(selector) { return elements[selector] || null; },
   };
-  const context = vm.createContext({ document });
+  const dispatched = [];
+  const context = vm.createContext({
+    document,
+    window: { dispatchEvent(event) { dispatched.push(event.type); } },
+    CustomEvent: class { constructor(type) { this.type = type; } },
+  });
   vm.runInContext(
     `let themeStorageKey = "local-proxy-theme";
      let uiConfig = { features: { usage_history: true } };
@@ -66,6 +72,13 @@ test("applies service-specific UI configuration to the shared page", () => {
   assert.equal(elements[".console-link"].href, "http://127.0.0.1:19000/control/");
   assert.equal(elements["#copy-config"].textContent, "复制 Claude 配置");
   assert.equal(elements["#usage-history-popover"].attributes.hidden, false);
+  assert.equal(elements['[data-view="usage"]'].attributes.hidden, false);
+  assert.equal(elements['#usage-share-button'].attributes.hidden, false);
+  assert.deepEqual(dispatched, ['local-proxy:classic-view-change']);
+  context.api.applyUiConfig({ features: { usage_history: false } });
+  assert.equal(elements['[data-view="usage"]'].attributes.hidden, true);
+  assert.equal(elements['#usage-share-button'].attributes.hidden, true);
+  assert.deepEqual(dispatched, ['local-proxy:classic-view-change', 'local-proxy:classic-view-change']);
   assert.equal(source.includes("copyProviderCommand"), true);
   assert.equal(source.includes("launch-command"), true);
 });

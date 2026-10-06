@@ -635,7 +635,7 @@ test("modern toasts open at the top center without moving classic toasts", () =>
   assert.match(classicSource, /tone === "error" \? "M12 7v6m0 4h\.01" : "m6\.5 12\.5 3\.5 3\.5 7\.5-8"/);
   assert.doesNotMatch(classicSource, /icon\.textContent = tone === "error"/);
   assert.match(classicHtml, /styles\.css\?v=32/);
-  assert.match(classicHtml, /app\.js\?v=37/);
+  assert.match(classicHtml, /app\.js\?v=38/);
   assert.doesNotMatch(classicStyles, /\.toast-region\s*\{[^}]*top:/s);
 });
 

@@ -388,7 +388,8 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .usage-metric span { color: var(--muted); font-size: 10px; }
 .usage-metric strong { margin-top: 3px; color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
 .usage-metric.total strong { color: var(--teal); font-size: 20px; }
-.usage-estimate-wrap { display: flex; justify-content: flex-end; }
+.usage-estimate-wrap { display: flex; flex-direction: column; align-items: flex-end; justify-content: flex-end; gap: 5px; }
+.usage-share-button { min-height: 30px; padding: 4px 10px; white-space: nowrap; }
 #usage-estimated-note { color: var(--amber); font-size: 10px; text-align: right; }
 .provider-list-shell {
   --provider-grid-columns: 82px minmax(160px, 240px) 92px minmax(220px, 1fr) 112px 136px;
@@ -527,7 +528,8 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .monitor-controls button:hover { border-color: var(--hover-border); }
 @media (max-width: 680px) { .monitor-row { grid-template-columns: 1fr; } .monitor-controls { justify-content: flex-start; } }
 .provider-copy code { display: block; margin-top: 5px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.provider-request-cell { min-width: 0; display: grid; place-items: center; padding-inline: 8px; }
+.provider-request-cell { min-width: 0; display: grid; place-items: center; gap: 5px; padding-inline: 8px; }
+.provider-request-count { color: var(--text); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .provider-request-empty { color: var(--muted); font-size: 11px; }
 .provider-health-cell {
   min-width: 0;
@@ -1195,7 +1197,7 @@ a.secondary-button.setting-action-button { display: inline-flex; align-items: ce
   .usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; padding-block: 12px; }
   .usage-metric { padding-inline: 12px 0; }
   .usage-metric:nth-child(odd) { padding-left: 0; border-left: 0; }
-  .usage-estimate-wrap { grid-column: 1 / -1; justify-content: flex-start; }
+  .usage-estimate-wrap { grid-column: 1 / -1; align-items: flex-start; justify-content: flex-start; }
   #usage-estimated-note { text-align: left; }
   .footer { align-items: flex-start; flex-direction: column; gap: 7px; padding-inline: 14px; }
   .footer-actions { width: 100%; justify-content: space-between; }

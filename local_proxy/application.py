@@ -227,6 +227,8 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
         "classic/app.js",
         "classic/styles.css",
         "dist/index.html",
+        "dist/static/assets/classic-features.js",
+        "dist/static/assets/classic-features.css",
     )
     missing_assets = [
         name for name in required_assets if not (CONTROL_ASSET_DIR / name).is_file()
@@ -273,7 +275,9 @@ def smoke_test(database: Path = DEFAULT_DATABASE) -> dict[str, Any]:
             "codex": "/v1/*",
             "claude": ["/v1/messages", "/v1/messages/count_tokens"],
         },
-        "control_asset_count": len(required_assets) + len(modern_javascript) + len(modern_styles),
+        "control_asset_count": len(set(required_assets) | {
+            f"dist/static/assets/{asset.name}" for asset in (*modern_javascript, *modern_styles)
+        }),
         "control_ui_modes": ["classic", "modern"],
         "claude_provider_count": len(claude_providers),
         "claude_compatible_provider_count": sum(
