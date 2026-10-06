@@ -75,8 +75,8 @@ status = "verified"
 - `rg --files -g '*.js'` 列出仓库 32 个 JS 文件，对每个执行 `node --check`：全部通过；`git diff --check`：通过。
 - `verify_ruleset('AI-Routing-Research-Institute/codex-provider-hub', token=...)`：只读核验 `agent-delivery-main`（21697881）通过；token 未输出或持久化。
 - `npm ci` 报告依赖安全提示 5 项（1 moderate、4 high），本轮未改依赖或锁文件，不进行越范围升级。
-- commit/rebase 后由 pre-push hook 针对准确 HEAD 再次完整验证，验证证据与最终 head SHA 见 PR。
+- `git fetch origin main`、`git rebase origin/main`：同步并确认分支基于最新主线；`git push --set-upstream origin feat/classic-usage-features` 的 pre-push hook 针对准确 HEAD `877a7f73665c2d8abc8edc08efc934f9d0d2aaf4` 再次完整验证，通过且基线豁免 0 项。回填 PR URL 的文档提交仍由 hook 完整验证，最终 head SHA 与合并结果见 PR。
 
 ## PR
 
-pending
+https://github.com/AI-Routing-Research-Institute/codex-provider-hub/pull/100
